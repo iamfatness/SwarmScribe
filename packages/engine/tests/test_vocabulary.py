@@ -252,3 +252,25 @@ def test_text_path_multi_word_match_refuses_punctuation_between_tokens():
     (segment,), applied = apply_corrections([plain], [fix("jay son", "Jason")])
     assert segment is plain
     assert applied == ()
+
+
+def test_rule_with_punctuation_in_heard_beats_the_bare_rule():
+    (segment,), applied = apply_corrections(
+        [seg(" c++", " code")], [fix("c", "SEE"), fix("c++", "C++")]
+    )
+    assert segment.text == "C++ code"
+    assert applied == (AppliedCorrection(heard="c++", replacement="C++", count=1),)
+
+
+def test_heard_full_stop_rule_beats_the_bare_rule():
+    (segment,), _ = apply_corrections(
+        [seg(" dr.", " smith")], [fix("dr", "Dr"), fix("dr.", "Doctor")]
+    )
+    assert segment.text == "Doctor smith"
+
+
+def test_bare_rule_still_applies_where_the_punctuated_rule_does_not_match():
+    (segment,), _ = apply_corrections(
+        [seg(" c", " code")], [fix("c", "SEE"), fix("c++", "C++")]
+    )
+    assert segment.text == "SEE code"

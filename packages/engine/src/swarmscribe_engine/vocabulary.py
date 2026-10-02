@@ -73,11 +73,14 @@ def _compile(corrections: Sequence[Correction]) -> list[_Rule]:
         replacement = correction.replacement.strip()
         if heard and all(edges.core for edges in heard) and replacement:
             rules.append(_Rule(index=index, heard=heard, replacement=replacement))
-    # Longest first: most tokens, then most characters, then file order.
-    rules.sort(
-        key=lambda r: (-len(r.heard), -sum(len(edges.core) for edges in r.heard), r.index)
-    )
+    # Longest first: most tokens, then most characters (punctuation written in `heard`
+    # counts, so the more specific rule wins), then file order.
+    rules.sort(key=lambda r: (-len(r.heard), -sum(map(_weight, r.heard)), r.index))
     return rules
+
+
+def _weight(edges: _Edges) -> int:
+    return len(edges.prefix) + len(edges.core) + len(edges.suffix)
 
 
 def _overlap(tail: str, head: str) -> int:
@@ -156,9 +159,9 @@ def _correct_segment(segment: Segment, rules: Sequence[_Rule], counts: dict[int,
     for piece in fired:
         counts[piece.rule.index] = counts.get(piece.rule.index, 0) + 1
     if not segment.words:
-        # Whisper's segment text is the concatenation of its word tokens, so rebuilding
-        # it from the corrected pieces is equivalent to correcting the text in place.
         return replace(segment, text="".join(piece.text for piece in pieces).strip())
+    # Whisper's segment text is the concatenation of its words, so rebuilding it from
+    # the corrected words keeps text and words consistent.
     words = tuple(_merge(segment.words[piece.first : piece.last + 1], piece) for piece in pieces)
     return replace(segment, text="".join(word.word for word in words).strip(), words=words)
 

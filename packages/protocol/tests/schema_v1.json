@@ -1,0 +1,891 @@
+{
+  "Capabilities": {
+    "properties": {
+      "device": {
+        "enum": [
+          "cuda",
+          "cpu"
+        ],
+        "title": "Device",
+        "type": "string"
+      },
+      "engine_version": {
+        "title": "Engine Version",
+        "type": "string"
+      },
+      "gpu_memory_mb": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Gpu Memory Mb"
+      },
+      "gpu_name": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Gpu Name"
+      },
+      "models": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Models",
+        "type": "array"
+      },
+      "pool": {
+        "title": "Pool",
+        "type": "string"
+      }
+    },
+    "required": [
+      "device",
+      "models",
+      "engine_version",
+      "pool"
+    ],
+    "title": "Capabilities",
+    "type": "object"
+  },
+  "ClaimResponse": {
+    "$defs": {
+      "JobSettings": {
+        "description": "How a follower must transcribe. The Literal fields are fixed behaviour.",
+        "properties": {
+          "compute_type": {
+            "title": "Compute Type",
+            "type": "string"
+          },
+          "condition_on_previous_text": {
+            "const": false,
+            "default": false,
+            "title": "Condition On Previous Text",
+            "type": "boolean"
+          },
+          "language": {
+            "const": "en",
+            "default": "en",
+            "title": "Language",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "temperatures": {
+            "default": [
+              0.0,
+              0.2,
+              0.4
+            ],
+            "items": {
+              "type": "number"
+            },
+            "title": "Temperatures",
+            "type": "array"
+          },
+          "vad_filter": {
+            "const": true,
+            "default": true,
+            "title": "Vad Filter",
+            "type": "boolean"
+          },
+          "word_timestamps": {
+            "const": true,
+            "default": true,
+            "title": "Word Timestamps",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "model",
+          "compute_type"
+        ],
+        "title": "JobSettings",
+        "type": "object"
+      },
+      "Link": {
+        "description": "A short-lived, single-object URL. Identical for every storage backend.",
+        "properties": {
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Headers",
+            "type": "object"
+          },
+          "method": {
+            "enum": [
+              "GET",
+              "PUT"
+            ],
+            "title": "Method",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "method"
+        ],
+        "title": "Link",
+        "type": "object"
+      },
+      "UploadUrls": {
+        "properties": {
+          "segments_json": {
+            "$ref": "#/$defs/Link"
+          },
+          "srt": {
+            "$ref": "#/$defs/Link"
+          },
+          "txt": {
+            "$ref": "#/$defs/Link"
+          }
+        },
+        "required": [
+          "txt",
+          "srt",
+          "segments_json"
+        ],
+        "title": "UploadUrls",
+        "type": "object"
+      }
+    },
+    "properties": {
+      "download_url": {
+        "$ref": "#/$defs/Link"
+      },
+      "glossary": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Glossary",
+        "type": "array"
+      },
+      "job_id": {
+        "title": "Job Id",
+        "type": "string"
+      },
+      "lease_id": {
+        "title": "Lease Id",
+        "type": "string"
+      },
+      "settings": {
+        "$ref": "#/$defs/JobSettings"
+      },
+      "source_checksum": {
+        "title": "Source Checksum",
+        "type": "string"
+      },
+      "upload_urls": {
+        "$ref": "#/$defs/UploadUrls"
+      }
+    },
+    "required": [
+      "job_id",
+      "lease_id",
+      "download_url",
+      "upload_urls",
+      "settings",
+      "glossary",
+      "source_checksum"
+    ],
+    "title": "ClaimResponse",
+    "type": "object"
+  },
+  "FailRequest": {
+    "properties": {
+      "lease_id": {
+        "title": "Lease Id",
+        "type": "string"
+      },
+      "reason": {
+        "title": "Reason",
+        "type": "string"
+      },
+      "retryable": {
+        "title": "Retryable",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "lease_id",
+      "reason",
+      "retryable"
+    ],
+    "title": "FailRequest",
+    "type": "object"
+  },
+  "HeartbeatRequest": {
+    "properties": {
+      "lease_id": {
+        "title": "Lease Id",
+        "type": "string"
+      },
+      "progress": {
+        "anyOf": [
+          {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Progress"
+      }
+    },
+    "required": [
+      "lease_id"
+    ],
+    "title": "HeartbeatRequest",
+    "type": "object"
+  },
+  "HeartbeatResponse": {
+    "properties": {
+      "directive": {
+        "enum": [
+          "continue",
+          "cancel",
+          "drain"
+        ],
+        "title": "Directive",
+        "type": "string"
+      }
+    },
+    "required": [
+      "directive"
+    ],
+    "title": "HeartbeatResponse",
+    "type": "object"
+  },
+  "JobSettings": {
+    "description": "How a follower must transcribe. The Literal fields are fixed behaviour.",
+    "properties": {
+      "compute_type": {
+        "title": "Compute Type",
+        "type": "string"
+      },
+      "condition_on_previous_text": {
+        "const": false,
+        "default": false,
+        "title": "Condition On Previous Text",
+        "type": "boolean"
+      },
+      "language": {
+        "const": "en",
+        "default": "en",
+        "title": "Language",
+        "type": "string"
+      },
+      "model": {
+        "title": "Model",
+        "type": "string"
+      },
+      "temperatures": {
+        "default": [
+          0.0,
+          0.2,
+          0.4
+        ],
+        "items": {
+          "type": "number"
+        },
+        "title": "Temperatures",
+        "type": "array"
+      },
+      "vad_filter": {
+        "const": true,
+        "default": true,
+        "title": "Vad Filter",
+        "type": "boolean"
+      },
+      "word_timestamps": {
+        "const": true,
+        "default": true,
+        "title": "Word Timestamps",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "model",
+      "compute_type"
+    ],
+    "title": "JobSettings",
+    "type": "object"
+  },
+  "Link": {
+    "description": "A short-lived, single-object URL. Identical for every storage backend.",
+    "properties": {
+      "headers": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "title": "Headers",
+        "type": "object"
+      },
+      "method": {
+        "enum": [
+          "GET",
+          "PUT"
+        ],
+        "title": "Method",
+        "type": "string"
+      },
+      "url": {
+        "title": "Url",
+        "type": "string"
+      }
+    },
+    "required": [
+      "url",
+      "method"
+    ],
+    "title": "Link",
+    "type": "object"
+  },
+  "OutputChecksums": {
+    "properties": {
+      "segments_json": {
+        "title": "Segments Json",
+        "type": "string"
+      },
+      "srt": {
+        "title": "Srt",
+        "type": "string"
+      },
+      "txt": {
+        "title": "Txt",
+        "type": "string"
+      }
+    },
+    "required": [
+      "txt",
+      "srt",
+      "segments_json"
+    ],
+    "title": "OutputChecksums",
+    "type": "object"
+  },
+  "RegisterRequest": {
+    "$defs": {
+      "Capabilities": {
+        "properties": {
+          "device": {
+            "enum": [
+              "cuda",
+              "cpu"
+            ],
+            "title": "Device",
+            "type": "string"
+          },
+          "engine_version": {
+            "title": "Engine Version",
+            "type": "string"
+          },
+          "gpu_memory_mb": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Gpu Memory Mb"
+          },
+          "gpu_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Gpu Name"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "pool": {
+            "title": "Pool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "device",
+          "models",
+          "engine_version",
+          "pool"
+        ],
+        "title": "Capabilities",
+        "type": "object"
+      }
+    },
+    "properties": {
+      "capabilities": {
+        "$ref": "#/$defs/Capabilities"
+      },
+      "join_token": {
+        "title": "Join Token",
+        "type": "string"
+      },
+      "protocol_version": {
+        "title": "Protocol Version",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "join_token",
+      "protocol_version",
+      "capabilities"
+    ],
+    "title": "RegisterRequest",
+    "type": "object"
+  },
+  "RegisterResponse": {
+    "properties": {
+      "credential": {
+        "title": "Credential",
+        "type": "string"
+      },
+      "follower_id": {
+        "title": "Follower Id",
+        "type": "string"
+      },
+      "heartbeat_interval": {
+        "exclusiveMinimum": 0,
+        "title": "Heartbeat Interval",
+        "type": "integer"
+      },
+      "lease_seconds": {
+        "exclusiveMinimum": 0,
+        "title": "Lease Seconds",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "follower_id",
+      "credential",
+      "heartbeat_interval",
+      "lease_seconds"
+    ],
+    "title": "RegisterResponse",
+    "type": "object"
+  },
+  "ReleaseRequest": {
+    "properties": {
+      "lease_id": {
+        "title": "Lease Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "lease_id"
+    ],
+    "title": "ReleaseRequest",
+    "type": "object"
+  },
+  "Segment": {
+    "$defs": {
+      "Word": {
+        "properties": {
+          "end": {
+            "title": "End",
+            "type": "number"
+          },
+          "probability": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Probability",
+            "type": "number"
+          },
+          "start": {
+            "title": "Start",
+            "type": "number"
+          },
+          "word": {
+            "title": "Word",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end",
+          "word",
+          "probability"
+        ],
+        "title": "Word",
+        "type": "object"
+      }
+    },
+    "properties": {
+      "end": {
+        "title": "End",
+        "type": "number"
+      },
+      "start": {
+        "title": "Start",
+        "type": "number"
+      },
+      "text": {
+        "title": "Text",
+        "type": "string"
+      },
+      "words": {
+        "items": {
+          "$ref": "#/$defs/Word"
+        },
+        "title": "Words",
+        "type": "array"
+      }
+    },
+    "required": [
+      "start",
+      "end",
+      "text",
+      "words"
+    ],
+    "title": "Segment",
+    "type": "object"
+  },
+  "SegmentsDocument": {
+    "$defs": {
+      "JobSettings": {
+        "description": "How a follower must transcribe. The Literal fields are fixed behaviour.",
+        "properties": {
+          "compute_type": {
+            "title": "Compute Type",
+            "type": "string"
+          },
+          "condition_on_previous_text": {
+            "const": false,
+            "default": false,
+            "title": "Condition On Previous Text",
+            "type": "boolean"
+          },
+          "language": {
+            "const": "en",
+            "default": "en",
+            "title": "Language",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "temperatures": {
+            "default": [
+              0.0,
+              0.2,
+              0.4
+            ],
+            "items": {
+              "type": "number"
+            },
+            "title": "Temperatures",
+            "type": "array"
+          },
+          "vad_filter": {
+            "const": true,
+            "default": true,
+            "title": "Vad Filter",
+            "type": "boolean"
+          },
+          "word_timestamps": {
+            "const": true,
+            "default": true,
+            "title": "Word Timestamps",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "model",
+          "compute_type"
+        ],
+        "title": "JobSettings",
+        "type": "object"
+      },
+      "Segment": {
+        "properties": {
+          "end": {
+            "title": "End",
+            "type": "number"
+          },
+          "start": {
+            "title": "Start",
+            "type": "number"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "words": {
+            "items": {
+              "$ref": "#/$defs/Word"
+            },
+            "title": "Words",
+            "type": "array"
+          }
+        },
+        "required": [
+          "start",
+          "end",
+          "text",
+          "words"
+        ],
+        "title": "Segment",
+        "type": "object"
+      },
+      "Word": {
+        "properties": {
+          "end": {
+            "title": "End",
+            "type": "number"
+          },
+          "probability": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Probability",
+            "type": "number"
+          },
+          "start": {
+            "title": "Start",
+            "type": "number"
+          },
+          "word": {
+            "title": "Word",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end",
+          "word",
+          "probability"
+        ],
+        "title": "Word",
+        "type": "object"
+      }
+    },
+    "description": "The contents of <name>.segments.json.",
+    "properties": {
+      "device": {
+        "enum": [
+          "cuda",
+          "cpu"
+        ],
+        "title": "Device",
+        "type": "string"
+      },
+      "duration": {
+        "minimum": 0.0,
+        "title": "Duration",
+        "type": "number"
+      },
+      "engine_version": {
+        "title": "Engine Version",
+        "type": "string"
+      },
+      "glossary": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Glossary",
+        "type": "array"
+      },
+      "schema_version": {
+        "const": 1,
+        "title": "Schema Version",
+        "type": "integer"
+      },
+      "segments": {
+        "items": {
+          "$ref": "#/$defs/Segment"
+        },
+        "title": "Segments",
+        "type": "array"
+      },
+      "settings": {
+        "$ref": "#/$defs/JobSettings"
+      },
+      "source_checksum": {
+        "title": "Source Checksum",
+        "type": "string"
+      }
+    },
+    "required": [
+      "schema_version",
+      "source_checksum",
+      "duration",
+      "device",
+      "engine_version",
+      "settings",
+      "glossary",
+      "segments"
+    ],
+    "title": "SegmentsDocument",
+    "type": "object"
+  },
+  "SubmitRequest": {
+    "$defs": {
+      "OutputChecksums": {
+        "properties": {
+          "segments_json": {
+            "title": "Segments Json",
+            "type": "string"
+          },
+          "srt": {
+            "title": "Srt",
+            "type": "string"
+          },
+          "txt": {
+            "title": "Txt",
+            "type": "string"
+          }
+        },
+        "required": [
+          "txt",
+          "srt",
+          "segments_json"
+        ],
+        "title": "OutputChecksums",
+        "type": "object"
+      }
+    },
+    "properties": {
+      "checksums": {
+        "$ref": "#/$defs/OutputChecksums"
+      },
+      "lease_id": {
+        "title": "Lease Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "lease_id",
+      "checksums"
+    ],
+    "title": "SubmitRequest",
+    "type": "object"
+  },
+  "SubmitResponse": {
+    "properties": {
+      "accepted": {
+        "title": "Accepted",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "accepted"
+    ],
+    "title": "SubmitResponse",
+    "type": "object"
+  },
+  "UploadUrls": {
+    "$defs": {
+      "Link": {
+        "description": "A short-lived, single-object URL. Identical for every storage backend.",
+        "properties": {
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Headers",
+            "type": "object"
+          },
+          "method": {
+            "enum": [
+              "GET",
+              "PUT"
+            ],
+            "title": "Method",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "method"
+        ],
+        "title": "Link",
+        "type": "object"
+      }
+    },
+    "properties": {
+      "segments_json": {
+        "$ref": "#/$defs/Link"
+      },
+      "srt": {
+        "$ref": "#/$defs/Link"
+      },
+      "txt": {
+        "$ref": "#/$defs/Link"
+      }
+    },
+    "required": [
+      "txt",
+      "srt",
+      "segments_json"
+    ],
+    "title": "UploadUrls",
+    "type": "object"
+  },
+  "Word": {
+    "properties": {
+      "end": {
+        "title": "End",
+        "type": "number"
+      },
+      "probability": {
+        "maximum": 1.0,
+        "minimum": 0.0,
+        "title": "Probability",
+        "type": "number"
+      },
+      "start": {
+        "title": "Start",
+        "type": "number"
+      },
+      "word": {
+        "title": "Word",
+        "type": "string"
+      }
+    },
+    "required": [
+      "start",
+      "end",
+      "word",
+      "probability"
+    ],
+    "title": "Word",
+    "type": "object"
+  }
+}

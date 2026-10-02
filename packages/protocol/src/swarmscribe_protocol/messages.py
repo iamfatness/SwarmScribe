@@ -4,6 +4,7 @@ from pydantic import Field
 
 from .base import WireModel
 from .segments import Device, JobSettings
+from .vocabulary import Vocabulary
 
 Directive = Literal["continue", "cancel", "drain"]
 
@@ -50,7 +51,7 @@ class ClaimResponse(WireModel):
     download_url: Link
     upload_urls: UploadUrls
     settings: JobSettings
-    glossary: list[str]
+    vocabulary: Vocabulary
     source_checksum: str
 
 

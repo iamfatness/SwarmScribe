@@ -4,7 +4,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import messages, segments
+from . import messages, segments, vocabulary
 from .base import WireModel
 
 MODELS: tuple[type[WireModel], ...] = (
@@ -12,6 +12,9 @@ MODELS: tuple[type[WireModel], ...] = (
     segments.Word,
     segments.Segment,
     segments.SegmentsDocument,
+    vocabulary.Correction,
+    vocabulary.Vocabulary,
+    vocabulary.AppliedCorrection,
     messages.Link,
     messages.Capabilities,
     messages.RegisterRequest,

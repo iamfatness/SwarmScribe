@@ -3,6 +3,7 @@ from pydantic import ValidationError
 from swarmscribe_protocol import (
     Capabilities,
     ClaimResponse,
+    Correction,
     FailRequest,
     HeartbeatRequest,
     HeartbeatResponse,
@@ -15,6 +16,7 @@ from swarmscribe_protocol import (
     SubmitRequest,
     SubmitResponse,
     UploadUrls,
+    Vocabulary,
 )
 
 
@@ -29,7 +31,11 @@ def _claim():
         download_url=_link(),
         upload_urls=UploadUrls(txt=_link("PUT"), srt=_link("PUT"), segments_json=_link("PUT")),
         settings=JobSettings(model="large-v3", compute_type="float16"),
-        glossary=["Ashford"],
+        vocabulary=Vocabulary(
+            version=2,
+            terms=["Ashford"],
+            corrections=[Correction(heard="ash ford", replacement="Ashford")],
+        ),
         source_checksum="a" * 64,
     )
 
@@ -116,3 +122,10 @@ def test_register_response_timings_must_be_positive(field):
 
 def test_claim_carries_the_fixed_settings():
     assert _claim().settings.condition_on_previous_text is False
+
+
+def test_claim_carries_the_vocabulary_and_no_glossary():
+    claim = _claim()
+    assert claim.vocabulary.version == 2
+    assert claim.vocabulary.corrections[0].replacement == "Ashford"
+    assert "glossary" not in ClaimResponse.model_fields

@@ -1,4 +1,29 @@
 {
+  "AppliedCorrection": {
+    "description": "A correction that fired in one recording, and how many times.",
+    "properties": {
+      "count": {
+        "minimum": 1,
+        "title": "Count",
+        "type": "integer"
+      },
+      "heard": {
+        "title": "Heard",
+        "type": "string"
+      },
+      "replacement": {
+        "title": "Replacement",
+        "type": "string"
+      }
+    },
+    "required": [
+      "heard",
+      "replacement",
+      "count"
+    ],
+    "title": "AppliedCorrection",
+    "type": "object"
+  },
   "Capabilities": {
     "properties": {
       "device": {
@@ -60,6 +85,27 @@
   },
   "ClaimResponse": {
     "$defs": {
+      "Correction": {
+        "description": "A fix applied after transcription: text heard as `heard` becomes `replacement`.",
+        "properties": {
+          "heard": {
+            "minLength": 1,
+            "title": "Heard",
+            "type": "string"
+          },
+          "replacement": {
+            "minLength": 1,
+            "title": "Replacement",
+            "type": "string"
+          }
+        },
+        "required": [
+          "heard",
+          "replacement"
+        ],
+        "title": "Correction",
+        "type": "object"
+      },
       "JobSettings": {
         "description": "How a follower must transcribe. The Literal fields are fixed behaviour.",
         "properties": {
@@ -164,18 +210,40 @@
         ],
         "title": "UploadUrls",
         "type": "object"
+      },
+      "Vocabulary": {
+        "description": "Words to recognise and fixes to apply. Version 0 means no vocabulary.",
+        "properties": {
+          "corrections": {
+            "items": {
+              "$ref": "#/$defs/Correction"
+            },
+            "title": "Corrections",
+            "type": "array"
+          },
+          "terms": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Terms",
+            "type": "array"
+          },
+          "version": {
+            "minimum": 0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version"
+        ],
+        "title": "Vocabulary",
+        "type": "object"
       }
     },
     "properties": {
       "download_url": {
         "$ref": "#/$defs/Link"
-      },
-      "glossary": {
-        "items": {
-          "type": "string"
-        },
-        "title": "Glossary",
-        "type": "array"
       },
       "job_id": {
         "title": "Job Id",
@@ -194,6 +262,9 @@
       },
       "upload_urls": {
         "$ref": "#/$defs/UploadUrls"
+      },
+      "vocabulary": {
+        "$ref": "#/$defs/Vocabulary"
       }
     },
     "required": [
@@ -202,10 +273,31 @@
       "download_url",
       "upload_urls",
       "settings",
-      "glossary",
+      "vocabulary",
       "source_checksum"
     ],
     "title": "ClaimResponse",
+    "type": "object"
+  },
+  "Correction": {
+    "description": "A fix applied after transcription: text heard as `heard` becomes `replacement`.",
+    "properties": {
+      "heard": {
+        "minLength": 1,
+        "title": "Heard",
+        "type": "string"
+      },
+      "replacement": {
+        "minLength": 1,
+        "title": "Replacement",
+        "type": "string"
+      }
+    },
+    "required": [
+      "heard",
+      "replacement"
+    ],
+    "title": "Correction",
     "type": "object"
   },
   "FailRequest": {
@@ -856,6 +948,58 @@
       "segments_json"
     ],
     "title": "UploadUrls",
+    "type": "object"
+  },
+  "Vocabulary": {
+    "$defs": {
+      "Correction": {
+        "description": "A fix applied after transcription: text heard as `heard` becomes `replacement`.",
+        "properties": {
+          "heard": {
+            "minLength": 1,
+            "title": "Heard",
+            "type": "string"
+          },
+          "replacement": {
+            "minLength": 1,
+            "title": "Replacement",
+            "type": "string"
+          }
+        },
+        "required": [
+          "heard",
+          "replacement"
+        ],
+        "title": "Correction",
+        "type": "object"
+      }
+    },
+    "description": "Words to recognise and fixes to apply. Version 0 means no vocabulary.",
+    "properties": {
+      "corrections": {
+        "items": {
+          "$ref": "#/$defs/Correction"
+        },
+        "title": "Corrections",
+        "type": "array"
+      },
+      "terms": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Terms",
+        "type": "array"
+      },
+      "version": {
+        "minimum": 0,
+        "title": "Version",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "version"
+    ],
+    "title": "Vocabulary",
     "type": "object"
   },
   "Word": {

@@ -15,14 +15,17 @@ from .messages import (
     UploadUrls,
 )
 from .segments import MAX_TEMPERATURE, Device, JobSettings, Segment, SegmentsDocument, Word
+from .vocabulary import AppliedCorrection, Correction, Vocabulary
 
 PROTOCOL_VERSION = 1
 
 __all__ = [
     "MAX_TEMPERATURE",
     "PROTOCOL_VERSION",
+    "AppliedCorrection",
     "Capabilities",
     "ClaimResponse",
+    "Correction",
     "Device",
     "Directive",
     "FailRequest",
@@ -39,5 +42,6 @@ __all__ = [
     "SubmitRequest",
     "SubmitResponse",
     "UploadUrls",
+    "Vocabulary",
     "Word",
 ]

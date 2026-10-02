@@ -41,10 +41,16 @@ def build_hotwords(terms_used: Sequence[str]) -> str | None:
     return _SEPARATOR.join(terms_used) if terms_used else None
 
 
+class _Edges(NamedTuple):
+    prefix: str
+    core: str  # case-folded
+    suffix: str
+
+
 @dataclass(frozen=True)
 class _Rule:
     index: int
-    cores: tuple[str, ...]
+    heard: tuple[_Edges, ...]
     replacement: str
 
 
@@ -55,38 +61,69 @@ class _Piece(NamedTuple):
     rule: _Rule | None
 
 
-def _split(token: str) -> tuple[str, str, str]:
+def _split(token: str) -> _Edges:
     prefix, core, suffix = _EDGES.match(token).groups()
-    return prefix, core, suffix
-
-
-def _core(token: str) -> str:
-    return _split(token)[1].casefold()
+    return _Edges(prefix, core.casefold(), suffix)
 
 
 def _compile(corrections: Sequence[Correction]) -> list[_Rule]:
     rules = []
     for index, correction in enumerate(corrections):
-        cores = tuple(core for core in map(_core, correction.heard.split()) if core)
+        heard = tuple(map(_split, correction.heard.split()))
         replacement = correction.replacement.strip()
-        if cores and replacement:
-            rules.append(_Rule(index=index, cores=cores, replacement=replacement))
+        if heard and all(edges.core for edges in heard) and replacement:
+            rules.append(_Rule(index=index, heard=heard, replacement=replacement))
     # Longest first: most tokens, then most characters, then file order.
-    rules.sort(key=lambda r: (-len(r.cores), -sum(map(len, r.cores)), r.index))
+    rules.sort(
+        key=lambda r: (-len(r.heard), -sum(len(edges.core) for edges in r.heard), r.index)
+    )
     return rules
 
 
+def _overlap(tail: str, head: str) -> int:
+    """Length of the longest suffix of `tail` that is also a prefix of `head`."""
+    for k in range(min(len(tail), len(head)), 0, -1):
+        if tail[-k:] == head[:k]:
+            return k
+    return 0
+
+
+def _rewrite(tokens: Sequence[_Edges], first: int, rule: _Rule) -> str | None:
+    """Replacement text for `rule` matching at `first`, or None when it does not match."""
+    last = first + len(rule.heard) - 1
+    if last >= len(tokens):
+        return None
+    remaining: list[tuple[str, str]] = []
+    for token, heard in zip(tokens[first : last + 1], rule.heard, strict=True):
+        if token.core != heard.core:
+            return None
+        if not (token.prefix.endswith(heard.prefix) and token.suffix.startswith(heard.suffix)):
+            return None
+        kept_prefix = token.prefix[: len(token.prefix) - len(heard.prefix)]
+        remaining.append((kept_prefix, token.suffix[len(heard.suffix) :]))
+    # Between the tokens of a multi-word match only whitespace may sit.
+    if any(suffix for _, suffix in remaining[:-1]):
+        return None
+    if any(prefix.strip() for prefix, _ in remaining[1:]):
+        return None
+    prefix, suffix = remaining[0][0], remaining[-1][1]
+    written_prefix, _, written_suffix = _EDGES.match(rule.replacement).groups()
+    prefix = prefix[: len(prefix) - _overlap(prefix, written_prefix)]
+    suffix = suffix[_overlap(written_suffix, suffix) :]
+    return prefix + rule.replacement + suffix
+
+
 def _correct(tokens: Sequence[str], rules: Sequence[_Rule]) -> list[_Piece]:
-    cores = [_core(token) for token in tokens]
+    edges = [_split(token) for token in tokens]
     pieces: list[_Piece] = []
     i = 0
     while i < len(tokens):
         piece = _Piece(first=i, last=i, text=tokens[i], rule=None)
         for rule in rules:
-            last = i + len(rule.cores) - 1
-            if tuple(cores[i : last + 1]) != rule.cores:
+            text = _rewrite(edges, i, rule)
+            if text is None:
                 continue
-            text = _split(tokens[i])[0] + rule.replacement + _split(tokens[last])[2]
+            last = i + len(rule.heard) - 1
             if text != "".join(tokens[i : last + 1]):
                 piece = _Piece(first=i, last=last, text=text, rule=rule)
                 break
@@ -119,6 +156,8 @@ def _correct_segment(segment: Segment, rules: Sequence[_Rule], counts: dict[int,
     for piece in fired:
         counts[piece.rule.index] = counts.get(piece.rule.index, 0) + 1
     if not segment.words:
+        # Whisper's segment text is the concatenation of its word tokens, so rebuilding
+        # it from the corrected pieces is equivalent to correcting the text in place.
         return replace(segment, text="".join(piece.text for piece in pieces).strip())
     words = tuple(_merge(segment.words[piece.first : piece.last + 1], piece) for piece in pieces)
     return replace(segment, text="".join(word.word for word in words).strip(), words=words)

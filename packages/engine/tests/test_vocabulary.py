@@ -196,3 +196,59 @@ def test_rules_with_nothing_to_match_or_nothing_to_write_are_ignored(rule):
     (segment,), applied = apply_corrections([original], [rule])
     assert segment is original
     assert applied == ()
+
+
+# --- punctuation at match edges (fix round 1) ------------------------------
+
+
+def words_of(segment):
+    return [word.word for word in segment.words]
+
+
+@pytest.mark.parametrize(
+    ("tokens", "heard", "replacement", "expected_text", "expected_words"),
+    [
+        # F1: punctuation in `heard` is required and consumed
+        ((" c++", " is"), "c++", "C++", "C++ is", [" C++", " is"]),
+        ((" see", " c", " code"), "c++", "C++", "see c code", None),
+        ((" $100",), "$100", "one hundred dollars",
+         "one hundred dollars", [" one hundred dollars"]),
+        ((" dr.", " smith"), "dr.", "Doctor", "Doctor smith", [" Doctor", " smith"]),
+        ((" dr", " smith"), "dr.", "Doctor", "dr smith", None),
+        ((" c++,",), "c++", "C++", "C++,", [" C++,"]),
+        # F2: no duplicated punctuation from the replacement
+        ((" dr.", " smith"), "dr", "Dr.", "Dr. smith", [" Dr.", " smith"]),
+        ((" dr", " smith"), "dr", "Dr.", "Dr. smith", [" Dr.", " smith"]),
+        ((" mister.",), "mister", "Mr.", "Mr.", [" Mr."]),
+        ((" mister,",), "mister", "Mr.", "Mr.,", [" Mr.,"]),
+        ((' "ashferd!"',), "ashferd", "Ashford", '"Ashford!"', [' "Ashford!"']),
+        # F3: only whitespace between the tokens of a multi-word match
+        ((" saw", " jay.", " Son,", " come"), "jay son", "Jason", "saw jay. Son, come", None),
+        ((" jay", "-son"), "jay son", "Jason", "jay-son", None),
+        ((" jay,", " son"), "jay son", "Jason", "jay, son", None),
+        ((" jay", " son,", " hello"), "jay son", "Jason", "Jason, hello", [" Jason,", " hello"]),
+        ((" (jay", " son)"), "jay son", "Jason", "(Jason)", [" (Jason)"]),
+    ],
+)
+def test_punctuation_at_match_edges(tokens, heard, replacement, expected_text, expected_words):
+    original = seg(*tokens)
+    (segment,), _ = apply_corrections([original], [fix(heard, replacement)])
+    assert segment.text == expected_text
+    if expected_words is None:
+        assert segment is original
+    else:
+        assert words_of(segment) == expected_words
+
+
+def test_text_path_consumes_punctuation_written_in_heard():
+    plain = Segment(start=0.0, end=2.0, text="we use c++ daily", words=())
+    (segment,), applied = apply_corrections([plain], [fix("c++", "C++")])
+    assert segment.text == "we use C++ daily"
+    assert applied[0].count == 1
+
+
+def test_text_path_multi_word_match_refuses_punctuation_between_tokens():
+    plain = Segment(start=0.0, end=2.0, text="saw jay. Son, come", words=())
+    (segment,), applied = apply_corrections([plain], [fix("jay son", "Jason")])
+    assert segment is plain
+    assert applied == ()

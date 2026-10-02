@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal
 
 Device = Literal["cuda", "cpu"]
@@ -8,6 +9,16 @@ DevicePreference = Literal["auto", "cuda", "cpu"]
 LANGUAGE = "en"
 DEFAULT_TEMPERATURES: tuple[float, ...] = (0.0, 0.2, 0.4)
 MAX_TEMPERATURE = 0.4
+
+# Passed to the model on every call and recorded in segments.json. Not configurable.
+FIXED_SETTINGS = MappingProxyType(
+    {
+        "language": LANGUAGE,
+        "condition_on_previous_text": False,
+        "vad_filter": True,
+        "word_timestamps": True,
+    }
+)
 
 
 class EngineError(Exception):
@@ -30,6 +41,7 @@ class TranscribeSettings:
     temperatures: tuple[float, ...] = DEFAULT_TEMPERATURES
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "temperatures", tuple(self.temperatures))
         if not self.temperatures:
             raise ValueError("temperatures must not be empty")
         if any(not (0.0 <= t <= MAX_TEMPERATURE) for t in self.temperatures):
@@ -42,6 +54,7 @@ class Word:
     end: float
     word: str
     probability: float
+    original: str | None = None
 
 
 @dataclass(frozen=True)
@@ -50,6 +63,31 @@ class Segment:
     end: float
     text: str
     words: tuple[Word, ...]
+
+
+@dataclass(frozen=True)
+class Correction:
+    heard: str
+    replacement: str
+
+
+@dataclass(frozen=True)
+class Vocabulary:
+    """Words to recognise and fixes to apply. Version 0 means no vocabulary."""
+
+    version: int = 0
+    terms: tuple[str, ...] = ()
+    corrections: tuple[Correction, ...] = ()
+
+
+EMPTY_VOCABULARY = Vocabulary()
+
+
+@dataclass(frozen=True)
+class AppliedCorrection:
+    heard: str
+    replacement: str
+    count: int
 
 
 @dataclass(frozen=True)

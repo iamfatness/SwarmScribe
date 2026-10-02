@@ -2,8 +2,12 @@ from .device import resolve_device
 from .transcriber import Transcriber, transcribe
 from .types import (
     DEFAULT_TEMPERATURES,
+    EMPTY_VOCABULARY,
+    FIXED_SETTINGS,
     LANGUAGE,
     MAX_TEMPERATURE,
+    AppliedCorrection,
+    Correction,
     Device,
     DeviceChoice,
     DevicePreference,
@@ -14,6 +18,7 @@ from .types import (
     TranscribeSettings,
     Transcript,
     UndecodableAudioError,
+    Vocabulary,
     Word,
 )
 from .version import ENGINE_VERSION
@@ -21,9 +26,13 @@ from .writers import write_outputs
 
 __all__ = [
     "DEFAULT_TEMPERATURES",
+    "EMPTY_VOCABULARY",
     "ENGINE_VERSION",
+    "FIXED_SETTINGS",
     "LANGUAGE",
     "MAX_TEMPERATURE",
+    "AppliedCorrection",
+    "Correction",
     "Device",
     "DeviceChoice",
     "DevicePreference",
@@ -35,6 +44,7 @@ __all__ = [
     "Transcript",
     "TranscribeSettings",
     "UndecodableAudioError",
+    "Vocabulary",
     "Word",
     "resolve_device",
     "transcribe",

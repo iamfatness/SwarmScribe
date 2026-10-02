@@ -55,3 +55,11 @@ def test_settings_are_immutable_and_hashable():
     assert hash(settings) == hash(
         TranscribeSettings(model="large-v3", compute_type="float16", device="cuda")
     )
+
+
+def test_a_list_ladder_is_coerced_to_a_tuple_so_settings_stay_hashable():
+    settings = TranscribeSettings(
+        model="large-v3", compute_type="float16", device="cuda", temperatures=[0.0, 0.2]
+    )
+    assert settings.temperatures == (0.0, 0.2)
+    hash(settings)

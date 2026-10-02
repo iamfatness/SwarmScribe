@@ -1,0 +1,33 @@
+[project]
+name = "swarmscribe"
+version = "0.1.0"
+description = "Distributed leader/follower transcription"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+swarmscribe-protocol = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "swarmscribe-protocol",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["packages"]
+addopts = "--import-mode=importlib -m 'not smoke'"
+markers = [
+    "smoke: downloads and runs a real Whisper model; run with: uv run pytest -m smoke",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

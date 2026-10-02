@@ -3,7 +3,9 @@ name = "swarmscribe-engine"
 version = "0.1.0"
 description = "SwarmScribe single-file transcription engine"
 requires-python = ">=3.11"
-dependencies = ["faster-whisper>=1.1,<2"]
+# faster-whisper 1.2.1 passes metadata_errors= to av.open, which av 19 removed;
+# lift this bound when faster-whisper supports av 19.
+dependencies = ["faster-whisper>=1.1,<2", "av>=18,<19"]
 
 [project.scripts]
 swarmscribe-engine = "swarmscribe_engine.cli:main"

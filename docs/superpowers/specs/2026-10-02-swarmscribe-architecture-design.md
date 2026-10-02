@@ -442,22 +442,25 @@ Interface change to section 5.2:
 ```python
 transcribe(path: Path, settings: TranscribeSettings, vocabulary: Vocabulary = EMPTY) -> Transcript
 
-Vocabulary(version: int, terms: tuple[str, ...], corrections: tuple[Correction, ...])
-Correction(heard: str, replacement: str)
+Vocabulary(version: int = 0, terms: tuple[str, ...] = (), corrections: tuple[Correction, ...] = ())
+Correction(heard: str, replacement: str)   # both non-empty
 ```
 
-1. **Biasing.** Terms are given to Whisper as hotwords, which apply to every
-   window of the recording, and as the initial prompt. Whisper's prompt space
-   is limited (roughly 200 tokens), so only the leading terms that fit a fixed
-   budget are used for biasing; the rest still benefit from corrections. The
-   terms actually used for biasing are recorded.
+1. **Biasing.** Terms are given to Whisper as hotwords, which faster-whisper
+   places in the prompt of every window of the recording. The initial prompt
+   is not used: with hotwords set it would only repeat the same terms in the
+   first window. faster-whisper truncates hotwords to about 220 tokens, so the
+   engine takes leading terms, in file order, up to a fixed budget of 600
+   characters and stops at the first term that does not fit; the rest still
+   benefit from corrections. The terms actually used are recorded.
 2. **Corrections.** After transcription, each correction is applied as a
    whole-word, case-insensitive match, longest `heard` first, to segment text
    and to the word list. A correction spanning several words merges them into
    one word: start of the first, end of the last, the lowest probability of
    the group.
 3. A correction never matches inside a longer word, and corrections are not
-   re-applied to their own output.
+   re-applied to their own output. Punctuation and spacing around a match are
+   kept. Version 0 means no vocabulary.
 
 ### 16.4 What is recorded (`segments.json`, protocol)
 

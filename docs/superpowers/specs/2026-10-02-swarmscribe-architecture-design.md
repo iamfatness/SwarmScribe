@@ -33,7 +33,9 @@ Followers run as Kubernetes pods and as containers on outside machines
 
 ### Non-goals for the first release
 
-Web dashboard, speaker diarization, translation, non-English audio,
+Web dashboard, speaker diarization, translation, non-English audio (to be
+considered later; language stays a recorded setting so it can be opened up),
+model fine-tuning,
 multi-tenant organisations, a native (non-container) follower installer,
 live/streaming transcription.
 
@@ -404,3 +406,90 @@ Each step gets its own spec, plan and implementation cycle.
 
 Interfaces in sections 5, 6 and 9 are fixed by this document. Later specs
 refine internals; a change to those interfaces means revising this spec first.
+
+## 16. Vocabulary and correction loop
+
+Added 2026-10-02. Lets an operator supply specific words to recognise and
+improve recognition over time from real mistakes, without training a model.
+This section replaces the plain "glossary" wherever earlier sections mention
+it: the glossary is the vocabulary's term list.
+
+### 16.1 What the operator maintains
+
+Two UTF-8 text files in the root of a storage location, beside `consent.txt`:
+
+- `vocabulary.txt` — one word, name or phrase per line. Order is priority:
+  earlier lines are favoured when space is limited (16.3).
+- `corrections.txt` — one fix per line, `heard as => should be`
+  (for example `jay son => Jason`).
+
+Both allow blank lines and `#` comments. Either may be absent.
+
+### 16.2 Versions (leader)
+
+- The leader reads both files on ingest and on `swarmscribe-admin vocabulary
+  sync`. If the content differs from the current version, it stores a new
+  **vocabulary version**: an increasing integer, the terms, the corrections,
+  a content hash and a timestamp. Old versions are kept.
+- A claim carries the current version in full. Every completed job records
+  the version it used.
+- New table `vocabulary_versions`; `jobs` gains `vocabulary_version`.
+
+### 16.3 Applying it (engine)
+
+Interface change to section 5.2:
+
+```python
+transcribe(path: Path, settings: TranscribeSettings, vocabulary: Vocabulary = EMPTY) -> Transcript
+
+Vocabulary(version: int, terms: tuple[str, ...], corrections: tuple[Correction, ...])
+Correction(heard: str, replacement: str)
+```
+
+1. **Biasing.** Terms are given to Whisper as hotwords, which apply to every
+   window of the recording, and as the initial prompt. Whisper's prompt space
+   is limited (roughly 200 tokens), so only the leading terms that fit a fixed
+   budget are used for biasing; the rest still benefit from corrections. The
+   terms actually used for biasing are recorded.
+2. **Corrections.** After transcription, each correction is applied as a
+   whole-word, case-insensitive match, longest `heard` first, to segment text
+   and to the word list. A correction spanning several words merges them into
+   one word: start of the first, end of the last, the lowest probability of
+   the group.
+3. A correction never matches inside a longer word, and corrections are not
+   re-applied to their own output.
+
+### 16.4 What is recorded (`segments.json`, protocol)
+
+- Document: `vocabulary_version`, `vocabulary_terms_used`,
+  `corrections_applied` (each `heard`, `replacement`, `count`).
+- Word: optional `original` holding the text before correction.
+- `ClaimResponse.glossary` is replaced by `vocabulary` (version, terms,
+  corrections). The protocol has not shipped, so `PROTOCOL_VERSION` stays 1.
+
+`txt` and `srt` contain the corrected text.
+
+### 16.5 Improving it (leader, admin CLI)
+
+- `vocabulary report` — across completed recordings: lowest-confidence words
+  ranked by frequency; vocabulary terms that never appeared; how often each
+  correction fired. The leader reads this from stored `segments.json`
+  aggregates captured at submit, not by re-reading every file.
+- `vocabulary requeue` — re-queue recordings completed with an older version.
+  Options limit it to recordings affected by the change: those containing a
+  word matched by a new correction, or containing low-confidence words.
+- Nothing is added to the vocabulary automatically. A person edits the files.
+
+### 16.6 Build order
+
+- Protocol + engine part: a follow-on plan after step 1 (models, hotwords,
+  corrections module, CLI `--vocabulary` and `--corrections`).
+- Versions, report and requeue: part of the leader spec (step 2).
+
+### 16.7 Testing
+
+- Corrections: whole-word and case-insensitive matching, multi-word merge,
+  longest-first, no match inside longer words, no re-application, non-ASCII.
+- Biasing budget: terms beyond the budget are excluded and reported.
+- Smoke: the real model accepts hotwords together with the fixed settings.
+- Conformance: engine output validates against the protocol schema.

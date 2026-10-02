@@ -1,5 +1,5 @@
 import hashlib
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -14,7 +14,12 @@ from .types import (
     Vocabulary,
     Word,
 )
-from .vocabulary import apply_corrections, build_hotwords, select_bias_terms
+from .vocabulary import (
+    HOTWORDS_TOKEN_BUDGET,
+    apply_corrections,
+    build_hotwords,
+    select_bias_terms,
+)
 
 ModelFactory = Callable[[TranscribeSettings], Any]
 
@@ -76,11 +81,22 @@ class Transcriber:
         self._decode_errors = _default_decode_errors() if decode_errors is None else decode_errors
         self._model = model_factory(settings)
 
+    def _select_terms(self, terms: Sequence[str]) -> tuple[str, ...]:
+        tokenizer = getattr(self._model, "hf_tokenizer", None)
+        if tokenizer is None:
+            return select_bias_terms(terms)
+
+        def tokens(text: str) -> int:
+            # faster-whisper encodes hotwords as tokenizer.encode(" " + hotwords.strip()).
+            return len(tokenizer.encode(" " + text, add_special_tokens=False).ids)
+
+        return select_bias_terms(terms, budget=HOTWORDS_TOKEN_BUDGET, measure=tokens)
+
     def transcribe(self, path: Path, vocabulary: Vocabulary = EMPTY_VOCABULARY) -> Transcript:
         path = Path(path)
         if not path.is_file():
             raise FileNotFoundError(f"recording not found: {path}")
-        terms_used = select_bias_terms(vocabulary.terms)
+        terms_used = self._select_terms(vocabulary.terms)
         try:
             raw_segments, info = self._model.transcribe(
                 str(path),

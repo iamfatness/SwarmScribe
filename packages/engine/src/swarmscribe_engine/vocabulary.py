@@ -1,14 +1,18 @@
 """Bias-term selection and post-transcription corrections. Pure functions, no model."""
 
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import NamedTuple
 
 from .types import AppliedCorrection, Correction, Segment, Word
 
-# faster-whisper truncates hotwords to about 220 tokens; 600 characters stays inside that.
-HOTWORDS_CHAR_BUDGET = 600
+# faster-whisper truncates hotwords at 223 tokens, and rare names and acronyms cost 2-3 tokens
+# per character cluster (600 characters measured 338-397 tokens). The token budget, measured
+# with the model's own tokenizer, is the real limit; the character budget is only the
+# fallback for a model that exposes no tokenizer, set conservatively for the same reason.
+HOTWORDS_TOKEN_BUDGET = 220
+HOTWORDS_CHAR_BUDGET = 300
 
 _SEPARATOR = ", "
 # prefix of non-word characters, core, suffix of non-word characters
@@ -17,23 +21,25 @@ _TEXT_TOKENS = re.compile(r"\s*\S+")
 
 
 def select_bias_terms(
-    terms: Sequence[str], budget: int = HOTWORDS_CHAR_BUDGET
+    terms: Sequence[str],
+    budget: int = HOTWORDS_CHAR_BUDGET,
+    measure: Callable[[str], int] = len,
 ) -> tuple[str, ...]:
-    """Leading terms, in order, that fit the budget once joined. Stops at the first misfit."""
+    """Leading terms, in order, whose joined text measures within the budget.
+
+    `measure` sizes the joined string (characters by default). Stops at the first misfit.
+    """
     selected: list[str] = []
     seen: set[str] = set()
-    used = 0
     for term in terms:
         cleaned = term.strip()
         key = cleaned.casefold()
         if not cleaned or key in seen:
             continue
-        cost = len(cleaned) + (len(_SEPARATOR) if selected else 0)
-        if used + cost > budget:
+        if measure(_SEPARATOR.join([*selected, cleaned])) > budget:
             break
         seen.add(key)
         selected.append(cleaned)
-        used += cost
     return tuple(selected)
 
 

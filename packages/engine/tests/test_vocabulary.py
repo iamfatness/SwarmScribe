@@ -2,6 +2,7 @@ import pytest
 from swarmscribe_engine import AppliedCorrection, Correction, Segment, Vocabulary, Word
 from swarmscribe_engine.vocabulary import (
     HOTWORDS_CHAR_BUDGET,
+    HOTWORDS_TOKEN_BUDGET,
     apply_corrections,
     build_hotwords,
     select_bias_terms,
@@ -67,6 +68,29 @@ def test_a_very_large_vocabulary_is_cut_to_a_leading_run_within_the_budget():
 
 def test_a_first_term_longer_than_the_budget_selects_nothing():
     assert select_bias_terms(["x" * 20, "ok"], budget=10) == ()
+
+
+def test_the_character_budget_is_a_fallback_well_inside_the_token_limit():
+    assert HOTWORDS_CHAR_BUDGET == 300
+    assert HOTWORDS_TOKEN_BUDGET == 220
+
+
+def test_a_custom_measure_sets_the_budget():
+    def words(text):
+        return len(text.replace(",", " ").split())
+
+    terms = ["one two", "three", "four five", "six"]
+    # "one two, three" is 3 words; adding "four five" would make 5
+    assert select_bias_terms(terms, budget=4, measure=words) == ("one two", "three")
+
+
+def test_a_custom_measure_stops_at_the_first_misfit_and_never_skips_ahead():
+    def words(text):
+        return len(text.replace(",", " ").split())
+
+    assert select_bias_terms(["one", "two three four", "five"], budget=2, measure=words) == (
+        "one",
+    )
 
 
 def test_build_hotwords_joins_with_comma_space():

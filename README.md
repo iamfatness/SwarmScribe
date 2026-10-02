@@ -32,8 +32,9 @@ Writes `out/recording.mp3.txt`, `out/recording.mp3.srt` and
 - `--model`, `--compute-type` — override the choice.
 - `--vocabulary` — a text file with one word, name or phrase per line. `#`
   starts a comment. These bias recognition throughout the recording. Order is
-  priority: roughly the first 600 characters of terms are used, so put the
-  ones that matter most at the top.
+  priority: Whisper can take only about 220 tokens of terms (typically 60-150
+  terms, depending on how unusual they are), so put the ones that matter most
+  at the top. `segments.json` lists exactly which were used.
 - `--corrections` — a text file with one fix per line, written
   `heard as => should be`, for example `jay son => Jason`. Applied after
   transcription as whole-word, case-insensitive replacements.

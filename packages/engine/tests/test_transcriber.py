@@ -27,8 +27,34 @@ def raw_segment(start, end, text, words):
     return SimpleNamespace(start=start, end=end, text=text, words=words)
 
 
+class FakeEncoding:
+    def __init__(self, ids):
+        self.ids = ids
+
+
+class WordTokenizer:
+    """Stands in for the model's tokenizer: one token per word, as faster-whisper encodes."""
+
+    def __init__(self):
+        self.encoded = []
+
+    def encode(self, text, add_special_tokens=True):
+        assert add_special_tokens is False
+        self.encoded.append(text)
+        return FakeEncoding(list(range(len(text.replace(",", " ").split()))))
+
+
 class FakeModel:
-    def __init__(self, segments=(), duration=0.0, error=None, error_while_iterating=None):
+    def __init__(
+        self,
+        segments=(),
+        duration=0.0,
+        error=None,
+        error_while_iterating=None,
+        hf_tokenizer=None,
+    ):
+        if hf_tokenizer is not None:
+            self.hf_tokenizer = hf_tokenizer
         self.segments = segments
         self.duration = duration
         self.error = error
@@ -242,3 +268,26 @@ def test_sha256_file_matches_hashlib(tmp_path):
     data = b"x" * (3 * 1024 * 1024 + 7)
     path.write_bytes(data)
     assert sha256_file(path) == hashlib.sha256(data).hexdigest()
+
+
+def test_terms_are_budgeted_in_tokens_when_the_model_has_a_tokenizer(audio):
+    tokenizer = WordTokenizer()
+    model = FakeModel(hf_tokenizer=tokenizer)
+    # 300 distinct two-word terms: far more characters than the fallback allows is not the
+    # point; the token budget (220, one token per word here) is.
+    terms = tuple(f"alpha{i:03d} beta{i:03d}" for i in range(300))
+    transcript = make_transcriber(model).transcribe(audio, Vocabulary(version=1, terms=terms))
+    used = transcript.vocabulary_terms_used
+    assert len(used) == 110
+    assert used == terms[:110]
+    assert model.calls[0][1]["hotwords"] == ", ".join(used)
+    assert all(text.startswith(" ") for text in tokenizer.encoded)
+
+
+def test_without_a_tokenizer_terms_fall_back_to_the_character_budget(audio):
+    model = FakeModel()
+    terms = tuple(f"alpha{i:03d} beta{i:03d}" for i in range(300))
+    transcript = make_transcriber(model).transcribe(audio, Vocabulary(version=1, terms=terms))
+    used = transcript.vocabulary_terms_used
+    assert 0 < len(used) < 110
+    assert len(", ".join(used)) <= 300

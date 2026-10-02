@@ -55,6 +55,17 @@ def test_real_model_accepts_the_fixed_settings_and_outputs_validate(transcriber,
     assert files.srt.is_file()
 
 
+def test_hotwords_stay_inside_whispers_token_limit_for_unusual_terms(transcriber, tone):
+    terms = tuple(f"Zyx{i}qué" if i % 2 == 0 else f"QXZ{i}K" for i in range(400))
+    transcript = transcriber.transcribe(tone, Vocabulary(version=1, terms=terms))
+    used = transcript.vocabulary_terms_used
+    assert 0 < len(used) < 400
+    assert used == terms[: len(used)]
+    tokenizer = transcriber._model.hf_tokenizer
+    encoded = tokenizer.encode(" " + ", ".join(used), add_special_tokens=False)
+    assert len(encoded.ids) <= 223
+
+
 def test_real_decoder_rejects_a_corrupt_file(transcriber, tmp_path):
     corrupt = tmp_path / "corrupt.mp3"
     corrupt.write_bytes(bytes(range(256)) * 64)

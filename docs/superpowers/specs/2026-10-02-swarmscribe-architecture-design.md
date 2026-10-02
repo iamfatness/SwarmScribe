@@ -6,8 +6,11 @@ Status: Draft for owner review
 ## 1. Purpose
 
 SwarmScribe transcribes a large archive of English-language recordings
-(sermons, ministry events) into text, subtitles and word-level timing data,
+of any kind into text, subtitles and word-level timing data,
 by distributing the work across many machines.
+
+It is a general-purpose system. Nothing in the code, defaults, examples or
+documentation may be specific to one kind of content or organisation.
 
 A **leader** owns the catalogue of recordings, decides what may be processed,
 and hands instructions to **followers**. Followers are machines that connect
@@ -115,7 +118,7 @@ Fixed behaviour (these are the hard-won settings and are not optional):
 - Temperature ladder clamped to `(0.0, 0.2, 0.4)` — prevents gibberish on
   noisy audio.
 - VAD filter on; word timestamps on.
-- Glossary (ministry, place and people names) passed as the initial prompt.
+- Glossary (names, places and specialist terms) passed as the initial prompt.
 
 Device resolution, when set to auto:
 

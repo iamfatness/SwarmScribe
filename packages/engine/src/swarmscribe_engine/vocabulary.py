@@ -121,17 +121,22 @@ def _correct(tokens: Sequence[str], rules: Sequence[_Rule]) -> list[_Piece]:
     pieces: list[_Piece] = []
     i = 0
     while i < len(tokens):
-        piece = _Piece(first=i, last=i, text=tokens[i], rule=None)
+        pieces_here = [_Piece(first=i, last=i, text=tokens[i], rule=None)]
         for rule in rules:
             text = _rewrite(edges, i, rule)
             if text is None:
                 continue
+            # The first matching rule wins, whether or not it changes anything.
             last = i + len(rule.heard) - 1
             if text != "".join(tokens[i : last + 1]):
-                piece = _Piece(first=i, last=last, text=text, rule=rule)
-                break
-        pieces.append(piece)
-        i = piece.last + 1
+                pieces_here = [_Piece(first=i, last=last, text=text, rule=rule)]
+            else:
+                pieces_here = [
+                    _Piece(first=k, last=k, text=tokens[k], rule=None) for k in range(i, last + 1)
+                ]
+            break
+        pieces.extend(pieces_here)
+        i = pieces_here[-1].last + 1
     return pieces
 
 

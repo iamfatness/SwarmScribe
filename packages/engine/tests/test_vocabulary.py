@@ -274,3 +274,32 @@ def test_bare_rule_still_applies_where_the_punctuated_rule_does_not_match():
         [seg(" c", " code")], [fix("c", "SEE"), fix("c++", "C++")]
     )
     assert segment.text == "SEE code"
+
+
+# --- a longest match that changes nothing still wins ------------------------
+
+
+def test_a_longest_match_that_changes_nothing_blocks_shorter_rules():
+    original = seg(" St.", " John", " spoke.")
+    (segment,), applied = apply_corrections(
+        [original], [fix("st. john", "St. John"), fix("john", "Jon")]
+    )
+    assert segment is original
+    assert segment.text == "St. John spoke."
+    assert applied == ()
+
+
+def test_a_longest_match_that_changes_nothing_blocks_shorter_rules_case_insensitively():
+    (segment,), applied = apply_corrections(
+        [seg(" st.", " john", " spoke.")], [fix("st. john", "St. John"), fix("john", "Jon")]
+    )
+    assert segment.text == "St. John spoke."
+    assert applied == (AppliedCorrection(heard="st. john", replacement="St. John", count=1),)
+
+
+def test_the_first_rule_wins_even_when_a_later_rule_would_change_the_text():
+    (segment,), applied = apply_corrections(
+        [seg(" jason", " and", " Jason")], [fix("jason", "Jason"), fix("jason", "Jayson")]
+    )
+    assert segment.text == "Jason and Jason"
+    assert applied == (AppliedCorrection(heard="jason", replacement="Jason", count=1),)

@@ -38,7 +38,7 @@ def tone(tmp_path):
 
 
 def test_real_model_accepts_the_fixed_settings_and_outputs_validate(transcriber, tone, tmp_path):
-    transcript = transcriber.transcribe(tone, glossary=["Shiloh"])
+    transcript = transcriber.transcribe(tone, glossary=["Ashford"])
     assert transcript.duration == pytest.approx(3.0, abs=0.1)
 
     files = write_outputs(transcript, tmp_path / "out")

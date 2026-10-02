@@ -50,12 +50,12 @@ def test_segments_document_round_trips_through_json():
         device="cuda",
         engine_version="0.1.0",
         settings=_settings(),
-        glossary=["Shiloh", "José"],
+        glossary=["Ashford", "José"],
         segments=[
             Segment(
                 start=0.0,
                 end=1.5,
-                text="Welcome to Shiloh.",
+                text="Welcome to Ashford.",
                 words=[Word(start=0.0, end=0.4, word=" Welcome", probability=0.98)],
             )
         ],

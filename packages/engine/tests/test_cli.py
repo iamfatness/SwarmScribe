@@ -10,7 +10,7 @@ CPU = DeviceChoice(device="cpu", model="distil-large-v3", compute_type="int8")
 
 
 def _recording(tmp_path):
-    path = tmp_path / "sermon.mp3"
+    path = tmp_path / "recording.mp3"
     path.write_bytes(b"fake")
     return path
 
@@ -38,12 +38,12 @@ def test_run_writes_outputs_and_prints_their_paths(tmp_path, make_transcript, ca
             (),
         )
     ]
-    assert (out_dir / "sermon.mp3.segments.json").is_file()
+    assert (out_dir / "recording.mp3.segments.json").is_file()
     printed = capsys.readouterr().out
-    assert "sermon.mp3.txt" in printed
-    assert "sermon.mp3.srt" in printed
-    assert "sermon.mp3.segments.json" in printed
-    assert "Welcome to Shiloh" not in printed
+    assert "recording.mp3.txt" in printed
+    assert "recording.mp3.srt" in printed
+    assert "recording.mp3.segments.json" in printed
+    assert "Welcome to Ashford" not in printed
 
 
 def test_device_preference_is_forwarded(tmp_path, make_transcript):
@@ -86,7 +86,7 @@ def test_model_and_compute_type_can_be_overridden(tmp_path, make_transcript):
 
 def test_glossary_file_is_read_and_passed(tmp_path, make_transcript):
     glossary = tmp_path / "glossary.txt"
-    glossary.write_text("# people\nJosé\n\n  Shiloh  \n", encoding="utf-8")
+    glossary.write_text("# people\nJosé\n\n  Ashford  \n", encoding="utf-8")
     seen = []
 
     def fake_transcribe(path, settings, terms):
@@ -98,13 +98,13 @@ def test_glossary_file_is_read_and_passed(tmp_path, make_transcript):
         transcribe_fn=fake_transcribe,
         resolve_fn=lambda preference: CPU,
     )
-    assert seen == [("José", "Shiloh")]
+    assert seen == [("José", "Ashford")]
 
 
 def test_glossary_saved_by_notepad_with_a_bom_is_read_cleanly(tmp_path):
     glossary = tmp_path / "glossary.txt"
-    glossary.write_bytes(b"\xef\xbb\xbfShiloh\r\nJos\xc3\xa9\r\n")
-    assert read_glossary(glossary) == ("Shiloh", "José")
+    glossary.write_bytes(b"\xef\xbb\xbfAshford\r\nJos\xc3\xa9\r\n")
+    assert read_glossary(glossary) == ("Ashford", "José")
 
 
 def test_missing_recording_exits_2_with_a_message(tmp_path, capsys):
@@ -140,7 +140,7 @@ def test_undecodable_audio_exits_2_and_writes_nothing(tmp_path, capsys):
     out_dir = tmp_path / "out"
 
     def fake_transcribe(path, settings, glossary):
-        raise UndecodableAudioError("cannot decode sermon.mp3: Invalid data")
+        raise UndecodableAudioError("cannot decode recording.mp3: Invalid data")
 
     code = run(
         [str(_recording(tmp_path)), "--out", str(out_dir)],
@@ -148,7 +148,7 @@ def test_undecodable_audio_exits_2_and_writes_nothing(tmp_path, capsys):
         resolve_fn=lambda preference: CPU,
     )
     assert code == 2
-    assert "error: cannot decode sermon.mp3" in capsys.readouterr().err
+    assert "error: cannot decode recording.mp3" in capsys.readouterr().err
     assert not out_dir.exists()
 
 

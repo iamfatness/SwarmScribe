@@ -46,7 +46,7 @@ def make_transcriber(model, settings=SETTINGS):
 
 @pytest.fixture
 def audio(tmp_path):
-    path = tmp_path / "sermon.mp3"
+    path = tmp_path / "recording.mp3"
     path.write_bytes(b"not really audio, the model is fake")
     return path
 
@@ -68,7 +68,7 @@ def test_model_is_loaded_once_and_reused(audio):
 
 def test_fixed_settings_are_passed_to_the_model(audio):
     model = FakeModel()
-    make_transcriber(model).transcribe(audio, glossary=["Shiloh", "José"])
+    make_transcriber(model).transcribe(audio, glossary=["Ashford", "José"])
     path_arg, kwargs = model.calls[0]
     assert path_arg == str(audio)
     assert kwargs == {
@@ -77,7 +77,7 @@ def test_fixed_settings_are_passed_to_the_model(audio):
         "temperature": [0.0, 0.2, 0.4],
         "vad_filter": True,
         "word_timestamps": True,
-        "initial_prompt": "Glossary: Shiloh, José.",
+        "initial_prompt": "Glossary: Ashford, José.",
     }
 
 
@@ -96,20 +96,20 @@ def test_segments_and_words_are_converted(audio):
             raw_segment(
                 0.0,
                 1.5,
-                " Welcome to Shiloh. ",
-                [raw_word(0.0, 0.4, " Welcome", 0.98), raw_word(0.4, 1.5, " to Shiloh.", 0.7)],
+                " Welcome to Ashford. ",
+                [raw_word(0.0, 0.4, " Welcome", 0.98), raw_word(0.4, 1.5, " to Ashford.", 0.7)],
             )
         ],
         duration=1.5,
     )
-    transcript = make_transcriber(model).transcribe(audio, glossary=["Shiloh"])
-    assert transcript.source_name == "sermon.mp3"
+    transcript = make_transcriber(model).transcribe(audio, glossary=["Ashford"])
+    assert transcript.source_name == "recording.mp3"
     assert transcript.source_checksum == hashlib.sha256(audio.read_bytes()).hexdigest()
     assert transcript.duration == 1.5
     assert transcript.settings == SETTINGS
-    assert transcript.glossary == ("Shiloh",)
+    assert transcript.glossary == ("Ashford",)
     (segment,) = transcript.segments
-    assert segment.text == "Welcome to Shiloh."
+    assert segment.text == "Welcome to Ashford."
     assert segment.words[0].word == " Welcome"
     assert segment.words[1].probability == 0.7
 
@@ -126,8 +126,8 @@ def test_probability_is_clamped_to_zero_and_one(audio):
             raw_segment(
                 0.0,
                 1.0,
-                "Amen.",
-                [raw_word(0.0, 0.5, " A", 1.0000001), raw_word(0.5, 1.0, "men.", -0.0000001)],
+                "Okay.",
+                [raw_word(0.0, 0.5, " O", 1.0000001), raw_word(0.5, 1.0, "kay.", -0.0000001)],
             )
         ]
     )
@@ -136,16 +136,16 @@ def test_probability_is_clamped_to_zero_and_one(audio):
 
 
 def test_segment_without_words_gets_an_empty_tuple(audio):
-    model = FakeModel(segments=[raw_segment(0.0, 1.0, "Amen.", None)])
+    model = FakeModel(segments=[raw_segment(0.0, 1.0, "Okay.", None)])
     assert make_transcriber(model).transcribe(audio).segments[0].words == ()
 
 
 def test_whitespace_only_segments_are_dropped(audio):
     model = FakeModel(
-        segments=[raw_segment(0.0, 1.0, "   ", []), raw_segment(1.0, 2.0, "Amen.", [])]
+        segments=[raw_segment(0.0, 1.0, "   ", []), raw_segment(1.0, 2.0, "Okay.", [])]
     )
     transcript = make_transcriber(model).transcribe(audio)
-    assert [segment.text for segment in transcript.segments] == ["Amen."]
+    assert [segment.text for segment in transcript.segments] == ["Okay."]
 
 
 def test_missing_file_raises_file_not_found(tmp_path):
@@ -160,14 +160,14 @@ def test_a_directory_is_not_a_recording(tmp_path):
 
 def test_decode_failure_becomes_undecodable_audio_error(audio):
     transcriber = make_transcriber(FakeModel(error=DecodeError("Invalid data found")))
-    with pytest.raises(UndecodableAudioError, match="sermon.mp3") as excinfo:
+    with pytest.raises(UndecodableAudioError, match="recording.mp3") as excinfo:
         transcriber.transcribe(audio)
     assert isinstance(excinfo.value.__cause__, DecodeError)
 
 
 def test_decode_failure_during_iteration_is_also_caught(audio):
     model = FakeModel(
-        segments=[raw_segment(0.0, 1.0, "Amen.", [])],
+        segments=[raw_segment(0.0, 1.0, "Okay.", [])],
         error_while_iterating=DecodeError("truncated"),
     )
     with pytest.raises(UndecodableAudioError):
@@ -185,8 +185,8 @@ def test_other_model_errors_propagate_unchanged(audio):
     [
         ([], None),
         (["  ", ""], None),
-        (["Shiloh"], "Glossary: Shiloh."),
-        ([" Shiloh ", "", "José"], "Glossary: Shiloh, José."),
+        (["Ashford"], "Glossary: Ashford."),
+        ([" Ashford ", "", "José"], "Glossary: Ashford, José."),
     ],
 )
 def test_build_prompt(terms, expected):
@@ -194,8 +194,8 @@ def test_build_prompt(terms, expected):
 
 
 def test_blank_glossary_terms_are_not_recorded(audio):
-    transcript = make_transcriber(FakeModel()).transcribe(audio, glossary=[" Shiloh ", " "])
-    assert transcript.glossary == ("Shiloh",)
+    transcript = make_transcriber(FakeModel()).transcribe(audio, glossary=[" Ashford ", " "])
+    assert transcript.glossary == ("Ashford",)
 
 
 def test_sha256_file_matches_hashlib(tmp_path):

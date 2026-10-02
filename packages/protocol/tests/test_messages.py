@@ -29,7 +29,7 @@ def _claim():
         download_url=_link(),
         upload_urls=UploadUrls(txt=_link("PUT"), srt=_link("PUT"), segments_json=_link("PUT")),
         settings=JobSettings(model="large-v3", compute_type="float16"),
-        glossary=["Shiloh"],
+        glossary=["Ashford"],
         source_checksum="a" * 64,
     )
 

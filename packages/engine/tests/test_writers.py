@@ -22,22 +22,22 @@ def test_format_srt_time(seconds, expected):
 
 
 def test_txt_is_one_segment_per_line(make_transcript):
-    assert render_txt(make_transcript()) == "Welcome to Shiloh.\nPlease be seated.\n"
+    assert render_txt(make_transcript()) == "Welcome to Ashford.\nThanks for joining.\n"
 
 
 def test_srt_blocks_are_numbered_from_one_and_blank_line_separated(make_transcript):
     assert render_srt(make_transcript()) == (
-        "1\n00:00:00,000 --> 00:00:01,500\nWelcome to Shiloh.\n"
+        "1\n00:00:00,000 --> 00:00:01,500\nWelcome to Ashford.\n"
         "\n"
-        "2\n00:00:02,000 --> 00:00:03,250\nPlease be seated.\n"
+        "2\n00:00:02,000 --> 00:00:03,250\nThanks for joining.\n"
     )
 
 
 def test_outputs_are_named_after_the_source_file(make_transcript, tmp_path):
     files = write_outputs(make_transcript(), tmp_path)
-    assert files.txt == tmp_path / "sermon.mp3.txt"
-    assert files.srt == tmp_path / "sermon.mp3.srt"
-    assert files.segments_json == tmp_path / "sermon.mp3.segments.json"
+    assert files.txt == tmp_path / "recording.mp3.txt"
+    assert files.srt == tmp_path / "recording.mp3.srt"
+    assert files.segments_json == tmp_path / "recording.mp3.segments.json"
     assert all(path.is_file() for path in (files.txt, files.srt, files.segments_json))
 
 
@@ -49,9 +49,9 @@ def test_output_directory_is_created(make_transcript, tmp_path):
 def test_no_temp_files_are_left_behind(make_transcript, tmp_path):
     write_outputs(make_transcript(), tmp_path)
     assert sorted(path.name for path in tmp_path.iterdir()) == [
-        "sermon.mp3.segments.json",
-        "sermon.mp3.srt",
-        "sermon.mp3.txt",
+        "recording.mp3.segments.json",
+        "recording.mp3.srt",
+        "recording.mp3.txt",
     ]
 
 
@@ -66,8 +66,8 @@ def test_segments_json_conforms_to_the_protocol_schema(make_transcript, tmp_path
     assert document.settings.model == "large-v3"
     assert document.settings.compute_type == "float16"
     assert document.settings.temperatures == (0.0, 0.2, 0.4)
-    assert document.glossary == ["Shiloh"]
-    assert document.segments[0].words[2].word == " Shiloh."
+    assert document.glossary == ["Ashford"]
+    assert document.segments[0].words[2].word == " Ashford."
     assert document.segments[0].words[2].probability == 0.71
 
 
@@ -94,7 +94,7 @@ def test_no_speech_still_writes_all_three_outputs(make_transcript, tmp_path):
 
 
 def test_non_ascii_text_is_written_as_utf8(make_transcript, tmp_path):
-    text = "José said “grace”."
+    text = "José said “hello”."
     transcript = make_transcript(
         segments=(Segment(start=0.0, end=1.0, text=text, words=()),), glossary=("José",)
     )

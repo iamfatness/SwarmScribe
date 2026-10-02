@@ -332,3 +332,23 @@ def test_a_heard_side_with_a_part_that_has_no_word_is_rejected(tmp_path, bad_lin
         match=r"corrections\.txt line 3: 'heard as' must contain a word in every part",
     ):
         read_corrections(corrections)
+
+
+def test_the_same_heard_with_a_different_replacement_is_rejected(tmp_path):
+    corrections = tmp_path / "corrections.txt"
+    corrections.write_text("Jay  Son => Jason\n# note\njay son => Jayson\n", encoding="utf-8")
+    with pytest.raises(
+        ValueError, match=r"corrections\.txt line 3: 'jay son' is already defined on line 1"
+    ):
+        read_corrections(corrections)
+
+
+def test_an_exact_duplicate_line_is_dropped_keeping_the_first(tmp_path):
+    corrections = tmp_path / "corrections.txt"
+    corrections.write_text(
+        "Jay  Son => Jason\nashferd => Ashford\njay son => Jason\n", encoding="utf-8"
+    )
+    assert read_corrections(corrections) == (
+        Correction("Jay  Son", "Jason"),
+        Correction("ashferd", "Ashford"),
+    )

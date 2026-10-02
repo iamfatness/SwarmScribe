@@ -36,6 +36,7 @@ def read_terms(path: Path) -> tuple[str, ...]:
 
 def read_corrections(path: Path) -> tuple[Correction, ...]:
     corrections: list[Correction] = []
+    defined: dict[str, tuple[int, str]] = {}  # normalised heard -> (line number, replacement)
     for number, line in _content_lines(path):
         heard, arrow, replacement = line.partition("=>")
         heard, replacement = heard.strip(), replacement.strip()
@@ -47,6 +48,16 @@ def read_corrections(path: Path) -> tuple[Correction, ...]:
             raise ValueError(
                 f"{Path(path).name} line {number}: 'heard as' must contain a word in every part"
             )
+        key = " ".join(heard.split()).casefold()
+        if key in defined:
+            first_line, first_replacement = defined[key]
+            if replacement != first_replacement:
+                raise ValueError(
+                    f"{Path(path).name} line {number}: '{' '.join(heard.split())}' "
+                    f"is already defined on line {first_line}"
+                )
+            continue
+        defined[key] = (number, replacement)
         corrections.append(Correction(heard=heard, replacement=replacement))
     return tuple(corrections)
 

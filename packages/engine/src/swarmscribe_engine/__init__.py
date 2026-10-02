@@ -16,6 +16,7 @@ from .types import (
     Word,
 )
 from .version import ENGINE_VERSION
+from .writers import write_outputs
 
 __all__ = [
     "DEFAULT_TEMPERATURES",
@@ -34,4 +35,5 @@ __all__ = [
     "UndecodableAudioError",
     "Word",
     "resolve_device",
+    "write_outputs",
 ]

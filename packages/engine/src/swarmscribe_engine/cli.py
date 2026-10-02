@@ -50,7 +50,7 @@ def run(
         glossary = read_glossary(args.glossary) if args.glossary else ()
         transcript = transcribe_fn(args.file, settings, glossary)
         files = write_outputs(transcript, args.out)
-    except (EngineError, FileNotFoundError) as exc:
+    except (EngineError, OSError, UnicodeDecodeError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     for path in (files.txt, files.srt, files.segments_json):

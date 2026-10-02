@@ -133,7 +133,9 @@ def test_missing_glossary_file_exits_2_with_a_message(tmp_path, make_transcript,
         resolve_fn=lambda preference: CPU,
     )
     assert code == 2
-    assert "error:" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert "nope.txt" in err
 
 
 def test_undecodable_audio_exits_2_and_writes_nothing(tmp_path, capsys):
@@ -163,3 +165,55 @@ def test_unavailable_device_exits_2(tmp_path, make_transcript, capsys):
     )
     assert code == 2
     assert "no CUDA GPU" in capsys.readouterr().err
+
+
+def test_glossary_that_is_not_utf8_exits_2_without_a_traceback(tmp_path, make_transcript, capsys):
+    glossary = tmp_path / "glossary.txt"
+    glossary.write_bytes(b"\xff\xfe\x00bad")
+    code = run(
+        [str(_recording(tmp_path)), "--out", str(tmp_path), "--glossary", str(glossary)],
+        transcribe_fn=lambda path, settings, glossary: make_transcript(),
+        resolve_fn=lambda preference: CPU,
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+    assert "Traceback" not in err
+
+
+def test_out_pointing_at_a_regular_file_exits_2(tmp_path, make_transcript, capsys):
+    not_a_directory = tmp_path / "taken"
+    not_a_directory.write_text("occupied", encoding="utf-8")
+    code = run(
+        [str(_recording(tmp_path)), "--out", str(not_a_directory)],
+        transcribe_fn=lambda path, settings, glossary: make_transcript(),
+        resolve_fn=lambda preference: CPU,
+    )
+    assert code == 2
+    assert "error:" in capsys.readouterr().err
+
+
+def test_invalid_model_size_exits_2_with_the_message(tmp_path, capsys):
+    def fake_transcribe(path, settings, glossary):
+        raise ValueError("Invalid model size 'nope'")
+
+    code = run(
+        [str(_recording(tmp_path)), "--out", str(tmp_path)],
+        transcribe_fn=fake_transcribe,
+        resolve_fn=lambda preference: CPU,
+    )
+    assert code == 2
+    assert "Invalid model size 'nope'" in capsys.readouterr().err
+
+
+def test_runtime_failure_exits_2_with_the_message(tmp_path, capsys):
+    def fake_transcribe(path, settings, glossary):
+        raise RuntimeError("CUDA out of memory")
+
+    code = run(
+        [str(_recording(tmp_path)), "--out", str(tmp_path)],
+        transcribe_fn=fake_transcribe,
+        resolve_fn=lambda preference: CPU,
+    )
+    assert code == 2
+    assert "CUDA out of memory" in capsys.readouterr().err

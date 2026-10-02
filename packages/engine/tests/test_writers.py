@@ -138,6 +138,26 @@ def test_corrections_and_originals_are_recorded(make_transcript, tmp_path):
     assert files.txt.read_text("utf-8") == "Thanks Jason.\n"
 
 
+def test_segments_json_declares_every_field_it_writes(make_transcript, tmp_path):
+    corrected = Segment(
+        start=0.0,
+        end=2.0,
+        text="Thanks Jason.",
+        words=(
+            Word(start=0.0, end=0.5, word=" Thanks", probability=0.9),
+            Word(start=0.5, end=2.0, word=" Jason.", probability=0.3, original=" jay son."),
+        ),
+    )
+    transcript = make_transcript(
+        segments=(corrected,),
+        corrections_applied=(AppliedCorrection(heard="jay son", replacement="Jason", count=1),),
+    )
+    raw = write_outputs(transcript, tmp_path).segments_json.read_text("utf-8")
+    # The protocol models ignore unknown fields, so a round trip drops anything undeclared.
+    document = SegmentsDocument.model_validate_json(raw)
+    assert json.loads(raw) == json.loads(document.model_dump_json(exclude_none=True))
+
+
 def test_a_non_finite_number_is_an_error_not_invalid_json(make_transcript, tmp_path):
     with pytest.raises(ValueError):
         write_outputs(make_transcript(duration=float("nan")), tmp_path)

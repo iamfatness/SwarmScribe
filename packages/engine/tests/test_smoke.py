@@ -4,9 +4,11 @@ import wave
 
 import pytest
 from swarmscribe_engine import (
+    Correction,
     Transcriber,
     TranscribeSettings,
     UndecodableAudioError,
+    Vocabulary,
     write_outputs,
 )
 from swarmscribe_protocol import SegmentsDocument
@@ -38,12 +40,17 @@ def tone(tmp_path):
 
 
 def test_real_model_accepts_the_fixed_settings_and_outputs_validate(transcriber, tone, tmp_path):
-    transcript = transcriber.transcribe(tone, glossary=["Ashford"])
+    vocabulary = Vocabulary(
+        version=3, terms=("Ashford",), corrections=(Correction("ash ford", "Ashford"),)
+    )
+    transcript = transcriber.transcribe(tone, vocabulary)
     assert transcript.duration == pytest.approx(3.0, abs=0.1)
 
     files = write_outputs(transcript, tmp_path / "out")
     document = SegmentsDocument.model_validate_json(files.segments_json.read_text("utf-8"))
     assert document.settings.model == "tiny.en"
+    assert document.vocabulary_version == 3
+    assert document.vocabulary_terms_used == ["Ashford"]
     assert files.txt.is_file()
     assert files.srt.is_file()
 

@@ -610,6 +610,18 @@
             "title": "End",
             "type": "number"
           },
+          "original": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Original"
+          },
           "probability": {
             "maximum": 1.0,
             "minimum": 0.0,
@@ -667,6 +679,31 @@
   },
   "SegmentsDocument": {
     "$defs": {
+      "AppliedCorrection": {
+        "description": "A correction that fired in one recording, and how many times.",
+        "properties": {
+          "count": {
+            "minimum": 1,
+            "title": "Count",
+            "type": "integer"
+          },
+          "heard": {
+            "title": "Heard",
+            "type": "string"
+          },
+          "replacement": {
+            "title": "Replacement",
+            "type": "string"
+          }
+        },
+        "required": [
+          "heard",
+          "replacement",
+          "count"
+        ],
+        "title": "AppliedCorrection",
+        "type": "object"
+      },
       "JobSettings": {
         "description": "How a follower must transcribe. The Literal fields are fixed behaviour.",
         "properties": {
@@ -759,6 +796,18 @@
             "title": "End",
             "type": "number"
           },
+          "original": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Original"
+          },
           "probability": {
             "maximum": 1.0,
             "minimum": 0.0,
@@ -786,6 +835,13 @@
     },
     "description": "The contents of <name>.segments.json.",
     "properties": {
+      "corrections_applied": {
+        "items": {
+          "$ref": "#/$defs/AppliedCorrection"
+        },
+        "title": "Corrections Applied",
+        "type": "array"
+      },
       "device": {
         "enum": [
           "cuda",
@@ -802,13 +858,6 @@
       "engine_version": {
         "title": "Engine Version",
         "type": "string"
-      },
-      "glossary": {
-        "items": {
-          "type": "string"
-        },
-        "title": "Glossary",
-        "type": "array"
       },
       "schema_version": {
         "const": 1,
@@ -828,6 +877,18 @@
       "source_checksum": {
         "title": "Source Checksum",
         "type": "string"
+      },
+      "vocabulary_terms_used": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Vocabulary Terms Used",
+        "type": "array"
+      },
+      "vocabulary_version": {
+        "minimum": 0,
+        "title": "Vocabulary Version",
+        "type": "integer"
       }
     },
     "required": [
@@ -837,7 +898,9 @@
       "device",
       "engine_version",
       "settings",
-      "glossary",
+      "vocabulary_version",
+      "vocabulary_terms_used",
+      "corrections_applied",
       "segments"
     ],
     "title": "SegmentsDocument",
@@ -1007,6 +1070,18 @@
       "end": {
         "title": "End",
         "type": "number"
+      },
+      "original": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Original"
       },
       "probability": {
         "maximum": 1.0,

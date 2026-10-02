@@ -1,6 +1,6 @@
 import pytest
 from pydantic import ValidationError
-from swarmscribe_protocol import JobSettings, Segment, SegmentsDocument, Word
+from swarmscribe_protocol import AppliedCorrection, JobSettings, Segment, SegmentsDocument, Word
 
 
 def _settings(**overrides):
@@ -50,13 +50,19 @@ def test_segments_document_round_trips_through_json():
         device="cuda",
         engine_version="0.1.0",
         settings=_settings(),
-        glossary=["Ashford", "José"],
+        vocabulary_version=3,
+        vocabulary_terms_used=["Ashford", "José"],
+        corrections_applied=[AppliedCorrection(heard="jay son", replacement="Jason", count=2)],
         segments=[
             Segment(
                 start=0.0,
                 end=1.5,
                 text="Welcome to Ashford.",
-                words=[Word(start=0.0, end=0.4, word=" Welcome", probability=0.98)],
+                words=[
+                    Word(
+                        start=0.0, end=0.4, word=" Welcome", probability=0.98, original=" welcom"
+                    )
+                ],
             )
         ],
     )
@@ -71,7 +77,9 @@ def test_segments_document_accepts_no_speech():
         device="cpu",
         engine_version="0.1.0",
         settings=_settings(model="distil-large-v3", compute_type="int8"),
-        glossary=[],
+        vocabulary_version=0,
+        vocabulary_terms_used=[],
+        corrections_applied=[],
         segments=[],
     )
     assert document.segments == []
@@ -86,6 +94,32 @@ def test_segments_document_rejects_unknown_schema_version():
             device="cpu",
             engine_version="0.1.0",
             settings=_settings(),
-            glossary=[],
+            vocabulary_version=0,
+            vocabulary_terms_used=[],
+            corrections_applied=[],
+            segments=[],
+        )
+
+
+def test_word_original_is_optional():
+    assert Word(start=0.0, end=0.5, word=" hello", probability=1.0).original is None
+
+
+def test_segments_document_has_no_glossary_field():
+    assert "glossary" not in SegmentsDocument.model_fields
+
+
+def test_vocabulary_version_cannot_be_negative():
+    with pytest.raises(ValidationError):
+        SegmentsDocument(
+            schema_version=1,
+            source_checksum="a" * 64,
+            duration=3.0,
+            device="cpu",
+            engine_version="0.1.0",
+            settings=_settings(),
+            vocabulary_version=-1,
+            vocabulary_terms_used=[],
+            corrections_applied=[],
             segments=[],
         )

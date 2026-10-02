@@ -1,17 +1,20 @@
 import hashlib
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from .types import (
-    LANGUAGE,
+    EMPTY_VOCABULARY,
+    FIXED_SETTINGS,
     Segment,
     TranscribeSettings,
     Transcript,
     UndecodableAudioError,
+    Vocabulary,
     Word,
 )
+from .vocabulary import apply_corrections, build_hotwords, select_bias_terms
 
 ModelFactory = Callable[[TranscribeSettings], Any]
 
@@ -40,17 +43,6 @@ def sha256_file(path: Path) -> str:
         while chunk := handle.read(_CHUNK):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _clean_terms(terms: Sequence[str]) -> tuple[str, ...]:
-    return tuple(term.strip() for term in terms if term.strip())
-
-
-def build_prompt(terms: Sequence[str]) -> str | None:
-    cleaned = _clean_terms(terms)
-    if not cleaned:
-        return None
-    return "Glossary: " + ", ".join(cleaned) + "."
 
 
 def _clamp(value: float) -> float:
@@ -84,32 +76,32 @@ class Transcriber:
         self._decode_errors = _default_decode_errors() if decode_errors is None else decode_errors
         self._model = model_factory(settings)
 
-    def transcribe(self, path: Path, glossary: Sequence[str] = ()) -> Transcript:
+    def transcribe(self, path: Path, vocabulary: Vocabulary = EMPTY_VOCABULARY) -> Transcript:
         path = Path(path)
         if not path.is_file():
             raise FileNotFoundError(f"recording not found: {path}")
-        terms = _clean_terms(glossary)
+        terms_used = select_bias_terms(vocabulary.terms)
         try:
             raw_segments, info = self._model.transcribe(
                 str(path),
-                language=LANGUAGE,
-                condition_on_previous_text=False,
+                **FIXED_SETTINGS,
                 temperature=list(self.settings.temperatures),
-                vad_filter=True,
-                word_timestamps=True,
-                initial_prompt=build_prompt(terms),
+                hotwords=build_hotwords(terms_used),
             )
             segments = tuple(
                 segment for segment in (_convert(raw) for raw in raw_segments) if segment.text
             )
         except self._decode_errors as exc:
             raise UndecodableAudioError(f"cannot decode {path.name}: {exc}") from exc
+        segments, applied = apply_corrections(segments, vocabulary.corrections)
         return Transcript(
             source_name=path.name,
             source_checksum=sha256_file(path),
             duration=float(info.duration),
             settings=self.settings,
-            glossary=terms,
+            vocabulary_version=vocabulary.version,
+            vocabulary_terms_used=terms_used,
+            corrections_applied=applied,
             segments=segments,
         )
 
@@ -120,7 +112,7 @@ def _shared_transcriber(settings: TranscribeSettings) -> Transcriber:
 
 
 def transcribe(
-    path: Path, settings: TranscribeSettings, glossary: Sequence[str] = ()
+    path: Path, settings: TranscribeSettings, vocabulary: Vocabulary = EMPTY_VOCABULARY
 ) -> Transcript:
     """Transcribe one file, reusing the model already loaded for these settings."""
-    return _shared_transcriber(settings).transcribe(path, glossary)
+    return _shared_transcriber(settings).transcribe(path, vocabulary)

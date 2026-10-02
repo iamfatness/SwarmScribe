@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from swarmscribe_engine import ENGINE_VERSION, Segment, write_outputs
+from swarmscribe_engine import ENGINE_VERSION, AppliedCorrection, Segment, Word, write_outputs
 from swarmscribe_engine.writers import format_srt_time, render_srt, render_txt
 from swarmscribe_protocol import SegmentsDocument
 
@@ -66,7 +66,9 @@ def test_segments_json_conforms_to_the_protocol_schema(make_transcript, tmp_path
     assert document.settings.model == "large-v3"
     assert document.settings.compute_type == "float16"
     assert document.settings.temperatures == (0.0, 0.2, 0.4)
-    assert document.glossary == ["Ashford"]
+    assert document.vocabulary_version == 1
+    assert document.vocabulary_terms_used == ["Ashford"]
+    assert document.corrections_applied == []
     assert document.segments[0].words[2].word == " Ashford."
     assert document.segments[0].words[2].probability == 0.71
 
@@ -96,12 +98,50 @@ def test_no_speech_still_writes_all_three_outputs(make_transcript, tmp_path):
 def test_non_ascii_text_is_written_as_utf8(make_transcript, tmp_path):
     text = "José said “hello”."
     transcript = make_transcript(
-        segments=(Segment(start=0.0, end=1.0, text=text, words=()),), glossary=("José",)
+        segments=(Segment(start=0.0, end=1.0, text=text, words=()),),
+        vocabulary_terms_used=("José",),
     )
     files = write_outputs(transcript, tmp_path)
     assert files.txt.read_bytes() == (text + "\n").encode("utf-8")
     assert text.encode("utf-8") in files.srt.read_bytes()
     assert text.encode("utf-8") in files.segments_json.read_bytes()
+
+
+def test_corrections_and_originals_are_recorded(make_transcript, tmp_path):
+    corrected = Segment(
+        start=0.0,
+        end=2.0,
+        text="Thanks Jason.",
+        words=(
+            Word(start=0.0, end=0.5, word=" Thanks", probability=0.9),
+            Word(start=0.5, end=2.0, word=" Jason.", probability=0.3, original=" jay son."),
+        ),
+    )
+    transcript = make_transcript(
+        segments=(corrected,),
+        vocabulary_version=5,
+        corrections_applied=(AppliedCorrection(heard="jay son", replacement="Jason", count=1),),
+    )
+    files = write_outputs(transcript, tmp_path)
+
+    raw = json.loads(files.segments_json.read_text("utf-8"))
+    assert raw["vocabulary_version"] == 5
+    assert raw["corrections_applied"] == [{"heard": "jay son", "replacement": "Jason", "count": 1}]
+    first, second = raw["segments"][0]["words"]
+    assert "original" not in first
+    assert second["original"] == " jay son."
+    assert "glossary" not in raw
+
+    document = SegmentsDocument.model_validate_json(files.segments_json.read_text("utf-8"))
+    assert document.segments[0].words[0].original is None
+    assert document.segments[0].words[1].original == " jay son."
+    assert files.txt.read_text("utf-8") == "Thanks Jason.\n"
+
+
+def test_a_non_finite_number_is_an_error_not_invalid_json(make_transcript, tmp_path):
+    with pytest.raises(ValueError):
+        write_outputs(make_transcript(duration=float("nan")), tmp_path)
+    assert not (tmp_path / "recording.mp3.segments.json").exists()
 
 
 def test_line_endings_are_lf_on_every_platform(make_transcript, tmp_path):

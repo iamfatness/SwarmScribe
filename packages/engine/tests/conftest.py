@@ -31,7 +31,9 @@ def make_transcript():
             "settings": TranscribeSettings(
                 model="large-v3", compute_type="float16", device="cuda"
             ),
-            "glossary": ("Ashford",),
+            "vocabulary_version": 1,
+            "vocabulary_terms_used": ("Ashford",),
+            "corrections_applied": (),
             "segments": tuple(segments),
         }
         values.update(overrides)

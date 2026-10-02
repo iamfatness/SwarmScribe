@@ -2,7 +2,7 @@ import json
 import os
 from pathlib import Path
 
-from .types import LANGUAGE, OutputFiles, Transcript
+from .types import FIXED_SETTINGS, OutputFiles, Transcript, Word
 from .version import ENGINE_VERSION
 
 SCHEMA_VERSION = 1
@@ -30,6 +30,18 @@ def render_srt(transcript: Transcript) -> str:
     return "\n".join(blocks)
 
 
+def _word_json(word: Word) -> dict:
+    data = {
+        "start": word.start,
+        "end": word.end,
+        "word": word.word,
+        "probability": word.probability,
+    }
+    if word.original is not None:
+        data["original"] = word.original
+    return data
+
+
 def render_segments_json(transcript: Transcript) -> str:
     settings = transcript.settings
     document = {
@@ -41,32 +53,26 @@ def render_segments_json(transcript: Transcript) -> str:
         "settings": {
             "model": settings.model,
             "compute_type": settings.compute_type,
-            "language": LANGUAGE,
-            "condition_on_previous_text": False,
+            **FIXED_SETTINGS,
             "temperatures": list(settings.temperatures),
-            "vad_filter": True,
-            "word_timestamps": True,
         },
-        "glossary": list(transcript.glossary),
+        "vocabulary_version": transcript.vocabulary_version,
+        "vocabulary_terms_used": list(transcript.vocabulary_terms_used),
+        "corrections_applied": [
+            {"heard": applied.heard, "replacement": applied.replacement, "count": applied.count}
+            for applied in transcript.corrections_applied
+        ],
         "segments": [
             {
                 "start": segment.start,
                 "end": segment.end,
                 "text": segment.text,
-                "words": [
-                    {
-                        "start": word.start,
-                        "end": word.end,
-                        "word": word.word,
-                        "probability": word.probability,
-                    }
-                    for word in segment.words
-                ],
+                "words": [_word_json(word) for word in segment.words],
             }
             for segment in transcript.segments
         ],
     }
-    return json.dumps(document, ensure_ascii=False, indent=2) + "\n"
+    return json.dumps(document, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -84,7 +90,12 @@ def write_outputs(transcript: Transcript, out_dir: Path) -> OutputFiles:
         srt=out_dir / f"{transcript.source_name}.srt",
         segments_json=out_dir / f"{transcript.source_name}.segments.json",
     )
-    _atomic_write(files.txt, render_txt(transcript))
-    _atomic_write(files.srt, render_srt(transcript))
-    _atomic_write(files.segments_json, render_segments_json(transcript))
+    txt, srt, segments_json = (
+        render_txt(transcript),
+        render_srt(transcript),
+        render_segments_json(transcript),
+    )
+    _atomic_write(files.txt, txt)
+    _atomic_write(files.srt, srt)
+    _atomic_write(files.segments_json, segments_json)
     return files

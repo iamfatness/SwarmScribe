@@ -5,10 +5,10 @@ from pathlib import Path
 
 from .device import resolve_device
 from .transcriber import transcribe
-from .types import DeviceChoice, EngineError, TranscribeSettings, Transcript
+from .types import DeviceChoice, EngineError, TranscribeSettings, Transcript, Vocabulary
 from .writers import write_outputs
 
-TranscribeFn = Callable[[Path, TranscribeSettings, Sequence[str]], Transcript]
+TranscribeFn = Callable[[Path, TranscribeSettings, Vocabulary], Transcript]
 ResolveFn = Callable[[str], DeviceChoice]
 
 
@@ -47,8 +47,8 @@ def run(
             compute_type=args.compute_type or choice.compute_type,
             device=choice.device,
         )
-        glossary = read_glossary(args.glossary) if args.glossary else ()
-        transcript = transcribe_fn(args.file, settings, glossary)
+        terms = read_glossary(args.glossary) if args.glossary else ()
+        transcript = transcribe_fn(args.file, settings, Vocabulary(terms=terms))
         files = write_outputs(transcript, args.out)
     except (EngineError, OSError, UnicodeDecodeError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)

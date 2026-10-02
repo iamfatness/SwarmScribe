@@ -3,6 +3,7 @@ from swarmscribe_engine import (
     DeviceUnavailableError,
     TranscribeSettings,
     UndecodableAudioError,
+    Vocabulary,
 )
 from swarmscribe_engine.cli import read_glossary, run
 
@@ -35,7 +36,7 @@ def test_run_writes_outputs_and_prints_their_paths(tmp_path, make_transcript, ca
         (
             recording,
             TranscribeSettings(model="distil-large-v3", compute_type="int8", device="cpu"),
-            (),
+            Vocabulary(),
         )
     ]
     assert (out_dir / "recording.mp3.segments.json").is_file()
@@ -98,7 +99,7 @@ def test_glossary_file_is_read_and_passed(tmp_path, make_transcript):
         transcribe_fn=fake_transcribe,
         resolve_fn=lambda preference: CPU,
     )
-    assert seen == [("José", "Ashford")]
+    assert seen == [Vocabulary(terms=("José", "Ashford"))]
 
 
 def test_glossary_saved_by_notepad_with_a_bom_is_read_cleanly(tmp_path):

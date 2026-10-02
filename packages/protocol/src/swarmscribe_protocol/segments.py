@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import Field, field_validator
 
 from .base import WireModel
+from .vocabulary import AppliedCorrection
 
 Device = Literal["cuda", "cpu"]
 
@@ -35,6 +36,7 @@ class Word(WireModel):
     end: float
     word: str
     probability: float = Field(ge=0.0, le=1.0)
+    original: str | None = None
 
 
 class Segment(WireModel):
@@ -53,5 +55,7 @@ class SegmentsDocument(WireModel):
     device: Device
     engine_version: str
     settings: JobSettings
-    glossary: list[str]
+    vocabulary_version: int = Field(ge=0)
+    vocabulary_terms_used: list[str]
+    corrections_applied: list[AppliedCorrection]
     segments: list[Segment]

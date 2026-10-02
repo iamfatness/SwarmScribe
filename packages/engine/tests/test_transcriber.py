@@ -2,8 +2,15 @@ import hashlib
 from types import SimpleNamespace
 
 import pytest
-from swarmscribe_engine import Transcriber, TranscribeSettings, UndecodableAudioError
-from swarmscribe_engine.transcriber import build_prompt, sha256_file
+from swarmscribe_engine import (
+    AppliedCorrection,
+    Correction,
+    Transcriber,
+    TranscribeSettings,
+    UndecodableAudioError,
+    Vocabulary,
+)
+from swarmscribe_engine.transcriber import sha256_file
 
 SETTINGS = TranscribeSettings(model="large-v3", compute_type="float16", device="cuda")
 
@@ -66,9 +73,9 @@ def test_model_is_loaded_once_and_reused(audio):
     assert len(model.calls) == 2
 
 
-def test_fixed_settings_are_passed_to_the_model(audio):
+def test_fixed_settings_and_hotwords_are_passed_to_the_model(audio):
     model = FakeModel()
-    make_transcriber(model).transcribe(audio, glossary=["Ashford", "José"])
+    make_transcriber(model).transcribe(audio, Vocabulary(version=2, terms=("Ashford", "José")))
     path_arg, kwargs = model.calls[0]
     assert path_arg == str(audio)
     assert kwargs == {
@@ -77,7 +84,7 @@ def test_fixed_settings_are_passed_to_the_model(audio):
         "temperature": [0.0, 0.2, 0.4],
         "vad_filter": True,
         "word_timestamps": True,
-        "initial_prompt": "Glossary: Ashford, José.",
+        "hotwords": "Ashford, José",
     }
 
 
@@ -102,16 +109,66 @@ def test_segments_and_words_are_converted(audio):
         ],
         duration=1.5,
     )
-    transcript = make_transcriber(model).transcribe(audio, glossary=["Ashford"])
+    vocabulary = Vocabulary(version=4, terms=("Ashford",))
+    transcript = make_transcriber(model).transcribe(audio, vocabulary)
     assert transcript.source_name == "recording.mp3"
     assert transcript.source_checksum == hashlib.sha256(audio.read_bytes()).hexdigest()
     assert transcript.duration == 1.5
     assert transcript.settings == SETTINGS
-    assert transcript.glossary == ("Ashford",)
+    assert transcript.vocabulary_version == 4
+    assert transcript.vocabulary_terms_used == ("Ashford",)
+    assert transcript.corrections_applied == ()
     (segment,) = transcript.segments
     assert segment.text == "Welcome to Ashford."
     assert segment.words[0].word == " Welcome"
     assert segment.words[1].probability == 0.7
+
+
+def test_without_a_vocabulary_no_hotwords_are_sent(audio):
+    model = FakeModel()
+    transcript = make_transcriber(model).transcribe(audio)
+    assert model.calls[0][1]["hotwords"] is None
+    assert "initial_prompt" not in model.calls[0][1]
+    assert transcript.vocabulary_version == 0
+    assert transcript.vocabulary_terms_used == ()
+
+
+def test_only_terms_within_the_budget_are_sent_and_recorded(audio):
+    model = FakeModel()
+    terms = tuple(f"term{i:04d}" for i in range(1000))
+    transcript = make_transcriber(model).transcribe(audio, Vocabulary(version=1, terms=terms))
+    used = transcript.vocabulary_terms_used
+    assert 0 < len(used) < len(terms)
+    assert used == terms[: len(used)]
+    assert model.calls[0][1]["hotwords"] == ", ".join(used)
+
+
+def test_corrections_are_applied_to_the_model_output(audio):
+    model = FakeModel(
+        segments=[
+            raw_segment(
+                0.0,
+                2.0,
+                " Thanks jay son.",
+                [
+                    raw_word(0.0, 0.5, " Thanks", 0.9),
+                    raw_word(0.5, 1.0, " jay", 0.8),
+                    raw_word(1.0, 2.0, " son.", 0.3),
+                ],
+            )
+        ],
+        duration=2.0,
+    )
+    vocabulary = Vocabulary(version=5, corrections=(Correction("jay son", "Jason"),))
+    transcript = make_transcriber(model).transcribe(audio, vocabulary)
+    (segment,) = transcript.segments
+    assert segment.text == "Thanks Jason."
+    assert segment.words[1].word == " Jason."
+    assert segment.words[1].original == " jay son."
+    assert segment.words[1].probability == 0.3
+    assert transcript.corrections_applied == (
+        AppliedCorrection(heard="jay son", replacement="Jason", count=1),
+    )
 
 
 def test_no_speech_gives_an_empty_transcript(audio):
@@ -178,24 +235,6 @@ def test_other_model_errors_propagate_unchanged(audio):
     transcriber = make_transcriber(FakeModel(error=RuntimeError("CUDA out of memory")))
     with pytest.raises(RuntimeError, match="CUDA out of memory"):
         transcriber.transcribe(audio)
-
-
-@pytest.mark.parametrize(
-    ("terms", "expected"),
-    [
-        ([], None),
-        (["  ", ""], None),
-        (["Ashford"], "Glossary: Ashford."),
-        ([" Ashford ", "", "José"], "Glossary: Ashford, José."),
-    ],
-)
-def test_build_prompt(terms, expected):
-    assert build_prompt(terms) == expected
-
-
-def test_blank_glossary_terms_are_not_recorded(audio):
-    transcript = make_transcriber(FakeModel()).transcribe(audio, glossary=[" Ashford ", " "])
-    assert transcript.glossary == ("Ashford",)
 
 
 def test_sha256_file_matches_hashlib(tmp_path):

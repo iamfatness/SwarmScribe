@@ -96,7 +96,9 @@ class Transcript:
     source_checksum: str
     duration: float
     settings: TranscribeSettings
-    glossary: tuple[str, ...]
+    vocabulary_version: int
+    vocabulary_terms_used: tuple[str, ...]
+    corrections_applied: tuple[AppliedCorrection, ...]
     segments: tuple[Segment, ...]
 
 

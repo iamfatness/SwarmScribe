@@ -30,7 +30,7 @@ def test_job_settings_reject_changes_to_fixed_behaviour(override):
         _settings(**override)
 
 
-@pytest.mark.parametrize("temperatures", [(), (0.0, 0.6), (-0.1,), (0.0, 1.0)])
+@pytest.mark.parametrize("temperatures", [(), (0.0, 0.6), (-0.1,), (0.0, 1.0), (float("nan"),)])
 def test_job_settings_reject_unclamped_temperature_ladder(temperatures):
     with pytest.raises(ValidationError):
         _settings(temperatures=temperatures)

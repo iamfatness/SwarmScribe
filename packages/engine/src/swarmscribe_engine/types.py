@@ -32,7 +32,7 @@ class TranscribeSettings:
     def __post_init__(self) -> None:
         if not self.temperatures:
             raise ValueError("temperatures must not be empty")
-        if any(t < 0.0 or t > MAX_TEMPERATURE for t in self.temperatures):
+        if any(not (0.0 <= t <= MAX_TEMPERATURE) for t in self.temperatures):
             raise ValueError(f"temperatures must be between 0.0 and {MAX_TEMPERATURE}")
 
 

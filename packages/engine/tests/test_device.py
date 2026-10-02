@@ -40,7 +40,7 @@ def test_settings_default_to_the_clamped_ladder():
     assert settings.temperatures == (0.0, 0.2, 0.4)
 
 
-@pytest.mark.parametrize("temperatures", [(), (0.0, 0.6), (-0.1,)])
+@pytest.mark.parametrize("temperatures", [(), (0.0, 0.6), (-0.1,), (float("nan"),)])
 def test_settings_reject_an_unclamped_ladder(temperatures):
     with pytest.raises(ValueError):
         TranscribeSettings(

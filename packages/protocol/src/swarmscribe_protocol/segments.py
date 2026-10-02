@@ -25,7 +25,7 @@ class JobSettings(WireModel):
     def _ladder_is_clamped(cls, value: tuple[float, ...]) -> tuple[float, ...]:
         if not value:
             raise ValueError("temperatures must not be empty")
-        if any(t < 0.0 or t > MAX_TEMPERATURE for t in value):
+        if any(not (0.0 <= t <= MAX_TEMPERATURE) for t in value):
             raise ValueError(f"temperatures must be between 0.0 and {MAX_TEMPERATURE}")
         return value
 

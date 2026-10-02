@@ -10,12 +10,14 @@ members = ["packages/*"]
 
 [tool.uv.sources]
 swarmscribe-protocol = { workspace = true }
+swarmscribe-engine = { workspace = true }
 
 [dependency-groups]
 dev = [
     "pytest>=8",
     "ruff>=0.6",
     "swarmscribe-protocol",
+    "swarmscribe-engine",
 ]
 
 [tool.pytest.ini_options]

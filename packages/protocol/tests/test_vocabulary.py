@@ -34,3 +34,10 @@ def test_applied_correction_counts_at_least_one():
     AppliedCorrection(heard="jay son", replacement="Jason", count=1)
     with pytest.raises(ValidationError):
         AppliedCorrection(heard="jay son", replacement="Jason", count=0)
+
+
+@pytest.mark.parametrize("field", ["heard", "replacement"])
+def test_correction_sides_cannot_be_only_whitespace(field):
+    values = {"heard": "jay son", "replacement": "Jason", field: " "}
+    with pytest.raises(ValidationError):
+        Correction(**values)

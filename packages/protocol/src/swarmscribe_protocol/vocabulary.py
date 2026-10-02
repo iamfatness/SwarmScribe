@@ -1,4 +1,4 @@
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from .base import WireModel
 
@@ -8,6 +8,13 @@ class Correction(WireModel):
 
     heard: str = Field(min_length=1)
     replacement: str = Field(min_length=1)
+
+    @field_validator("heard", "replacement")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must contain something other than whitespace")
+        return value
 
 
 class Vocabulary(WireModel):

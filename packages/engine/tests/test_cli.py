@@ -321,3 +321,14 @@ def test_the_glossary_flag_is_gone(tmp_path):
             transcribe_fn=None,
             resolve_fn=lambda preference: CPU,
         )
+
+
+@pytest.mark.parametrize("bad_line", ["-- => —", "& => and", "jay -- son => Jason"])
+def test_a_heard_side_with_a_part_that_has_no_word_is_rejected(tmp_path, bad_line):
+    corrections = tmp_path / "corrections.txt"
+    corrections.write_text(f"# header\nashferd => Ashford\n{bad_line}\n", encoding="utf-8")
+    with pytest.raises(
+        ValueError,
+        match=r"corrections\.txt line 3: 'heard as' must contain a word in every part",
+    ):
+        read_corrections(corrections)

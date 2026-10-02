@@ -1,4 +1,5 @@
 import argparse
+import re
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -34,13 +35,17 @@ def read_terms(path: Path) -> tuple[str, ...]:
 
 
 def read_corrections(path: Path) -> tuple[Correction, ...]:
-    corrections = []
+    corrections: list[Correction] = []
     for number, line in _content_lines(path):
         heard, arrow, replacement = line.partition("=>")
         heard, replacement = heard.strip(), replacement.strip()
         if not arrow or not heard or not replacement:
             raise ValueError(
                 f"{Path(path).name} line {number}: expected 'heard as => should be'"
+            )
+        if not all(re.search(r"\w", part) for part in heard.split()):
+            raise ValueError(
+                f"{Path(path).name} line {number}: 'heard as' must contain a word in every part"
             )
         corrections.append(Correction(heard=heard, replacement=replacement))
     return tuple(corrections)

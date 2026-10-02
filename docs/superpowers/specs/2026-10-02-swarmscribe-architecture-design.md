@@ -103,7 +103,7 @@ knowledge of jobs or leases.
 Interface:
 
 ```python
-transcribe(path: Path, settings: TranscribeSettings) -> Transcript
+transcribe(path: Path, settings: TranscribeSettings, glossary: Sequence[str] = ()) -> Transcript
 write_outputs(transcript: Transcript, out_dir: Path) -> OutputFiles  # txt, srt, segments.json
 resolve_device(preference: DevicePreference) -> DeviceChoice
 ```

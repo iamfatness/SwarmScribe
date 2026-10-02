@@ -18,7 +18,8 @@ class Correction(WireModel):
 
 
 class Vocabulary(WireModel):
-    """Words to recognise and fixes to apply. Version 0 means no vocabulary."""
+    """Words to recognise and fixes to apply. Version 0 means not assigned by a leader
+    (a local run, or no vocabulary)."""
 
     version: int = Field(ge=0)
     terms: list[str] = Field(default_factory=list)

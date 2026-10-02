@@ -212,7 +212,7 @@
         "type": "object"
       },
       "Vocabulary": {
-        "description": "Words to recognise and fixes to apply. Version 0 means no vocabulary.",
+        "description": "Words to recognise and fixes to apply. Version 0 means not assigned by a leader\n(a local run, or no vocabulary).",
         "properties": {
           "corrections": {
             "items": {
@@ -1037,7 +1037,7 @@
         "type": "object"
       }
     },
-    "description": "Words to recognise and fixes to apply. Version 0 means no vocabulary.",
+    "description": "Words to recognise and fixes to apply. Version 0 means not assigned by a leader\n(a local run, or no vocabulary).",
     "properties": {
       "corrections": {
         "items": {

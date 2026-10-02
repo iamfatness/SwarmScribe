@@ -30,14 +30,30 @@ Writes `out/recording.mp3.txt`, `out/recording.mp3.srt` and
 - `--device auto|cuda|cpu` — default `auto`: a CUDA GPU uses `large-v3`
   (`float16`); otherwise `distil-large-v3` (`int8`) on CPU.
 - `--model`, `--compute-type` — override the choice.
-- `--vocabulary` — a text file with one word, name or phrase per line. `#`
-  starts a comment. These bias recognition throughout the recording. Order is
+- `--vocabulary` — a text file with one word, name or phrase per line. These
+  bias recognition throughout the recording. Order is
   priority: Whisper can take only about 220 tokens of terms (typically 60-150
   terms, depending on how unusual they are), so put the ones that matter most
   at the top. `segments.json` lists exactly which were used.
 - `--corrections` — a text file with one fix per line, written
   `heard as => should be`, for example `jay son => Jason`. Applied after
   transcription as whole-word, case-insensitive replacements.
+
+In both files, blank lines are ignored and a line starting with `#` is a
+comment (a `#` later in a line is part of the text, so `C#` works).
+
+Rules for corrections:
+
+- Whole words only, case-insensitive. The longest rule wins.
+- Punctuation written on the "heard as" side must be present in the
+  transcript.
+- A multi-word rule matches only when nothing but spaces sits between the
+  words.
+- Possessive and hyphenated forms need their own line
+  (`jay son's => Jason's`).
+- Matches do not span a segment boundary.
+- Two lines with the same "heard as" text and different replacements are an
+  error.
 
 `segments.json` records which terms were used and every correction that
 fired, and keeps the original text of each corrected word.

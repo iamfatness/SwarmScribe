@@ -3,13 +3,34 @@
 From the final review of `protocol-engine` (2026-10-02). None blocks merge.
 Each is assigned to the plan that should pick it up.
 
-## For the vocabulary plan (spec section 16)
+## Done in the vocabulary plan (2026-10-02)
 
-- The fixed transcription settings are written as literals in two places
-  (`transcriber.py` call and `writers.py` JSON). Define them once in
-  `types.py` so `segments.json` cannot misreport what ran.
-- `json.dumps` would emit `NaN`/`Infinity` for a non-finite start, end or
-  duration; pass `allow_nan=False` in `render_segments_json`.
+- Fixed transcription settings defined once (`FIXED_SETTINGS`).
+- `allow_nan=False` in `render_segments_json`.
+- `TranscribeSettings.temperatures` coerced to a tuple.
+
+## Vocabulary and corrections — carried forward
+
+- A corrections line starting with `#` is a comment, so `#1 => number one`
+  is silently skipped. Documented; consider an escape or a warning.
+- No Unicode normalisation: a `heard` typed in decomposed form (files saved
+  on macOS) or with a straight apostrophe will not match Whisper's composed
+  characters or curly apostrophe. NFC-normalise both sides.
+- A non-UTF-8 vocabulary or corrections file (for example UTF-16) gives a
+  bare codec error; name the file and say "save as UTF-8".
+- The CLI prints nothing about what was used. A stderr summary such as
+  "vocabulary: 41 of 97 terms used; 3 corrections fired 7 times" would help.
+- Matcher cost is words x rules (about 9 s for 30,000 words x 1,000 rules).
+  Index rules by first word when files grow.
+- No CLI test runs the real corrections through to `txt`/`srt` (every CLI
+  test fakes the transcriber); the "--glossary is gone" test passes on any
+  argparse error.
+- Overlap trimming drops enclosing punctuation equal to the replacement's
+  own (`(ashferd)` with `ashferd => (sic)` gives `(sic)`).
+- The protocol `Correction` accepts a `heard` with no word character; only
+  the CLI rejects it. The leader should apply the CLI's checks on sync.
+- Corrections have not been seen firing on real speech: the smoke audio is a
+  tone. Needs a short clip that may be committed publicly.
 
 ## For the leader spec and plan
 
@@ -21,9 +42,7 @@ Each is assigned to the plan that should pick it up.
 
 ## For the follower plan
 
-- `TranscribeSettings(temperatures=[...])` validates but is unhashable, which
-  breaks the cached module-level `transcribe()`. Coerce to a tuple in
-  `__post_init__`, and add a test that the model is reused.
+- Add a test that the cached module-level `transcribe()` reuses the model.
 - The engine has no progress callback for `HeartbeatRequest.progress`.
 - A write that fails before `os.replace` leaves a `<name>.tmp` behind.
 - The CLI's broad `except` is right for a CLI; the follower must call

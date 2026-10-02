@@ -449,10 +449,11 @@ Correction(heard: str, replacement: str)   # both non-empty
 1. **Biasing.** Terms are given to Whisper as hotwords, which faster-whisper
    places in the prompt of every window of the recording. The initial prompt
    is not used: with hotwords set it would only repeat the same terms in the
-   first window. faster-whisper truncates hotwords to about 220 tokens, so the
-   engine takes leading terms, in file order, up to a fixed budget of 600
-   characters and stops at the first term that does not fit; the rest still
-   benefit from corrections. The terms actually used are recorded.
+   first window. faster-whisper truncates hotwords at 223 tokens, so the
+   engine takes leading terms, in file order, up to 220 tokens as counted by
+   the loaded model's own tokenizer, and stops at the first term that does
+   not fit; the rest still benefit from corrections. The terms actually used
+   are recorded.
 2. **Corrections.** After transcription, each correction is applied as a
    whole-word, case-insensitive match, longest `heard` first, to segment text
    and to the word list. A correction spanning several words merges them into
@@ -460,7 +461,25 @@ Correction(heard: str, replacement: str)   # both non-empty
    the group.
 3. A correction never matches inside a longer word, and corrections are not
    re-applied to their own output. Punctuation and spacing around a match are
-   kept. Version 0 means no vocabulary.
+   kept. Version 0 means not assigned by a leader (a local run, or no
+   vocabulary).
+4. Matching rules, in full:
+   - The longest rule wins: most words, then most characters counting any
+     punctuation written on the `heard` side, then file order. The winning
+     rule consumes its words even when it changes nothing.
+   - Punctuation written on the `heard` side must be present in the
+     transcript and is replaced along with the word (`c++ => C++` does not
+     match a bare `c`).
+   - Punctuation the replacement already supplies is not repeated
+     (`dr => Dr.` on `dr.` gives `Dr.`).
+   - A multi-word rule matches only when nothing but whitespace sits between
+     its words; possessive and hyphenated forms need their own line.
+   - Matches do not span a segment boundary.
+5. A corrections file is rejected, naming the file and line, when a line has
+   no `=>`, has an empty side, has a `heard` part with no word character, or
+   repeats an earlier `heard` with a different replacement. Exact duplicates
+   are dropped. A line starting with `#` is a comment, so a `heard` text
+   cannot begin with `#`.
 
 ### 16.4 What is recorded (`segments.json`, protocol)
 

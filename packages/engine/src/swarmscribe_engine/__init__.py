@@ -1,4 +1,5 @@
 from .device import resolve_device
+from .transcriber import Transcriber, transcribe
 from .types import (
     DEFAULT_TEMPERATURES,
     LANGUAGE,
@@ -30,10 +31,12 @@ __all__ = [
     "EngineError",
     "OutputFiles",
     "Segment",
+    "Transcriber",
     "Transcript",
     "TranscribeSettings",
     "UndecodableAudioError",
     "Word",
     "resolve_device",
+    "transcribe",
     "write_outputs",
 ]

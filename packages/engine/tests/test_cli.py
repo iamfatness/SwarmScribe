@@ -1,11 +1,13 @@
+import pytest
 from swarmscribe_engine import (
+    Correction,
     DeviceChoice,
     DeviceUnavailableError,
     TranscribeSettings,
     UndecodableAudioError,
     Vocabulary,
 )
-from swarmscribe_engine.cli import read_glossary, run
+from swarmscribe_engine.cli import read_corrections, read_terms, run
 
 CPU = DeviceChoice(device="cpu", model="distil-large-v3", compute_type="int8")
 
@@ -21,8 +23,8 @@ def test_run_writes_outputs_and_prints_their_paths(tmp_path, make_transcript, ca
     out_dir = tmp_path / "out"
     calls = []
 
-    def fake_transcribe(path, settings, glossary):
-        calls.append((path, settings, glossary))
+    def fake_transcribe(path, settings, vocabulary):
+        calls.append((path, settings, vocabulary))
         return make_transcript(settings=settings)
 
     code = run(
@@ -56,7 +58,7 @@ def test_device_preference_is_forwarded(tmp_path, make_transcript):
 
     run(
         [str(_recording(tmp_path)), "--out", str(tmp_path), "--device", "cpu"],
-        transcribe_fn=lambda path, settings, glossary: make_transcript(),
+        transcribe_fn=lambda path, settings, vocabulary: make_transcript(),
         resolve_fn=resolve,
     )
     assert seen == ["cpu"]
@@ -65,7 +67,7 @@ def test_device_preference_is_forwarded(tmp_path, make_transcript):
 def test_model_and_compute_type_can_be_overridden(tmp_path, make_transcript):
     seen = []
 
-    def fake_transcribe(path, settings, glossary):
+    def fake_transcribe(path, settings, vocabulary):
         seen.append(settings)
         return make_transcript()
 
@@ -85,31 +87,31 @@ def test_model_and_compute_type_can_be_overridden(tmp_path, make_transcript):
     assert seen == [TranscribeSettings(model="tiny.en", compute_type="float32", device="cpu")]
 
 
-def test_glossary_file_is_read_and_passed(tmp_path, make_transcript):
-    glossary = tmp_path / "glossary.txt"
-    glossary.write_text("# people\nJosé\n\n  Ashford  \n", encoding="utf-8")
+def test_vocabulary_file_is_read_and_passed(tmp_path, make_transcript):
+    vocabulary = tmp_path / "vocabulary.txt"
+    vocabulary.write_text("# people\nJosé\n\n  Ashford  \n", encoding="utf-8")
     seen = []
 
-    def fake_transcribe(path, settings, terms):
-        seen.append(terms)
+    def fake_transcribe(path, settings, vocabulary):
+        seen.append(vocabulary)
         return make_transcript()
 
     run(
-        [str(_recording(tmp_path)), "--out", str(tmp_path), "--glossary", str(glossary)],
+        [str(_recording(tmp_path)), "--out", str(tmp_path), "--vocabulary", str(vocabulary)],
         transcribe_fn=fake_transcribe,
         resolve_fn=lambda preference: CPU,
     )
     assert seen == [Vocabulary(terms=("José", "Ashford"))]
 
 
-def test_glossary_saved_by_notepad_with_a_bom_is_read_cleanly(tmp_path):
-    glossary = tmp_path / "glossary.txt"
-    glossary.write_bytes(b"\xef\xbb\xbfAshford\r\nJos\xc3\xa9\r\n")
-    assert read_glossary(glossary) == ("Ashford", "José")
+def test_vocabulary_saved_by_notepad_with_a_bom_is_read_cleanly(tmp_path):
+    vocabulary = tmp_path / "vocabulary.txt"
+    vocabulary.write_bytes(b"\xef\xbb\xbfAshford\r\nJos\xc3\xa9\r\n")
+    assert read_terms(vocabulary) == ("Ashford", "José")
 
 
 def test_missing_recording_exits_2_with_a_message(tmp_path, capsys):
-    def fake_transcribe(path, settings, glossary):
+    def fake_transcribe(path, settings, vocabulary):
         raise FileNotFoundError(f"recording not found: {path}")
 
     code = run(
@@ -121,16 +123,16 @@ def test_missing_recording_exits_2_with_a_message(tmp_path, capsys):
     assert "error: recording not found" in capsys.readouterr().err
 
 
-def test_missing_glossary_file_exits_2_with_a_message(tmp_path, make_transcript, capsys):
+def test_missing_vocabulary_file_exits_2_with_a_message(tmp_path, make_transcript, capsys):
     code = run(
         [
             str(_recording(tmp_path)),
             "--out",
             str(tmp_path),
-            "--glossary",
+            "--vocabulary",
             str(tmp_path / "nope.txt"),
         ],
-        transcribe_fn=lambda path, settings, glossary: make_transcript(),
+        transcribe_fn=lambda path, settings, vocabulary: make_transcript(),
         resolve_fn=lambda preference: CPU,
     )
     assert code == 2
@@ -142,7 +144,7 @@ def test_missing_glossary_file_exits_2_with_a_message(tmp_path, make_transcript,
 def test_undecodable_audio_exits_2_and_writes_nothing(tmp_path, capsys):
     out_dir = tmp_path / "out"
 
-    def fake_transcribe(path, settings, glossary):
+    def fake_transcribe(path, settings, vocabulary):
         raise UndecodableAudioError("cannot decode recording.mp3: Invalid data")
 
     code = run(
@@ -161,19 +163,19 @@ def test_unavailable_device_exits_2(tmp_path, make_transcript, capsys):
 
     code = run(
         [str(_recording(tmp_path)), "--out", str(tmp_path), "--device", "cuda"],
-        transcribe_fn=lambda path, settings, glossary: make_transcript(),
+        transcribe_fn=lambda path, settings, vocabulary: make_transcript(),
         resolve_fn=resolve,
     )
     assert code == 2
     assert "no CUDA GPU" in capsys.readouterr().err
 
 
-def test_glossary_that_is_not_utf8_exits_2_without_a_traceback(tmp_path, make_transcript, capsys):
-    glossary = tmp_path / "glossary.txt"
-    glossary.write_bytes(b"\xff\xfe\x00bad")
+def test_vocabulary_that_is_not_utf8_exits_2_without_a_traceback(tmp_path, make_transcript, capsys):
+    vocabulary = tmp_path / "vocabulary.txt"
+    vocabulary.write_bytes(b"\xff\xfe\x00bad")
     code = run(
-        [str(_recording(tmp_path)), "--out", str(tmp_path), "--glossary", str(glossary)],
-        transcribe_fn=lambda path, settings, glossary: make_transcript(),
+        [str(_recording(tmp_path)), "--out", str(tmp_path), "--vocabulary", str(vocabulary)],
+        transcribe_fn=lambda path, settings, vocabulary: make_transcript(),
         resolve_fn=lambda preference: CPU,
     )
     assert code == 2
@@ -187,7 +189,7 @@ def test_out_pointing_at_a_regular_file_exits_2(tmp_path, make_transcript, capsy
     not_a_directory.write_text("occupied", encoding="utf-8")
     code = run(
         [str(_recording(tmp_path)), "--out", str(not_a_directory)],
-        transcribe_fn=lambda path, settings, glossary: make_transcript(),
+        transcribe_fn=lambda path, settings, vocabulary: make_transcript(),
         resolve_fn=lambda preference: CPU,
     )
     assert code == 2
@@ -195,7 +197,7 @@ def test_out_pointing_at_a_regular_file_exits_2(tmp_path, make_transcript, capsy
 
 
 def test_invalid_model_size_exits_2_with_the_message(tmp_path, capsys):
-    def fake_transcribe(path, settings, glossary):
+    def fake_transcribe(path, settings, vocabulary):
         raise ValueError("Invalid model size 'nope'")
 
     code = run(
@@ -208,7 +210,7 @@ def test_invalid_model_size_exits_2_with_the_message(tmp_path, capsys):
 
 
 def test_runtime_failure_exits_2_with_the_message(tmp_path, capsys):
-    def fake_transcribe(path, settings, glossary):
+    def fake_transcribe(path, settings, vocabulary):
         raise RuntimeError("CUDA out of memory")
 
     code = run(
@@ -218,3 +220,104 @@ def test_runtime_failure_exits_2_with_the_message(tmp_path, capsys):
     )
     assert code == 2
     assert "CUDA out of memory" in capsys.readouterr().err
+
+
+def test_corrections_file_is_read_and_passed(tmp_path, make_transcript):
+    corrections = tmp_path / "corrections.txt"
+    corrections.write_text(
+        "# names\njay son => Jason\n\n  ashferd=>Ashford  \n", encoding="utf-8"
+    )
+    seen = []
+
+    def fake_transcribe(path, settings, vocabulary):
+        seen.append(vocabulary)
+        return make_transcript()
+
+    code = run(
+        [str(_recording(tmp_path)), "--out", str(tmp_path), "--corrections", str(corrections)],
+        transcribe_fn=fake_transcribe,
+        resolve_fn=lambda preference: CPU,
+    )
+    assert code == 0
+    assert seen == [
+        Vocabulary(
+            corrections=(Correction("jay son", "Jason"), Correction("ashferd", "Ashford"))
+        )
+    ]
+
+
+def test_vocabulary_and_corrections_can_be_given_together(tmp_path, make_transcript):
+    vocabulary = tmp_path / "vocabulary.txt"
+    vocabulary.write_text("Ashford\n", encoding="utf-8")
+    corrections = tmp_path / "corrections.txt"
+    corrections.write_text("ashferd => Ashford\n", encoding="utf-8")
+    seen = []
+
+    def fake_transcribe(path, settings, vocab):
+        seen.append(vocab)
+        return make_transcript()
+
+    run(
+        [
+            str(_recording(tmp_path)),
+            "--out",
+            str(tmp_path),
+            "--vocabulary",
+            str(vocabulary),
+            "--corrections",
+            str(corrections),
+        ],
+        transcribe_fn=fake_transcribe,
+        resolve_fn=lambda preference: CPU,
+    )
+    assert seen == [
+        Vocabulary(version=0, terms=("Ashford",), corrections=(Correction("ashferd", "Ashford"),))
+    ]
+
+
+def test_corrections_saved_by_notepad_with_a_bom_and_crlf_are_read_cleanly(tmp_path):
+    corrections = tmp_path / "corrections.txt"
+    corrections.write_bytes(b"\xef\xbb\xbfjose => Jos\xc3\xa9\r\njay son => Jason\r\n")
+    assert read_corrections(corrections) == (
+        Correction("jose", "José"),
+        Correction("jay son", "Jason"),
+    )
+
+
+def test_a_replacement_may_itself_contain_an_arrow(tmp_path):
+    corrections = tmp_path / "corrections.txt"
+    corrections.write_text("a to b => a => b\n", encoding="utf-8")
+    assert read_corrections(corrections) == (Correction("a to b", "a => b"),)
+
+
+@pytest.mark.parametrize("bad_line", ["jay son Jason", "=> Jason", "jay son =>", "   =>   "])
+def test_a_malformed_corrections_line_names_the_file_and_line(tmp_path, bad_line):
+    corrections = tmp_path / "corrections.txt"
+    corrections.write_text(f"# header\nashferd => Ashford\n{bad_line}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"corrections\.txt line 3"):
+        read_corrections(corrections)
+
+
+def test_a_malformed_corrections_file_exits_2_without_a_traceback(
+    tmp_path, make_transcript, capsys
+):
+    corrections = tmp_path / "corrections.txt"
+    corrections.write_text("jay son Jason\n", encoding="utf-8")
+    code = run(
+        [str(_recording(tmp_path)), "--out", str(tmp_path), "--corrections", str(corrections)],
+        transcribe_fn=lambda path, settings, vocabulary: make_transcript(),
+        resolve_fn=lambda preference: CPU,
+    )
+    err = capsys.readouterr().err
+    assert code == 2
+    assert err.startswith("error: corrections.txt line 1")
+    assert "Traceback" not in err
+
+
+def test_the_glossary_flag_is_gone(tmp_path):
+    with pytest.raises(SystemExit):
+        run(
+            [str(_recording(tmp_path)), "--out", str(tmp_path), "--glossary", "x.txt"],
+            transcribe_fn=None,
+            resolve_fn=lambda preference: CPU,
+        )

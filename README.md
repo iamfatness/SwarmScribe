@@ -21,7 +21,7 @@ Design: [`docs/superpowers/specs/2026-10-02-swarmscribe-architecture-design.md`]
 
 ```
 uv sync
-uv run swarmscribe-engine recording.mp3 --out out --glossary glossary.txt
+uv run swarmscribe-engine recording.mp3 --out out --vocabulary vocabulary.txt --corrections corrections.txt
 ```
 
 Writes `out/recording.mp3.txt`, `out/recording.mp3.srt` and
@@ -30,9 +30,16 @@ Writes `out/recording.mp3.txt`, `out/recording.mp3.srt` and
 - `--device auto|cuda|cpu` — default `auto`: a CUDA GPU uses `large-v3`
   (`float16`); otherwise `distil-large-v3` (`int8`) on CPU.
 - `--model`, `--compute-type` — override the choice.
-- `--glossary` — a text file with one name or term per line. `#` starts a
-  comment. A short list of the names, places and specialist terms in your
-  recordings noticeably improves accuracy.
+- `--vocabulary` — a text file with one word, name or phrase per line. `#`
+  starts a comment. These bias recognition throughout the recording. Order is
+  priority: roughly the first 600 characters of terms are used, so put the
+  ones that matter most at the top.
+- `--corrections` — a text file with one fix per line, written
+  `heard as => should be`, for example `jay son => Jason`. Applied after
+  transcription as whole-word, case-insensitive replacements.
+
+`segments.json` records which terms were used and every correction that
+fired, and keeps the original text of each corrected word.
 
 Some settings are fixed on purpose: English only, no conditioning on previous
 text (prevents repeated-sentence loops), and a temperature ladder capped at

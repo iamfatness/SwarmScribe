@@ -5,18 +5,45 @@ from pathlib import Path
 
 from .device import resolve_device
 from .transcriber import transcribe
-from .types import DeviceChoice, EngineError, TranscribeSettings, Transcript, Vocabulary
+from .types import (
+    Correction,
+    DeviceChoice,
+    EngineError,
+    TranscribeSettings,
+    Transcript,
+    Vocabulary,
+)
 from .writers import write_outputs
 
 TranscribeFn = Callable[[Path, TranscribeSettings, Vocabulary], Transcript]
 ResolveFn = Callable[[str], DeviceChoice]
 
 
-def read_glossary(path: Path) -> tuple[str, ...]:
+def _content_lines(path: Path) -> list[tuple[int, str]]:
+    """Numbered, stripped lines of a UTF-8 text file, without blanks and # comments."""
     lines = Path(path).read_text(encoding="utf-8-sig").splitlines()
-    return tuple(
-        line.strip() for line in lines if line.strip() and not line.strip().startswith("#")
-    )
+    return [
+        (number, line.strip())
+        for number, line in enumerate(lines, start=1)
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
+def read_terms(path: Path) -> tuple[str, ...]:
+    return tuple(line for _, line in _content_lines(path))
+
+
+def read_corrections(path: Path) -> tuple[Correction, ...]:
+    corrections = []
+    for number, line in _content_lines(path):
+        heard, arrow, replacement = line.partition("=>")
+        heard, replacement = heard.strip(), replacement.strip()
+        if not arrow or not heard or not replacement:
+            raise ValueError(
+                f"{Path(path).name} line {number}: expected 'heard as => should be'"
+            )
+        corrections.append(Correction(heard=heard, replacement=replacement))
+    return tuple(corrections)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -26,7 +53,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("file", type=Path, help="audio or video file")
     parser.add_argument("--out", type=Path, required=True, help="output directory")
-    parser.add_argument("--glossary", type=Path, help="text file, one name or term per line")
+    parser.add_argument(
+        "--vocabulary", type=Path, help="text file, one word, name or phrase per line"
+    )
+    parser.add_argument(
+        "--corrections", type=Path, help="text file, one 'heard as => should be' per line"
+    )
     parser.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
     parser.add_argument("--model", help="override the model chosen for the device")
     parser.add_argument("--compute-type", help="override the compute type chosen for the device")
@@ -47,8 +79,11 @@ def run(
             compute_type=args.compute_type or choice.compute_type,
             device=choice.device,
         )
-        terms = read_glossary(args.glossary) if args.glossary else ()
-        transcript = transcribe_fn(args.file, settings, Vocabulary(terms=terms))
+        vocabulary = Vocabulary(
+            terms=read_terms(args.vocabulary) if args.vocabulary else (),
+            corrections=read_corrections(args.corrections) if args.corrections else (),
+        )
+        transcript = transcribe_fn(args.file, settings, vocabulary)
         files = write_outputs(transcript, args.out)
     except (EngineError, OSError, UnicodeDecodeError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)

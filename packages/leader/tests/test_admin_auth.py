@@ -30,6 +30,58 @@ async def test_a_malformed_authorization_is_401(admin_client, header):
     assert response.status_code == 401
 
 
+async def test_a_401_without_a_token_says_to_send_a_bearer_token(admin_client):
+    response = await admin_client.get("/v1/admin/whoami")
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+@pytest.mark.parametrize(
+    "make_token",
+    [
+        lambda idp: "not-a-token",
+        lambda idp: idp.entra(signed_with="rogue"),
+        lambda idp: idp.entra(aud="another-client"),
+    ],
+    ids=["malformed", "forged", "wrong-audience"],
+)
+async def test_a_401_for_an_invalid_token_says_invalid_token(admin_client, idp, make_token):
+    response = await admin_client.get("/v1/admin/whoami", headers=bearer(make_token(idp)))
+    assert (response.status_code, response.json()["code"]) == (401, "unauthorized")
+    assert response.headers["www-authenticate"] == 'Bearer error="invalid_token"'
+
+
+async def test_a_401_for_an_expired_token_says_invalid_token(admin_client, idp):
+    response = await admin_client.get("/v1/admin/whoami", headers=bearer(idp.entra(lifetime=-300)))
+    assert (response.status_code, response.json()["code"]) == (401, "token_expired")
+    assert response.headers["www-authenticate"] == 'Bearer error="invalid_token"'
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        lambda token: f"Bearer\t{token}",  # a tab is not the separator
+        lambda token: f" Bearer {token}",  # nor is a leading space allowed
+        lambda token: "Bearer " + token + "x" * 20_000,  # oversize
+    ],
+    ids=["tab-separator", "leading-space", "oversize"],
+)
+async def test_odd_authorization_headers_are_401(admin_client, idp, header):
+    token = idp.entra(groups=[idp.ENTRA_GROUPS["admin"]])
+    response = await admin_client.get(
+        "/v1/admin/whoami", headers=[(b"authorization", header(token).encode())]
+    )
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"].startswith("Bearer")
+
+
+@pytest.mark.parametrize("name", ["access_token", "token", "id_token"])
+async def test_a_token_only_in_the_query_string_is_401(admin_client, idp, name):
+    token = idp.entra(groups=[idp.ENTRA_GROUPS["admin"]])
+    response = await admin_client.get("/v1/admin/whoami", params={name: token})
+    assert (response.status_code, response.headers["www-authenticate"]) == (401, "Bearer")
+
+
 @pytest.mark.parametrize("role", ["viewer", "operator", "admin"])
 @pytest.mark.parametrize("provider", ["entra", "google"])
 async def test_each_provider_signs_in_with_its_role(admin_client, idp, provider, role):
@@ -260,3 +312,4 @@ async def test_an_admin_token_is_not_accepted_on_follower_routes(admin_client, i
     for path in ("/v1/jobs/claim", f"/v1/jobs/{job}/heartbeat", "/v1/followers/deregister"):
         response = await admin_client.post(path, headers=headers, json={})
         assert (response.status_code, response.json()["code"]) == (401, "unauthorized"), path
+        assert response.headers["www-authenticate"] == 'Bearer error="invalid_token"', path

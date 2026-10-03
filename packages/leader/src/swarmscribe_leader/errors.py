@@ -13,8 +13,18 @@ class LeaderError(Exception):
 
 
 class Unauthorized(LeaderError):
+    """No usable credential was sent. Answered with `WWW-Authenticate: Bearer`."""
+
     status = 401
     code = "unauthorized"
+    bearer_error: str | None = None
+
+
+class InvalidToken(Unauthorized):
+    """A credential was sent but is not valid (malformed, forged, expired, revoked).
+    Answered with `WWW-Authenticate: Bearer error="invalid_token"` (RFC 6750)."""
+
+    bearer_error = "invalid_token"
 
 
 class Forbidden(LeaderError):

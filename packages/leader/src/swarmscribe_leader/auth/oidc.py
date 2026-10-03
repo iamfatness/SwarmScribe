@@ -14,7 +14,7 @@ import jwt
 from jwt.algorithms import RSAAlgorithm
 
 from ..config import Settings
-from ..errors import Unauthorized
+from ..errors import InvalidToken, Unauthorized
 
 logger = logging.getLogger(__name__)
 
@@ -227,23 +227,23 @@ class TokenVerifier:
         if not self.providers:
             raise Unauthorized("sign-in is not configured on this leader")
         if len(token) > MAX_TOKEN_CHARS:
-            raise Unauthorized("the sign-in token is too large")
+            raise InvalidToken("the sign-in token is too large")
         try:
             header = jwt.get_unverified_header(token)
             unverified = jwt.decode(token, options={"verify_signature": False})
         except jwt.PyJWTError as exc:
-            raise Unauthorized("the sign-in token is malformed") from exc
+            raise InvalidToken("the sign-in token is malformed") from exc
         if header.get("alg") != "RS256":
-            raise Unauthorized("the sign-in token must be signed with RS256")
+            raise InvalidToken("the sign-in token must be signed with RS256")
         provider = self._provider_for(unverified.get("iss"))
         if provider is None:
-            raise Unauthorized("the sign-in token is from an issuer this leader does not accept")
+            raise InvalidToken("the sign-in token is from an issuer this leader does not accept")
         kid = header.get("kid")
         if not isinstance(kid, str) or not kid:
-            raise Unauthorized("the sign-in token names no signing key")
+            raise InvalidToken("the sign-in token names no signing key")
         key = await self._keys[provider.name].key(kid)
         if key is None:
-            raise Unauthorized("the sign-in token is signed with an unknown key")
+            raise InvalidToken("the sign-in token is signed with an unknown key")
         try:
             claims = jwt.decode(
                 token,
@@ -255,9 +255,9 @@ class TokenVerifier:
                 options={"require": ["exp", "iat", "iss", "aud", "sub"], "strict_aud": True},
             )
         except jwt.ExpiredSignatureError as exc:
-            raise Unauthorized("the sign-in token has expired", code="token_expired") from exc
+            raise InvalidToken("the sign-in token has expired", code="token_expired") from exc
         except jwt.PyJWTError as exc:
-            raise Unauthorized(f"the sign-in token is not valid: {exc}") from exc
+            raise InvalidToken(f"the sign-in token is not valid: {exc}") from exc
         email = self._check_provider_claims(provider, claims)
         return Identity(
             provider=provider.name,
@@ -272,15 +272,15 @@ class TokenVerifier:
         """Provider-specific checks; returns the person's email (lowercase) if known."""
         if provider.name == "entra":
             if str(claims.get("tid", "")).lower() != provider.tenant_id:
-                raise Unauthorized("the sign-in token is from another Entra ID tenant")
+                raise InvalidToken("the sign-in token is from another Entra ID tenant")
             email = claims.get("email") or claims.get("preferred_username")
         else:
             verified = claims.get("email_verified")
             if not (verified is True or verified == "true"):  # 1 == True, so no `in`
-                raise Unauthorized("the Google account's email address is not verified")
+                raise InvalidToken("the Google account's email address is not verified")
             if provider.hosted_domain and str(claims.get("hd", "")).lower() != (
                 provider.hosted_domain
             ):
-                raise Unauthorized("the Google account is not in the allowed hosted domain")
+                raise InvalidToken("the Google account is not in the allowed hosted domain")
             email = claims.get("email")
         return str(email).lower() if email else None

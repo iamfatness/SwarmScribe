@@ -7,7 +7,7 @@ from sqlalchemy.exc import DBAPIError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from swarmscribe_protocol import ErrorBody
 
-from ..errors import LeaderError
+from ..errors import LeaderError, Unauthorized
 from ..storage.base import StorageError, StorageUnavailable
 from .admin_auth import audit_refused_change
 
@@ -41,8 +41,13 @@ def install(app: FastAPI) -> None:
     async def leader_error(request: Request, exc: LeaderError) -> JSONResponse:
         if exc.status in (400, 404, 409, 422):
             await audit_refused_change(request, exc.code)
-        headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
-        return error_response(exc.code, exc.message, exc.status, headers=headers)
+        headers: dict[str, str] = {}
+        if exc.retry_after:
+            headers["Retry-After"] = str(exc.retry_after)
+        if isinstance(exc, Unauthorized):  # RFC 6750: say how to authenticate
+            error = exc.bearer_error
+            headers["WWW-Authenticate"] = f'Bearer error="{error}"' if error else "Bearer"
+        return error_response(exc.code, exc.message, exc.status, headers=headers or None)
 
     @app.exception_handler(StorageError)
     async def storage_error(_request: Request, exc: StorageError) -> JSONResponse:

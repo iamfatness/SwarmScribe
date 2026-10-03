@@ -7,7 +7,7 @@ from swarmscribe_protocol import PROTOCOL_VERSION, RegisterRequest
 
 from .. import audit
 from ..db.models import Follower, JoinToken
-from ..errors import Conflict, Forbidden, NotFound, Unauthorized
+from ..errors import Conflict, Forbidden, InvalidToken, NotFound
 from ..jobs.store import release_all
 from .secrets import hash_secret, new_secret
 
@@ -53,7 +53,7 @@ async def register(
         .with_for_update()
     )
     if token is None or token.revoked or token.expires_at <= now or token.uses >= token.max_uses:
-        raise Unauthorized("the join token is not valid")
+        raise InvalidToken("the join token is not valid")
     token.uses += 1
     credential = new_secret()
     follower = Follower(
@@ -85,7 +85,7 @@ async def authenticate(session: AsyncSession, credential: str, *, now: datetime)
         .execution_options(populate_existing=True)
     )
     if follower is None:
-        raise Unauthorized("unknown follower credential")
+        raise InvalidToken("unknown follower credential")
     if follower.state == "revoked":
         raise Forbidden("this follower has been revoked")
     if follower.state == "gone":

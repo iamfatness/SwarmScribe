@@ -148,6 +148,7 @@ async def test_refresh_returns_new_tokens_and_sends_what_the_provider_needs(idp)
             client_id="google-client",
             refresh_token="refresh-1",
             client_secret="google-device-secret",
+            provider="google",
         )
     assert tokens.refresh_token is None  # Google keeps the old refresh token valid
     assert provider.token_forms == [
@@ -165,7 +166,11 @@ async def test_a_refused_refresh_asks_for_a_new_login():
     async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
         with pytest.raises(SignInError, match="run `swarmscribe-admin login`") as excinfo:
             await refresh_tokens(
-                http, token_endpoint=ENTRA.token_endpoint, client_id="c", refresh_token="r-9"
+                http,
+                token_endpoint=ENTRA.token_endpoint,
+                client_id="c",
+                refresh_token="r-9",
+                provider="entra",
             )
     assert "r-9" not in str(excinfo.value)
 
@@ -409,12 +414,45 @@ async def test_refresh_refuses_a_bad_endpoint_before_any_request(endpoint):
     assert "r-9" not in str(excinfo.value)
 
 
-async def test_refresh_without_a_provider_still_only_trusts_known_hosts():
+async def test_refresh_requires_a_provider():
+    provider = CountingProvider([])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
+        with pytest.raises(TypeError):
+            await refresh_tokens(  # type: ignore[call-arg]
+                http,
+                token_endpoint=ENTRA.token_endpoint,
+                client_id="c",
+                refresh_token="r",
+            )
+    assert provider.requests == 0
+
+
+async def test_refresh_with_an_unknown_provider_is_refused():
     provider = CountingProvider([])
     async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
         with pytest.raises(SignInError, match="not a trusted"):
             await refresh_tokens(
-                http, token_endpoint="https://evil.test/token", client_id="c", refresh_token="r"
+                http,
+                token_endpoint="https://evil.test/token",
+                client_id="c",
+                refresh_token="r",
+                provider="evil",
+            )
+    assert provider.requests == 0
+
+
+@pytest.mark.parametrize("padding", [" {}", "{} ", "\t{}", "{}\n", " {} "])
+async def test_an_endpoint_with_surrounding_whitespace_is_refused(padding):
+    endpoint = padding.format(ENTRA.token_endpoint)
+    provider = CountingProvider([])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
+        with pytest.raises(SignInError, match="not a trusted"):
+            await refresh_tokens(
+                http,
+                token_endpoint=endpoint,
+                client_id="c",
+                refresh_token="r",
+                provider="entra",
             )
     assert provider.requests == 0
 
@@ -524,6 +562,13 @@ def test_a_malformed_per_leader_entry_is_refused(tmp_path, overrides):
     assert "id-token-secret" not in str(excinfo.value)
 
 
+def test_a_null_entry_is_refused(tmp_path):
+    path = tmp_path / "credentials.json"
+    write_cache(path, None)
+    with pytest.raises(CredentialsFileError, match="corrupted"):
+        CredentialStore(path).load("https://leader.example.org")
+
+
 def test_an_entry_missing_a_field_is_refused(tmp_path):
     entry = good_entry()
     del entry["token_endpoint"]
@@ -545,7 +590,11 @@ async def test_invalid_grant_asks_for_a_new_login(status):
     async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
         with pytest.raises(SignInError, match="run `swarmscribe-admin login`"):
             await refresh_tokens(
-                http, token_endpoint=ENTRA.token_endpoint, client_id="c", refresh_token="r"
+                http,
+                token_endpoint=ENTRA.token_endpoint,
+                client_id="c",
+                refresh_token="r",
+                provider="entra",
             )
 
 
@@ -563,7 +612,11 @@ async def test_a_provider_outage_says_try_again_not_log_in_again(status, body):
     async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
         with pytest.raises(SignInError, match="unavailable") as excinfo:
             await refresh_tokens(
-                http, token_endpoint=ENTRA.token_endpoint, client_id="c", refresh_token="r"
+                http,
+                token_endpoint=ENTRA.token_endpoint,
+                client_id="c",
+                refresh_token="r",
+                provider="entra",
             )
     assert "login" not in str(excinfo.value)
 
@@ -573,6 +626,10 @@ async def test_another_refusal_names_the_error_but_not_the_token():
     async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
         with pytest.raises(SignInError, match="invalid_client") as excinfo:
             await refresh_tokens(
-                http, token_endpoint=ENTRA.token_endpoint, client_id="c", refresh_token="r-9"
+                http,
+                token_endpoint=ENTRA.token_endpoint,
+                client_id="c",
+                refresh_token="r-9",
+                provider="entra",
             )
     assert "r-9" not in str(excinfo.value)

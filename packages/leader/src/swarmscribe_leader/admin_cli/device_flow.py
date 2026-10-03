@@ -29,6 +29,12 @@ TRUSTED_HOSTS = {
 }
 
 
+_UNTRUSTED = (
+    "refusing to send sign-in material to an endpoint that is not a trusted "
+    "identity-provider address (https on the provider's own host)"
+)
+
+
 class SignInError(Exception):
     """Signing in did not work; the message says what to do next."""
 
@@ -52,7 +58,9 @@ class TokenSet:
 
 def _require_trusted(endpoint: str, hosts: set[str]) -> None:
     """Refuse (before any request) an endpoint that is not https on exactly a trusted host:
-    no userinfo, no subdomain, no odd port."""
+    no userinfo, no subdomain, no odd port, no whitespace around it."""
+    if endpoint != endpoint.strip():
+        raise SignInError(_UNTRUSTED)
     try:
         parts = urlsplit(endpoint)
         port = parts.port
@@ -66,10 +74,7 @@ def _require_trusted(endpoint: str, hosts: set[str]) -> None:
         or port is not None
         or parts.netloc.lower() != host
     ):
-        raise SignInError(
-            "refusing to send sign-in material to an endpoint that is not a trusted "
-            "identity-provider address (https on the provider's own host)"
-        )
+        raise SignInError(_UNTRUSTED)
 
 
 def _number(start: dict[str, Any], key: str, default: float) -> float:
@@ -170,16 +175,13 @@ async def refresh_tokens(
     token_endpoint: str,
     client_id: str,
     refresh_token: str,
+    provider: str,
     scope: str = "",
     client_secret: str | None = None,
-    provider: str | None = None,
     clock: Callable[[], float] = time.time,
 ) -> TokenSet:
-    """`provider` ("entra" or "google"), when known, narrows the trusted host to that one."""
-    if provider is None:
-        hosts = set(TRUSTED_HOSTS.values())
-    else:
-        hosts = {TRUSTED_HOSTS[provider]} if provider in TRUSTED_HOSTS else set()
+    """`provider` ("entra" or "google") narrows the trusted host to that provider's own."""
+    hosts = {TRUSTED_HOSTS[provider]} if provider in TRUSTED_HOSTS else set()
     _require_trusted(token_endpoint, hosts)
     form = {"grant_type": "refresh_token", "client_id": client_id, "refresh_token": refresh_token}
     if scope:

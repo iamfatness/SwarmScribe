@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 swarmscribe-leader = "swarmscribe_leader.main:run"
+swarmscribe-admin = "swarmscribe_leader.admin_cli.main:run"
 
 [tool.uv.sources]
 swarmscribe-protocol = { workspace = true }

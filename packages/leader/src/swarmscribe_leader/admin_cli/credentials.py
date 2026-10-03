@@ -127,9 +127,10 @@ class CredentialStore:
             raise
 
     def load(self, leader: str) -> SignIn | None:
-        entry = self._read()["leaders"].get(leader)
-        if entry is None:
+        leaders = self._read()["leaders"]
+        if leader not in leaders:
             return None
+        entry = leaders[leader]
         return self._sign_in(leader, entry)
 
     def _sign_in(self, leader: str, entry: Any) -> SignIn:

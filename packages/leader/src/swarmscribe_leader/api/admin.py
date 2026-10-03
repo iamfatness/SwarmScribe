@@ -2,7 +2,8 @@
 
 Each route authenticates the caller and checks their role (`require`), calls one service
 function, writes an audit entry and commits. Changes are audited by the service functions
-with the change; reads are audited here.
+with the change; reads are audited here. A read or change refused after the role check
+(404, 409, 422, ...) is audited by the error handlers (api/errors.py) in its own session.
 """
 
 import uuid

@@ -208,7 +208,15 @@ async def test_every_read_is_audited(admin_client, idp, sessionmaker):
         await get(admin_client, idp, path)
     await get(admin_client, idp, "/v1/admin/tokens", role="admin")
     async with sessionmaker() as session:
-        actions = sorted(e.action for e in (await session.scalars(select(AuditEntry))).all())
+        entries = (await session.scalars(select(AuditEntry))).all()
+    # Each entry names the person: email, issuer and subject.
+    assert {(e.action, e.actor) for e in entries if e.action == "tokens.view"} == {
+        ("tokens.view", f"admin@example.org ({idp.ENTRA_ISSUER} entra-admin)")
+    }
+    assert {e.actor for e in entries if e.action != "tokens.view"} == {
+        f"viewer@example.org ({idp.ENTRA_ISSUER} entra-viewer)"
+    }
+    actions = sorted(e.action for e in entries)
     assert actions == sorted(
         [
             "status.view",
@@ -264,8 +272,12 @@ async def test_the_consent_report_is_bounded_and_says_so(admin_client, idp, fact
     assert (len(body["flagged"]), body["truncated"]) == (1, True)
 
 
-async def test_no_read_exposes_secrets_or_credentials(admin_client, idp, factory, sessionmaker):
-    location = await factory.location()
+async def test_no_read_exposes_secrets_or_credentials(
+    admin_client, idp, factory, sessionmaker, tmp_path
+):
+    location = await factory.location(
+        config={"root": str(tmp_path), "secret_ref": "storage-credential-ref-1"}
+    )
     await factory.job(await factory.recording(location, key="talks/a.mp3"))
     follower, credential = await factory.follower()
     await join_token(sessionmaker)
@@ -273,8 +285,11 @@ async def test_no_read_exposes_secrets_or_credentials(admin_client, idp, factory
     for path in (*READ_PATHS, "/v1/admin/tokens"):
         seen.append((await admin_client.get(path, headers=idp.bearer("admin"))).text)
     text = " ".join(seen)
+    assert location.name in text  # the location (and its config) was read
     for forbidden in ("token_hash", "credential_hash", "sdes", "link", "http://", "https://"):
         assert forbidden not in text.lower()
+    assert "secret_ref" not in text
+    assert "storage-credential-ref-1" not in text
     assert str(credential) not in text
 
 
@@ -931,6 +946,33 @@ async def test_refused_changes_are_audited_without_their_values(
     ]
     assert {e.actor for e in entries} == {actor(idp, "operator")}
     assert str(queued.id) not in str([e.detail for e in entries])
+
+
+@pytest.mark.parametrize(
+    ("path", "params", "status", "code"),
+    [
+        ("/v1/admin/consent/report", {"location": "nowhere"}, 404, "not_found"),
+        ("/v1/admin/jobs", {"state": "sleeping"}, 422, "invalid_request"),
+        ("/v1/admin/followers", {"state": "asleep"}, 422, "invalid_request"),
+    ],
+)
+async def test_a_failed_read_is_audited_without_its_values(
+    admin_client, idp, sessionmaker, path, params, status, code
+):
+    response = await admin_client.get(path, headers=idp.bearer("viewer"), params=params)
+    assert (response.status_code, response.json()["code"]) == (status, code)
+    (entry,) = await audit_rows(sessionmaker, "admin.read_refused")
+    assert entry.actor == actor(idp, "viewer")
+    assert (entry.subject_type, entry.subject_id) == ("endpoint", f"GET {path}")
+    assert entry.detail == {"code": code}
+    recorded = f"{entry.subject_id} {entry.detail}"
+    assert all(str(value) not in recorded for value in params.values())
+
+
+async def test_a_read_refused_by_role_is_not_a_failed_read(admin_client, idp, sessionmaker):
+    await admin_client.get("/v1/admin/tokens", headers=idp.bearer("viewer"))
+    await admin_client.get("/v1/admin/jobs", params={"state": "sleeping"})  # no sign-in
+    assert await audit_rows(sessionmaker, "admin.read_refused") == []
 
 
 async def test_a_refused_read_or_role_is_not_a_refused_change(

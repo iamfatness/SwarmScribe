@@ -110,27 +110,33 @@ async def _audit_refusal(
         await session.commit()
 
 
-async def audit_refused_change(request: Request, code: str) -> None:
-    """Record that a signed-in administrator's change was refused for a business reason.
-    Own session: the request's transaction is rolled back. Only the route template and the
-    error code are recorded, never request values."""
+_READS = ("GET", "HEAD", "OPTIONS")
+
+
+async def audit_refused_request(request: Request, code: str) -> None:
+    """Record that a signed-in administrator's request (past the role check) was refused:
+    a change for a business reason (admin.change_refused) or a read that failed
+    (admin.read_refused), so every admin call leaves an entry. Own session: the request's
+    transaction is rolled back. Only the route template and the error code are recorded,
+    never request values."""
     admin = getattr(request.state, "admin", None)
-    if admin is None or request.method in ("GET", "HEAD", "OPTIONS"):
+    if admin is None:
         return
+    action = "admin.read_refused" if request.method in _READS else "admin.change_refused"
     route = request.scope.get("route")
     try:
         async with request.app.state.sessionmaker() as session:
             audit.record(
                 session,
                 actor=admin.actor,
-                action="admin.change_refused",
+                action=action,
                 subject_type="endpoint",
                 subject_id=f"{request.method} {getattr(route, 'path', '?')}",
                 detail={"code": code},
             )
             await session.commit()
     except Exception:
-        logger.exception("a refused change could not be audited")
+        logger.exception("a refused admin request could not be audited")
 
 
 def require(role: Role) -> Callable[[Request], Awaitable[Admin]]:

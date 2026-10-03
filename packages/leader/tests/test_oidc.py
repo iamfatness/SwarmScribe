@@ -1,8 +1,14 @@
+import base64
+import hashlib
+import hmac
+import json
 import time
 
 import jwt as pyjwt
 import pytest
+from cryptography.hazmat.primitives import serialization
 from swarmscribe_leader.auth.oidc import (
+    READY_RETRY_SECONDS,
     MetadataUnavailable,
     TokenVerifier,
     login_providers,
@@ -76,6 +82,10 @@ async def test_sixty_seconds_of_clock_skew_are_allowed(verifier, idp):
         lambda idp: idp.entra(signed_with="rogue"),
         lambda idp: idp.google(email_verified=False),
         lambda idp: idp.google(email_verified=None),
+        lambda idp: idp.google(email_verified=1),
+        lambda idp: idp.google(email_verified="True"),
+        lambda idp: idp.entra(aud=[idp.ENTRA_CLIENT, "another-client"]),
+        lambda idp: idp.entra(aud=[idp.ENTRA_CLIENT]),
         lambda idp: idp.entra(exp=None),
         lambda idp: idp.entra(sub=None),
     ],
@@ -87,6 +97,10 @@ async def test_sixty_seconds_of_clock_skew_are_allowed(verifier, idp):
         "forged-signature",
         "unverified-email",
         "no-email-verified-claim",
+        "email-verified-integer-1",
+        "email-verified-capitalised",
+        "audience-list-with-our-client",
+        "audience-list-of-only-our-client",
         "no-expiry",
         "no-subject",
     ],
@@ -201,19 +215,12 @@ async def test_an_unsigned_token_is_refused(verifier, idp):
 
 
 async def test_the_public_key_used_as_an_hmac_secret_is_refused(verifier, idp):
-    from cryptography.hazmat.primitives import serialization
-
     public_pem = (
         idp.keys["entra"]
         .public_key()
         .public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
     )
     # PyJWT itself refuses to HMAC-sign with a PEM key, so build the token by hand.
-    import base64
-    import hashlib
-    import hmac
-    import json
-
     def b64(raw: bytes) -> bytes:
         return base64.urlsafe_b64encode(raw).rstrip(b"=")
 
@@ -227,3 +234,69 @@ async def test_the_public_key_used_as_an_hmac_secret_is_refused(verifier, idp):
     signature = b64(hmac.new(public_pem, signing_input, hashlib.sha256).digest())
     with pytest.raises(Unauthorized, match="RS256"):
         await verifier.verify((signing_input + b"." + signature).decode())
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        {"e": "AQAB"},  # no modulus: InvalidKeyError
+        {"n": 5, "e": "AQAB"},  # not text: TypeError
+        {"n": "AQ", "e": "AQAB"},  # a modulus of 1: ValueError
+    ],
+    ids=["no-modulus", "modulus-not-text", "modulus-too-small"],
+)
+async def test_one_malformed_signing_key_does_not_spoil_the_rest(
+    idp, sign_in_settings, clock, broken
+):
+    broken = {"kty": "RSA", "kid": "broken-key", "use": "sig", **broken}
+
+    async def fetch(url):
+        document = await idp.fetch(url)
+        if "keys" in document:
+            document = {"keys": [broken, *document["keys"]]}
+        return document
+
+    verifier = TokenVerifier(providers_from(sign_in_settings()), fetch=fetch, clock=clock)
+    assert await verifier.verify(idp.entra())
+    with pytest.raises(Unauthorized, match="unknown key"):
+        await verifier.verify(idp.entra(kid="broken-key"))
+
+
+async def test_a_provider_that_comes_back_is_retried_soon_while_no_keys_were_ever_fetched(
+    verifier, idp, clock
+):
+    idp.down = True
+    with pytest.raises(MetadataUnavailable):
+        await verifier.verify(idp.entra())
+    idp.down = False
+    clock.now += READY_RETRY_SECONDS + 1  # well inside a minute
+    assert await verifier.verify(idp.entra())
+
+
+@pytest.mark.parametrize("header", ["jku", "x5u"])
+async def test_key_location_headers_are_never_followed(verifier, idp, header):
+    elsewhere = "https://keys.elsewhere.example/jwks.json"
+    good = idp.entra(extra_headers={header: elsewhere})
+    assert await verifier.verify(good)  # validated against the configured keys only
+    forged = idp.entra(signed_with="rogue", kid="rogue-key", extra_headers={header: elsewhere})
+    with pytest.raises(Unauthorized):
+        await verifier.verify(forged)
+    assert elsewhere not in idp.fetched
+    assert set(idp.fetched) <= set(idp._documents())  # discovery and JWKS documents only
+
+
+@pytest.mark.parametrize(
+    "make_token",
+    [
+        # Google's issuer, signed with Entra's key under Entra's key id.
+        lambda idp: idp.google(signed_with="entra", kid="entra-key-1"),
+        # Entra's issuer and audience, signed with Google's key under Google's key id.
+        lambda idp: idp.entra(signed_with="google", kid="google-key-1"),
+    ],
+    ids=["google-issuer-entra-key", "entra-issuer-google-key"],
+)
+async def test_one_providers_key_never_validates_the_others_tokens(verifier, idp, make_token):
+    await verifier.verify(idp.entra())  # both key sets are loaded
+    await verifier.verify(idp.google())
+    with pytest.raises(Unauthorized, match="unknown key"):
+        await verifier.verify(make_token(idp))

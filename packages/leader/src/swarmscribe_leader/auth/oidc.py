@@ -129,7 +129,9 @@ class _ProviderKeys:
 
     Keys are fetched again when they are a day old, or when a token names a key id we do not
     have (a rotation) — but never more than once a minute, so made-up key ids cannot make
-    the leader hammer the provider. While a refresh fails, the keys we have keep working.
+    the leader hammer the provider (every READY_RETRY_SECONDS while no fetch has ever
+    succeeded). While a refresh fails, the keys we have keep working. A malformed key in the
+    set is skipped; the rest are used.
     """
 
     def __init__(self, provider: Provider, fetch: Fetch, clock: Callable[[], float]):
@@ -156,7 +158,14 @@ class _ProviderKeys:
                 usable = jwk.get("kty") == "RSA" and jwk.get("use", "sig") == "sig"
                 if not usable or not jwk.get("kid"):
                     continue
-                keys[str(jwk["kid"])] = RSAAlgorithm.from_jwk(jwk)
+                try:
+                    keys[str(jwk["kid"])] = RSAAlgorithm.from_jwk(jwk)
+                except Exception as exc:  # one malformed key must not spoil the set
+                    logger.warning(
+                        "%s published a signing key that could not be read: %s",
+                        self.provider.name,
+                        type(exc).__name__,
+                    )
         except Exception as exc:  # network, HTTP status, malformed documents
             logger.warning(
                 "%s sign-in keys could not be fetched: %s", self.provider.name, type(exc).__name__
@@ -173,9 +182,10 @@ class _ProviderKeys:
                 or now - self.fetched_at > JWKS_MAX_AGE_SECONDS
                 or kid not in self.keys
             )
-            allowed = (
-                self.attempted_at is None or now - self.attempted_at >= JWKS_MIN_REFRESH_SECONDS
-            )
+            # Until a fetch has ever succeeded, retry as often as readiness does: a provider
+            # that was briefly down at start-up must not lock sign-in out for a minute.
+            gap = READY_RETRY_SECONDS if self.fetched_at is None else JWKS_MIN_REFRESH_SECONDS
+            allowed = self.attempted_at is None or now - self.attempted_at >= gap
             if due and allowed:
                 await self._refresh(now)
             if self.fetched_at is None:
@@ -241,7 +251,8 @@ class TokenVerifier:
                 algorithms=["RS256"],
                 audience=provider.client_id,
                 leeway=CLOCK_SKEW_SECONDS,
-                options={"require": ["exp", "iat", "iss", "aud", "sub"]},
+                # strict_aud: aud must be exactly our client id, not a list that contains it.
+                options={"require": ["exp", "iat", "iss", "aud", "sub"], "strict_aud": True},
             )
         except jwt.ExpiredSignatureError as exc:
             raise Unauthorized("the sign-in token has expired", code="token_expired") from exc
@@ -264,7 +275,8 @@ class TokenVerifier:
                 raise Unauthorized("the sign-in token is from another Entra ID tenant")
             email = claims.get("email") or claims.get("preferred_username")
         else:
-            if claims.get("email_verified") not in (True, "true"):
+            verified = claims.get("email_verified")
+            if not (verified is True or verified == "true"):  # 1 == True, so no `in`
                 raise Unauthorized("the Google account's email address is not verified")
             if provider.hosted_domain and str(claims.get("hd", "")).lower() != (
                 provider.hosted_domain

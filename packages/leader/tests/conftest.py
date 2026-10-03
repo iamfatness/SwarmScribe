@@ -259,16 +259,24 @@ class FakeIdentityProviders:
             "email_verified": True,
         }
 
-    def token(self, provider, *, signed_with=None, kid=None, lifetime=3600, **claims) -> str:
+    def token(
+        self,
+        provider,
+        *,
+        signed_with=None,
+        kid=None,
+        lifetime=3600,
+        extra_headers=None,
+        **claims,
+    ) -> str:
         now = int(time.time())
         payload = {"iat": now, "nbf": now, "exp": now + lifetime}
         payload.update(self._defaults(provider))
         payload.update(claims)
         payload = {name: value for name, value in payload.items() if value is not None}
         key = self.keys[signed_with or self.signing[provider]]
-        return pyjwt.encode(
-            payload, key, algorithm="RS256", headers={"kid": kid or self.kids[provider]}
-        )
+        headers = {"kid": kid or self.kids[provider], **(extra_headers or {})}
+        return pyjwt.encode(payload, key, algorithm="RS256", headers=headers)
 
     def entra(self, **claims) -> str:
         return self.token("entra", **claims)

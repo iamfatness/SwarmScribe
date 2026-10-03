@@ -352,3 +352,126 @@ def test_an_exact_duplicate_line_is_dropped_keeping_the_first(tmp_path):
         Correction("Jay  Son", "Jason"),
         Correction("ashferd", "Ashford"),
     )
+
+
+def _settings_seen(tmp_path, make_transcript, *flags):
+    seen = []
+
+    def fake_transcribe(path, settings, vocabulary):
+        seen.append(settings)
+        return make_transcript()
+
+    code = run(
+        [str(_recording(tmp_path)), "--out", str(tmp_path), *flags],
+        transcribe_fn=fake_transcribe,
+        resolve_fn=lambda preference: CPU,
+    )
+    return code, seen
+
+
+def test_channels_default_to_mono(tmp_path, make_transcript):
+    code, seen = _settings_seen(tmp_path, make_transcript)
+    assert code == 0
+    assert (seen[0].channel_mode, seen[0].channel_labels) == ("mono", ("Left", "Right"))
+
+
+def test_stereo_split_with_labels_reaches_the_engine(tmp_path, make_transcript):
+    code, seen = _settings_seen(
+        tmp_path, make_transcript, "--channels", "stereo-split", "--labels", "Agent, Customer"
+    )
+    assert code == 0
+    assert seen == [
+        TranscribeSettings(
+            model="distil-large-v3",
+            compute_type="int8",
+            device="cpu",
+            channel_mode="stereo_split",
+            channel_labels=("Agent", "Customer"),
+        )
+    ]
+
+
+def test_auto_keeps_the_default_labels(tmp_path, make_transcript):
+    code, seen = _settings_seen(tmp_path, make_transcript, "--channels", "auto")
+    assert code == 0
+    assert (seen[0].channel_mode, seen[0].channel_labels) == ("auto", ("Left", "Right"))
+
+
+def test_labels_without_a_split_mode_are_a_usage_error(tmp_path, capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        run(
+            [str(_recording(tmp_path)), "--out", str(tmp_path), "--labels", "Agent,Customer"],
+            transcribe_fn=None,
+            resolve_fn=lambda preference: CPU,
+        )
+    assert excinfo.value.code == 2
+    assert "--labels needs --channels stereo-split or auto" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("labels", ["Agent", "Agent,Customer,Supervisor", ""])
+def test_labels_must_be_two_comma_separated_names(tmp_path, capsys, labels):
+    with pytest.raises(SystemExit) as excinfo:
+        run(
+            [
+                str(_recording(tmp_path)),
+                "--out",
+                str(tmp_path),
+                "--channels",
+                "auto",
+                "--labels",
+                labels,
+            ],
+            transcribe_fn=None,
+            resolve_fn=lambda preference: CPU,
+        )
+    assert excinfo.value.code == 2
+    assert "exactly two names" in capsys.readouterr().err
+
+
+def test_an_unusable_label_exits_2_with_a_message(tmp_path, make_transcript, capsys):
+    code = run(
+        [
+            str(_recording(tmp_path)),
+            "--out",
+            str(tmp_path),
+            "--channels",
+            "auto",
+            "--labels",
+            "Agent," + "x" * 41,
+        ],
+        transcribe_fn=lambda path, settings, vocabulary: make_transcript(),
+        resolve_fn=lambda preference: CPU,
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: channel labels must be 1 to 40 characters")
+    assert "Traceback" not in err
+
+
+def test_an_unknown_channel_mode_is_a_usage_error(tmp_path):
+    with pytest.raises(SystemExit) as excinfo:
+        run(
+            [str(_recording(tmp_path)), "--out", str(tmp_path), "--channels", "stereo"],
+            transcribe_fn=None,
+            resolve_fn=lambda preference: CPU,
+        )
+    assert excinfo.value.code == 2
+
+
+def test_a_mono_file_in_stereo_split_exits_2_and_writes_nothing(tmp_path, capsys):
+    out_dir = tmp_path / "out"
+
+    def fake_transcribe(path, settings, vocabulary):
+        raise UndecodableAudioError(
+            "recording.mp3 has 1 audio channel; stereo_split needs a two-channel (stereo) "
+            "recording"
+        )
+
+    code = run(
+        [str(_recording(tmp_path)), "--out", str(out_dir), "--channels", "stereo-split"],
+        transcribe_fn=fake_transcribe,
+        resolve_fn=lambda preference: CPU,
+    )
+    assert code == 2
+    assert "error: recording.mp3 has 1 audio channel" in capsys.readouterr().err
+    assert not out_dir.exists()

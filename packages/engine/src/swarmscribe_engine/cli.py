@@ -7,6 +7,7 @@ from pathlib import Path
 from .device import resolve_device
 from .transcriber import transcribe
 from .types import (
+    DEFAULT_CHANNEL_LABELS,
     Correction,
     DeviceChoice,
     EngineError,
@@ -18,6 +19,17 @@ from .writers import write_outputs
 
 TranscribeFn = Callable[[Path, TranscribeSettings, Vocabulary], Transcript]
 ResolveFn = Callable[[str], DeviceChoice]
+
+CHANNEL_MODES = {"mono": "mono", "stereo-split": "stereo_split", "auto": "auto"}
+
+
+def parse_labels(text: str) -> tuple[str, ...]:
+    names = tuple(name.strip() for name in text.split(","))
+    if len(names) != 2:
+        raise argparse.ArgumentTypeError(
+            'give exactly two names separated by a comma, e.g. "Agent,Customer"'
+        )
+    return names
 
 
 def _content_lines(path: Path) -> list[tuple[int, str]]:
@@ -78,6 +90,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
     parser.add_argument("--model", help="override the model chosen for the device")
     parser.add_argument("--compute-type", help="override the compute type chosen for the device")
+    parser.add_argument(
+        "--channels",
+        choices=list(CHANNEL_MODES),
+        default="mono",
+        help="mono mixes the channels (default); stereo-split transcribes left and right "
+        "separately; auto splits a two-channel file and mixes anything else",
+    )
+    parser.add_argument(
+        "--labels",
+        type=parse_labels,
+        help='names for the left and right channels, e.g. "Agent,Customer" (default: Left,Right)',
+    )
     return parser
 
 
@@ -87,13 +111,18 @@ def run(
     transcribe_fn: TranscribeFn = transcribe,
     resolve_fn: ResolveFn = resolve_device,
 ) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.labels is not None and args.channels == "mono":
+        parser.error("--labels needs --channels stereo-split or auto")
     try:
         choice = resolve_fn(args.device)
         settings = TranscribeSettings(
             model=args.model or choice.model,
             compute_type=args.compute_type or choice.compute_type,
             device=choice.device,
+            channel_mode=CHANNEL_MODES[args.channels],
+            channel_labels=args.labels or DEFAULT_CHANNEL_LABELS,
         )
         vocabulary = Vocabulary(
             terms=read_terms(args.vocabulary) if args.vocabulary else (),

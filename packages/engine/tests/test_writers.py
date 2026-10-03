@@ -178,3 +178,123 @@ def test_rewriting_replaces_existing_outputs(make_transcript, tmp_path):
     write_outputs(make_transcript(), tmp_path)
     files = write_outputs(make_transcript(segments=()), tmp_path)
     assert files.txt.read_text("utf-8") == ""
+
+
+PINNED_SEGMENTS_JSON = """{
+  "schema_version": 1,
+  "source_checksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "duration": 3.25,
+  "device": "cuda",
+  "engine_version": "@ENGINE_VERSION@",
+  "settings": {
+    "model": "large-v3",
+    "compute_type": "float16",
+    "language": "en",
+    "condition_on_previous_text": false,
+    "vad_filter": true,
+    "word_timestamps": true,
+    "temperatures": [
+      0.0,
+      0.2,
+      0.4
+    ]
+  },
+  "vocabulary_version": 5,
+  "vocabulary_terms_used": [
+    "Ashford"
+  ],
+  "corrections_applied": [
+    {
+      "heard": "jay son",
+      "replacement": "Jason",
+      "count": 1
+    }
+  ],
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 1.5,
+      "text": "Welcome to Ashford.",
+      "words": [
+        {
+          "start": 0.0,
+          "end": 0.4,
+          "word": " Welcome",
+          "probability": 0.98
+        },
+        {
+          "start": 0.4,
+          "end": 0.6,
+          "word": " to",
+          "probability": 0.99
+        },
+        {
+          "start": 0.6,
+          "end": 1.5,
+          "word": " Ashford.",
+          "probability": 0.71
+        }
+      ]
+    },
+    {
+      "start": 2.0,
+      "end": 3.25,
+      "text": "Thanks Jason.",
+      "words": [
+        {
+          "start": 2.0,
+          "end": 2.5,
+          "word": " Thanks",
+          "probability": 0.9
+        },
+        {
+          "start": 2.5,
+          "end": 3.25,
+          "word": " Jason.",
+          "probability": 0.3,
+          "original": " jay son."
+        }
+      ]
+    }
+  ]
+}
+"""
+
+
+def test_mono_outputs_are_pinned_byte_for_byte(make_transcript, tmp_path):
+    # Written before per-channel transcription existed; splitting must not change one byte.
+    segments = (
+        Segment(
+            start=0.0,
+            end=1.5,
+            text="Welcome to Ashford.",
+            words=(
+                Word(start=0.0, end=0.4, word=" Welcome", probability=0.98),
+                Word(start=0.4, end=0.6, word=" to", probability=0.99),
+                Word(start=0.6, end=1.5, word=" Ashford.", probability=0.71),
+            ),
+        ),
+        Segment(
+            start=2.0,
+            end=3.25,
+            text="Thanks Jason.",
+            words=(
+                Word(start=2.0, end=2.5, word=" Thanks", probability=0.9),
+                Word(start=2.5, end=3.25, word=" Jason.", probability=0.3, original=" jay son."),
+            ),
+        ),
+    )
+    transcript = make_transcript(
+        segments=segments,
+        vocabulary_version=5,
+        corrections_applied=(AppliedCorrection(heard="jay son", replacement="Jason", count=1),),
+    )
+    files = write_outputs(transcript, tmp_path)
+    assert files.txt.read_bytes() == b"Welcome to Ashford.\nThanks Jason.\n"
+    assert files.srt.read_bytes() == (
+        b"1\n00:00:00,000 --> 00:00:01,500\nWelcome to Ashford.\n"
+        b"\n"
+        b"2\n00:00:02,000 --> 00:00:03,250\nThanks Jason.\n"
+    )
+    expected = PINNED_SEGMENTS_JSON.replace("@ENGINE_VERSION@", ENGINE_VERSION)
+    assert files.segments_json.read_bytes() == expected.encode("utf-8")

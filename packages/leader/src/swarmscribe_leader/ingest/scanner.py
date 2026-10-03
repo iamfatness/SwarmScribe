@@ -25,6 +25,7 @@ class ScanSummary:
     missing: int = 0
     jobs_created: int = 0
     jobs_cancelled: int = 0
+    flags_cleared: int = 0
 
 
 def _consent_state(previous: str | None, pattern: str | None) -> str:
@@ -127,6 +128,21 @@ async def scan_location(
             .where(Job.recording_id.in_(withdrawn), Job.state == "completed")
             .values(outputs_flagged_for_deletion=True)
         )
+    # Consent restored: the finished outputs are wanted again and must not be deleted.
+    consented = select(Recording.id).where(
+        Recording.location_id == location.id, Recording.consent == "consented"
+    )
+    cleared = await session.execute(
+        update(Job)
+        .where(
+            Job.recording_id.in_(consented),
+            Job.state == "completed",
+            Job.outputs_flagged_for_deletion.is_(True),
+        )
+        .values(outputs_flagged_for_deletion=False)
+        .execution_options(synchronize_session=False)
+    )
+    summary.flags_cleared = cleared.rowcount
 
     wanted = [r for r in by_id.values() if r.consent == "consented" and not r.missing]
     have = {

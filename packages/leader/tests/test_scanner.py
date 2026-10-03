@@ -339,6 +339,32 @@ async def test_restoring_consent_requeues_only_when_no_live_job_exists(
     assert sorted(j.state for j in jobs) == ["cancelled", "completed", "queued"]
 
 
+async def test_restoring_consent_clears_the_deletion_flag(sessionmaker, factory, tmp_path):
+    write(tmp_path, "consent.txt", b"**/*.mp3\n")
+    write(tmp_path, "talks/one.mp3")
+    location = await factory.location()
+    await scan(sessionmaker, location)
+    async with sessionmaker() as session:
+        (job,) = (await session.scalars(select(Job))).all()
+        job.state = "completed"
+        await session.commit()
+    write(tmp_path, "consent.txt", b"")
+    withdrawn = await scan(sessionmaker, location)
+    assert withdrawn.flags_cleared == 0
+    assert (await session_job(sessionmaker, job.id)).outputs_flagged_for_deletion is True
+    write(tmp_path, "consent.txt", b"**/*.mp3\n")
+    restored = await scan(sessionmaker, location)
+    assert restored.flags_cleared == 1
+    assert (await session_job(sessionmaker, job.id)).outputs_flagged_for_deletion is False
+    entries = await rows(sessionmaker, AuditEntry)
+    assert sorted(e.detail["flags_cleared"] for e in entries) == [0, 0, 1]
+
+
+async def session_job(sessionmaker, job_id) -> Job:
+    async with sessionmaker() as session:
+        return await session.get(Job, job_id)
+
+
 async def test_a_recording_that_reappears_is_queued_again(sessionmaker, factory, tmp_path):
     write(tmp_path, "consent.txt", b"**/*.mp3\n")
     write(tmp_path, "talks/one.mp3", b"same")

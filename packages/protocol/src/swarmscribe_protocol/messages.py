@@ -2,11 +2,12 @@ from typing import Literal
 
 from pydantic import Field
 
-from .base import WireModel
+from .base import Sha256, WireModel
 from .segments import Device, JobSettings
 from .vocabulary import Vocabulary
 
 Directive = Literal["continue", "cancel", "drain"]
+FailureCode = Literal["source_changed", "undecodable", "engine_error", "out_of_resources", "other"]
 
 
 class Link(WireModel):
@@ -52,7 +53,7 @@ class ClaimResponse(WireModel):
     upload_urls: UploadUrls
     settings: JobSettings
     vocabulary: Vocabulary
-    source_checksum: str
+    source_version: str = Field(min_length=1)
 
 
 class HeartbeatRequest(WireModel):
@@ -65,9 +66,10 @@ class HeartbeatResponse(WireModel):
 
 
 class OutputChecksums(WireModel):
-    txt: str
-    srt: str
-    segments_json: str
+    source: Sha256
+    txt: Sha256
+    srt: Sha256
+    segments_json: Sha256
 
 
 class SubmitRequest(WireModel):
@@ -81,9 +83,17 @@ class SubmitResponse(WireModel):
 
 class FailRequest(WireModel):
     lease_id: str
+    code: FailureCode
     reason: str
     retryable: bool
 
 
 class ReleaseRequest(WireModel):
     lease_id: str
+
+
+class ErrorBody(WireModel):
+    """Body of every error response from the leader."""
+
+    code: str
+    message: str

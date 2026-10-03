@@ -1,0 +1,16 @@
+[
+  {"name": "terms: comments and blank lines", "kind": "terms", "text": "# people\nJosé\n\n  Ashford  \n", "expect": ["José", "Ashford"]},
+  {"name": "terms: a hash inside a line is text", "kind": "terms", "text": "C#\nF# notes\n", "expect": ["C#", "F# notes"]},
+  {"name": "terms: byte-order mark and CRLF", "kind": "terms", "text": "﻿Ashford\r\nJason\r\n", "expect": ["Ashford", "Jason"]},
+  {"name": "corrections: basic", "kind": "corrections", "text": "jay son => Jason\nashferd=>Ashford\n", "expect": [["jay son", "Jason"], ["ashferd", "Ashford"]]},
+  {"name": "corrections: arrow inside the replacement", "kind": "corrections", "text": "a to b => a => b\n", "expect": [["a to b", "a => b"]]},
+  {"name": "corrections: byte-order mark and CRLF", "kind": "corrections", "text": "﻿jose => José\r\njay son => Jason\r\n", "expect": [["jose", "José"], ["jay son", "Jason"]]},
+  {"name": "corrections: exact duplicate dropped", "kind": "corrections", "text": "Jay  Son => Jason\nashferd => Ashford\njay son => Jason\n", "expect": [["Jay  Son", "Jason"], ["ashferd", "Ashford"]]},
+  {"name": "corrections: punctuation in heard is allowed", "kind": "corrections", "text": "c++ => C++\nc# => C#\ndr. => Doctor\n", "expect": [["c++", "C++"], ["c#", "C#"], ["dr.", "Doctor"]]},
+  {"name": "corrections: missing arrow", "kind": "corrections", "text": "# header\njay son Jason\n", "error": "corrections.txt line 2: expected 'heard as => should be'"},
+  {"name": "corrections: empty heard", "kind": "corrections", "text": "=> Jason\n", "error": "corrections.txt line 1: expected 'heard as => should be'"},
+  {"name": "corrections: empty replacement", "kind": "corrections", "text": "jay son =>\n", "error": "corrections.txt line 1: expected 'heard as => should be'"},
+  {"name": "corrections: a part with no word", "kind": "corrections", "text": "jay -- son => Jason\n", "error": "corrections.txt line 1: 'heard as' must contain a word in every part"},
+  {"name": "corrections: punctuation only", "kind": "corrections", "text": "& => and\n", "error": "corrections.txt line 1: 'heard as' must contain a word in every part"},
+  {"name": "corrections: conflicting duplicate", "kind": "corrections", "text": "Jay  Son => Jason\nashferd => Ashford\njay son => Jayson\n", "error": "corrections.txt line 3: 'jay son' is already defined on line 1"}
+]

@@ -2,7 +2,7 @@ from typing import Literal
 
 from pydantic import Field, field_validator
 
-from .base import WireModel
+from .base import Sha256, WireModel
 from .vocabulary import AppliedCorrection
 
 Device = Literal["cuda", "cpu"]
@@ -50,7 +50,7 @@ class SegmentsDocument(WireModel):
     """The contents of <name>.segments.json."""
 
     schema_version: Literal[1]
-    source_checksum: str
+    source_checksum: Sha256
     duration: float = Field(ge=0.0)
     device: Device
     engine_version: str

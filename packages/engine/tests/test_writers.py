@@ -154,8 +154,12 @@ def test_segments_json_declares_every_field_it_writes(make_transcript, tmp_path)
     )
     raw = write_outputs(transcript, tmp_path).segments_json.read_text("utf-8")
     # The protocol models ignore unknown fields, so a round trip drops anything undeclared.
+    # exclude_unset: fields with protocol defaults (channel_mode, channel_labels) that the
+    # writer deliberately omits for a mono transcript must not count as dropped.
     document = SegmentsDocument.model_validate_json(raw)
-    assert json.loads(raw) == json.loads(document.model_dump_json(exclude_none=True))
+    assert json.loads(raw) == json.loads(
+        document.model_dump_json(exclude_none=True, exclude_unset=True)
+    )
 
 
 def test_a_non_finite_number_is_an_error_not_invalid_json(make_transcript, tmp_path):

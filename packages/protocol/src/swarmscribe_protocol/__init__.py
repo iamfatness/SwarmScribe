@@ -17,16 +17,31 @@ from .messages import (
     SubmitResponse,
     UploadUrls,
 )
-from .segments import MAX_TEMPERATURE, Device, JobSettings, Segment, SegmentsDocument, Word
+from .segments import (
+    DEFAULT_CHANNEL_LABELS,
+    MAX_CHANNEL_LABEL_LENGTH,
+    MAX_TEMPERATURE,
+    ChannelLabels,
+    ChannelMode,
+    Device,
+    JobSettings,
+    Segment,
+    SegmentsDocument,
+    Word,
+)
 from .vocabulary import AppliedCorrection, Correction, Vocabulary
 
 PROTOCOL_VERSION = 1
 
 __all__ = [
+    "DEFAULT_CHANNEL_LABELS",
+    "MAX_CHANNEL_LABEL_LENGTH",
     "MAX_TEMPERATURE",
     "PROTOCOL_VERSION",
     "AppliedCorrection",
     "Capabilities",
+    "ChannelLabels",
+    "ChannelMode",
     "ClaimResponse",
     "Correction",
     "Device",

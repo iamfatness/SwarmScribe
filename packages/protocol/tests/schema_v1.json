@@ -114,6 +114,34 @@
       "JobSettings": {
         "description": "How a follower must transcribe. The Literal fields are fixed behaviour.",
         "properties": {
+          "channel_labels": {
+            "default": [
+              "Left",
+              "Right"
+            ],
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Channel Labels",
+            "type": "array"
+          },
+          "channel_mode": {
+            "default": "mono",
+            "enum": [
+              "mono",
+              "stereo_split",
+              "auto"
+            ],
+            "title": "Channel Mode",
+            "type": "string"
+          },
           "compute_type": {
             "title": "Compute Type",
             "type": "string"
@@ -409,6 +437,34 @@
   "JobSettings": {
     "description": "How a follower must transcribe. The Literal fields are fixed behaviour.",
     "properties": {
+      "channel_labels": {
+        "default": [
+          "Left",
+          "Right"
+        ],
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          }
+        ],
+        "title": "Channel Labels",
+        "type": "array"
+      },
+      "channel_mode": {
+        "default": "mono",
+        "enum": [
+          "mono",
+          "stereo_split",
+          "auto"
+        ],
+        "title": "Channel Mode",
+        "type": "string"
+      },
       "compute_type": {
         "title": "Compute Type",
         "type": "string"
@@ -700,6 +756,20 @@
       }
     },
     "properties": {
+      "channel": {
+        "anyOf": [
+          {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Channel"
+      },
       "end": {
         "title": "End",
         "type": "number"
@@ -759,6 +829,34 @@
       "JobSettings": {
         "description": "How a follower must transcribe. The Literal fields are fixed behaviour.",
         "properties": {
+          "channel_labels": {
+            "default": [
+              "Left",
+              "Right"
+            ],
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Channel Labels",
+            "type": "array"
+          },
+          "channel_mode": {
+            "default": "mono",
+            "enum": [
+              "mono",
+              "stereo_split",
+              "auto"
+            ],
+            "title": "Channel Mode",
+            "type": "string"
+          },
           "compute_type": {
             "title": "Compute Type",
             "type": "string"
@@ -813,6 +911,20 @@
       },
       "Segment": {
         "properties": {
+          "channel": {
+            "anyOf": [
+              {
+                "maximum": 1,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Channel"
+          },
           "end": {
             "title": "End",
             "type": "number"
@@ -887,6 +999,21 @@
     },
     "description": "The contents of <name>.segments.json.",
     "properties": {
+      "channel_labels": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Channel Labels"
+      },
       "corrections_applied": {
         "items": {
           "$ref": "#/$defs/AppliedCorrection"

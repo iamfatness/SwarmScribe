@@ -162,6 +162,8 @@ def test_job_settings_reject_unknown_channel_modes(mode):
         ("Left\nSide", "Right"),
         ("Left\tSide", "Right"),
         ("Left\u2028Side", "Right"),
+        ("Left\u2029Side", "Right"),
+        ("Left\u0085Side", "Right"),
         ("Same", "same"),
     ],
 )

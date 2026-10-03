@@ -1,7 +1,14 @@
 import json
 
 import pytest
-from swarmscribe_engine import ENGINE_VERSION, AppliedCorrection, Segment, Word, write_outputs
+from swarmscribe_engine import (
+    ENGINE_VERSION,
+    AppliedCorrection,
+    Segment,
+    TranscribeSettings,
+    Word,
+    write_outputs,
+)
 from swarmscribe_engine.writers import format_srt_time, render_srt, render_txt
 from swarmscribe_protocol import SegmentsDocument
 
@@ -298,3 +305,98 @@ def test_mono_outputs_are_pinned_byte_for_byte(make_transcript, tmp_path):
     )
     expected = PINNED_SEGMENTS_JSON.replace("@ENGINE_VERSION@", ENGINE_VERSION)
     assert files.segments_json.read_bytes() == expected.encode("utf-8")
+
+
+SPLIT_SETTINGS = TranscribeSettings(
+    model="large-v3",
+    compute_type="float16",
+    device="cuda",
+    channel_mode="stereo_split",
+    channel_labels=("Agent", "Customer"),
+)
+SPLIT_SEGMENTS = (
+    Segment(start=0.0, end=1.0, text="Good morning.", words=(), channel=0),
+    Segment(
+        start=0.5,
+        end=1.5,
+        text="Hello.",
+        words=(Word(start=0.5, end=1.5, word=" Hello.", probability=0.9),),
+        channel=1,
+    ),
+)
+
+
+def split_transcript(make_transcript, **overrides):
+    values = {
+        "segments": SPLIT_SEGMENTS,
+        "settings": SPLIT_SETTINGS,
+        "channel_labels": ("Agent", "Customer"),
+    }
+    values.update(overrides)
+    return make_transcript(**values)
+
+
+def test_split_txt_prefixes_each_line_with_its_label(make_transcript):
+    text = render_txt(split_transcript(make_transcript))
+    assert text == "Agent: Good morning.\nCustomer: Hello.\n"
+
+
+def test_split_srt_prefixes_each_cue_with_its_label(make_transcript):
+    assert render_srt(split_transcript(make_transcript)) == (
+        "1\n00:00:00,000 --> 00:00:01,000\nAgent: Good morning.\n"
+        "\n"
+        "2\n00:00:00,500 --> 00:00:01,500\nCustomer: Hello.\n"
+    )
+
+
+def test_split_segments_json_records_channels_and_labels(make_transcript, tmp_path):
+    files = write_outputs(split_transcript(make_transcript), tmp_path)
+    raw = json.loads(files.segments_json.read_text("utf-8"))
+    assert raw["channel_labels"] == ["Agent", "Customer"]
+    assert list(raw)[-2:] == ["channel_labels", "segments"]
+    assert [segment["channel"] for segment in raw["segments"]] == [0, 1]
+    assert list(raw["segments"][1]) == ["start", "end", "text", "words", "channel"]
+    assert "channel_mode" not in raw["settings"]
+    assert "channel_labels" not in raw["settings"]
+    document = SegmentsDocument.model_validate_json(files.segments_json.read_text("utf-8"))
+    assert document.channel_labels == ["Agent", "Customer"]
+    assert [segment.channel for segment in document.segments] == [0, 1]
+
+
+def test_split_segments_json_declares_every_field_it_writes(make_transcript, tmp_path):
+    raw = write_outputs(split_transcript(make_transcript), tmp_path).segments_json.read_text(
+        "utf-8"
+    )
+    document = SegmentsDocument.model_validate_json(raw)
+    dumped = document.model_dump_json(
+        exclude_none=True, exclude={"settings": {"channel_mode", "channel_labels"}}
+    )
+    assert json.loads(raw) == json.loads(dumped)
+
+
+def test_a_split_recording_with_no_speech_keeps_its_labels(make_transcript, tmp_path):
+    files = write_outputs(split_transcript(make_transcript, segments=()), tmp_path)
+    assert files.txt.read_text("utf-8") == ""
+    assert files.srt.read_text("utf-8") == ""
+    document = SegmentsDocument.model_validate_json(files.segments_json.read_text("utf-8"))
+    assert (document.segments, document.channel_labels) == ([], ["Agent", "Customer"])
+
+
+def test_mono_segments_json_writes_no_channel_fields(make_transcript, tmp_path):
+    raw = json.loads(write_outputs(make_transcript(), tmp_path).segments_json.read_text("utf-8"))
+    assert "channel_labels" not in raw
+    assert all("channel" not in segment for segment in raw["segments"])
+
+
+def test_split_segments_json_round_trips_without_exclude_unset(make_transcript, tmp_path):
+    raw = write_outputs(split_transcript(make_transcript), tmp_path).segments_json.read_text(
+        "utf-8"
+    )
+    parsed = json.loads(raw)
+    assert parsed["channel_labels"] == ["Agent", "Customer"]
+    assert all("channel" in segment for segment in parsed["segments"])
+    document = SegmentsDocument.model_validate_json(raw)
+    dumped = document.model_dump_json(
+        exclude_none=True, exclude={"settings": {"channel_mode", "channel_labels"}}
+    )
+    assert parsed == json.loads(dumped)

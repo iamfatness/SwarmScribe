@@ -11,7 +11,7 @@ from swarmscribe_protocol import Directive, FailRequest, OutputChecksums, Submit
 
 from .. import audit
 from ..db.models import Follower, Job, JobAttempt, JobResult
-from ..errors import Conflict, NotFound, StaleLease
+from ..errors import Conflict, Forbidden, NotFound, StaleLease
 
 OPEN_STATES = ("queued", "leased")
 NON_RETRYABLE = frozenset({"source_changed", "undecodable"})
@@ -200,6 +200,10 @@ async def submit(
             message = _OUTPUT_PROBLEMS.get(check.problem, "the outputs cannot be verified")
             raise Conflict(message, code=check.problem)
     job = await _locked_job(session, job_id)
+    # Revoked while the outputs were being hashed: nothing may be written for it now.
+    current = await session.get(Follower, follower.id, populate_existing=True)
+    if current is None or current.state == "revoked":
+        raise Forbidden("this follower has been revoked")
     if job.state == "completed":
         result = await session.scalar(select(JobResult).where(JobResult.job_id == job.id))
         if (

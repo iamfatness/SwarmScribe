@@ -129,6 +129,9 @@ async def outputs_verified(
     and only beside a segments.json with no segments.
     """
     recording, source, target = await _places(session, job)
+    # Hashing reads every byte: do not sit "idle in transaction" meanwhile. The objects stay
+    # usable (sessions here never expire on commit); submit locks and reloads the job after.
+    await session.commit()
     backend = backend_factory(target)
     keys = output_keys(source.output_prefix, recording.key)
     digests: dict[str, str] = {}

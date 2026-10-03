@@ -5,8 +5,9 @@ from datetime import timedelta
 
 import httpx
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import DBAPIError
+from swarmscribe_leader.api import files as file_routes
 from swarmscribe_leader.app import create_app
 from swarmscribe_leader.auth.followers import create_join_token
 from swarmscribe_leader.clock import utcnow
@@ -717,3 +718,121 @@ async def test_submit_does_not_hold_the_followers_row_while_hashing(
     )
     assert response.status_code == 200, response.text
     assert follower_locked and not any(follower_locked)
+
+
+async def test_an_upload_racing_a_completed_submit_is_refused_and_leaves_the_file(
+    client, app, sessionmaker, factory, tmp_path, monkeypatch
+):
+    await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(client, sessionmaker)
+    claimed = await claim(client, headers)
+    checksums = await upload_outputs(client, claimed)
+    checksums["source"] = sha(b"audio bytes")
+    real = file_routes._replace_if_lease_current
+
+    async def submit_first(*args, **kwargs):
+        response = await client.post(
+            f"/v1/jobs/{claimed.job_id}/submit",
+            headers=headers,
+            json={"lease_id": claimed.lease_id, "checksums": checksums},
+        )
+        assert response.status_code == 200, response.text
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(file_routes, "_replace_if_lease_current", submit_first)
+    response = await client.put(claimed.upload_urls.txt.url, content=b"replacement text\n")
+    assert (response.status_code, response.json()["code"]) == (409, "stale_lease")
+    stored = next(tmp_path.rglob("one.mp3.txt")).read_bytes()
+    assert sha(stored) == checksums["txt"]
+
+
+async def test_an_output_replaced_while_it_is_hashed_makes_submit_refuse(
+    client, app, sessionmaker, factory, tmp_path, monkeypatch
+):
+    await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(client, sessionmaker)
+    claimed = await claim(client, headers)
+    checksums = await upload_outputs(client, claimed)
+    checksums["source"] = sha(b"audio bytes")
+    real_sha256 = LocalBackend.sha256
+    replaced = []
+
+    async def replacing_sha256(self, key):
+        digest = await real_sha256(self, key)
+        if key.endswith(".txt") and not replaced:
+            replaced.append(True)
+            response = await client.put(claimed.upload_urls.txt.url, content=b"other text\n")
+            assert response.status_code == 201
+        return digest
+
+    monkeypatch.setattr(LocalBackend, "sha256", replacing_sha256)
+    response = await client.post(
+        f"/v1/jobs/{claimed.job_id}/submit",
+        headers=headers,
+        json={"lease_id": claimed.lease_id, "checksums": checksums},
+    )
+    assert (response.status_code, response.json()["code"]) == (409, "outputs_changed")
+    async with sessionmaker() as session:
+        job = await session.get(Job, uuid.UUID(claimed.job_id))
+    assert job.state == "leased"
+
+
+async def test_submit_holds_no_transaction_open_while_hashing(
+    client, app, sessionmaker, factory, tmp_path, monkeypatch
+):
+    await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(client, sessionmaker)
+    claimed = await claim(client, headers)
+    checksums = await upload_outputs(client, claimed)
+    checksums["source"] = sha(b"audio bytes")
+    real_sha256 = LocalBackend.sha256
+    idle_in_transaction = []
+
+    async def watching_sha256(self, key):
+        async with sessionmaker() as other:
+            count = await other.scalar(
+                text(
+                    "select count(*) from pg_stat_activity "
+                    "where state like 'idle in transaction%' "
+                    "and datname = current_database() and pid <> pg_backend_pid()"
+                )
+            )
+            idle_in_transaction.append(count)
+        return await real_sha256(self, key)
+
+    monkeypatch.setattr(LocalBackend, "sha256", watching_sha256)
+    response = await client.post(
+        f"/v1/jobs/{claimed.job_id}/submit",
+        headers=headers,
+        json={"lease_id": claimed.lease_id, "checksums": checksums},
+    )
+    assert response.status_code == 200, response.text
+    assert idle_in_transaction and idle_in_transaction == [0] * len(idle_in_transaction)
+
+
+async def test_an_empty_srt_beside_a_text_is_inconsistent(client, sessionmaker, factory, tmp_path):
+    await queue_one(sessionmaker, factory, tmp_path, data=b"quiet")
+    headers = await register(client, sessionmaker)
+    claimed = await claim(client, headers)
+    response = await submit_outputs(
+        client, headers, claimed, b"quiet", b"one two\n", b"", segments_document(sha(b"quiet"), [])
+    )
+    assert (response.status_code, response.json()["code"]) == (409, "outputs_inconsistent")
+
+
+async def test_a_transcript_with_a_zero_segment_document_is_a_normal_result(
+    client, sessionmaker, factory, tmp_path
+):
+    # Decision: only an EMPTY txt and srt make a no-speech result. A non-empty transcript
+    # beside a segments.json with no segments is accepted as a normal result.
+    await queue_one(sessionmaker, factory, tmp_path, data=b"quiet")
+    headers = await register(client, sessionmaker)
+    claimed = await claim(client, headers)
+    srt = b"1\n00:00:00,000 --> 00:00:01,000\none two\n"
+    response = await submit_outputs(
+        client, headers, claimed, b"quiet", b"one two\n", srt, segments_document(sha(b"quiet"), [])
+    )
+    assert response.status_code == 200, response.text
+    async with sessionmaker() as session:
+        result = (await session.scalars(select(JobResult))).one()
+    assert result.no_speech is False

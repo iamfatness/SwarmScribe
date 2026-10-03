@@ -5,8 +5,8 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import func, select, update
 from swarmscribe_leader.clock import utcnow
-from swarmscribe_leader.db.models import Job, JobAttempt, JobResult
-from swarmscribe_leader.errors import Conflict, NotFound, StaleLease
+from swarmscribe_leader.db.models import Follower, Job, JobAttempt, JobResult
+from swarmscribe_leader.errors import Conflict, Forbidden, NotFound, StaleLease
 from swarmscribe_leader.jobs import store
 from swarmscribe_protocol import FailRequest, OutputChecksums, SubmitRequest
 
@@ -465,6 +465,35 @@ async def test_a_no_speech_result_is_recorded(sessionmaker, factory):
     async with sessionmaker() as session:
         result = (await session.scalars(select(JobResult))).one()
     assert result.no_speech is True
+
+
+async def test_a_follower_revoked_while_the_outputs_were_hashed_is_refused(sessionmaker, factory):
+    job = await factory.job()
+    follower, _ = await factory.follower()
+    claimed = await claim(sessionmaker, follower)
+
+    async def revoked_meanwhile(_job, _checksums):
+        async with sessionmaker() as other:
+            await other.execute(
+                update(Follower).where(Follower.id == follower.id).values(state="revoked")
+            )
+            await other.commit()
+        return store.OutputsCheck()
+
+    async with sessionmaker() as session:
+        with pytest.raises(Forbidden):
+            await store.submit(
+                session,
+                job.id,
+                submission(claimed.lease_id),
+                follower,
+                now=utcnow(),
+                outputs_verified=revoked_meanwhile,
+            )
+        await session.rollback()
+    assert (await load(sessionmaker, job.id)).state == "leased"
+    async with sessionmaker() as session:
+        assert (await session.scalars(select(JobResult))).all() == []
 
 
 # --- fail, release, release_all -------------------------------------------------

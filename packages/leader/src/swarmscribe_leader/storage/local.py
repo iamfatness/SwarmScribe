@@ -16,7 +16,8 @@ HASH_CHUNK_BYTES = 1024 * 1024
 
 
 def version_of(stat_result: os.stat_result) -> str:
-    return f"{stat_result.st_size}-{stat_result.st_mtime_ns}"
+    # The inode too: a replacement with the same size and mtime is still another file.
+    return f"{stat_result.st_size}-{stat_result.st_mtime_ns}-{stat_result.st_ino}"
 
 
 class LocalBackend:

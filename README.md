@@ -13,7 +13,7 @@ Design: [`docs/superpowers/specs/2026-10-02-swarmscribe-architecture-design.md`]
 |---|---|
 | `swarmscribe-protocol` — leader–follower wire models | Built |
 | `swarmscribe-engine` — single-file transcriber | Built |
-| `swarmscribe-leader` | Not started |
+| `swarmscribe-leader` | Core built (local storage); sign-in and admin tools next |
 | `swarmscribe-follower` | Not started |
 | Helm chart | Not started |
 
@@ -61,6 +61,32 @@ fired, and keeps the original text of each corrected word.
 Some settings are fixed on purpose: English only, no conditioning on previous
 text (prevents repeated-sentence loops), and a temperature ladder capped at
 0.4 (prevents gibberish on noisy audio).
+
+## Run the leader (development)
+
+The leader needs Postgres. Set:
+
+| Variable | Meaning |
+|---|---|
+| `SWARMSCRIBE_DATABASE_URL` | e.g. `postgresql://user:pass@host:5432/swarmscribe` |
+| `SWARMSCRIBE_PUBLIC_URL` | the leader's external base URL, used in file links |
+| `SWARMSCRIBE_LINK_KEY` | at least 32 random characters, used to sign file links |
+
+```
+uv run swarmscribe-leader migrate
+uv run swarmscribe-leader serve --port 8080
+```
+
+A location is a folder with a `consent.txt` at its root listing which
+recordings may be processed, one glob per line (`talks/*.mp3`, `2024/**`).
+Nothing else is ever queued. Transcripts are written beside the recordings
+under `transcripts/`.
+
+Admin commands (adding locations, creating join tokens) arrive with the next
+plan; until then, locations and tokens are created directly in the database.
+
+Tests use a real Postgres: set `SWARMSCRIBE_TEST_DATABASE_URL`, or leave it
+unset and an embedded one starts automatically in `.pgdata/`.
 
 ## Develop
 

@@ -41,6 +41,10 @@ live/streaming transcription.
 
 ## 2. Decisions already made
 
+The leader is detailed in `2026-10-02-leader-design.md`, which wins where the
+two differ (OIDC admin sign-in, scheduled ingest scans, global plus
+per-location vocabulary, source pinning by storage version).
+
 | Topic | Decision |
 |---|---|
 | Model | Leader/follower. Followers always dial out and pull work. |
@@ -174,7 +178,7 @@ on register; the leader rejects incompatible versions with a clear error.
 | Call | Purpose | Key response fields |
 |---|---|---|
 | `POST /v1/followers/register` | Exchange join token + capabilities for a follower credential | `follower_id`, `credential`, `heartbeat_interval`, `lease_seconds` |
-| `POST /v1/jobs/claim` | Ask for work | `job_id`, `lease_id`, `download_url`, `upload_urls`, `settings`, `glossary`, `source_checksum`; or `204` with `retry_after` |
+| `POST /v1/jobs/claim` | Ask for work | `job_id`, `lease_id`, `download_url`, `upload_urls`, `settings`, `vocabulary`, `source_version`; or `204` with a `Retry-After` header |
 | `POST /v1/jobs/{id}/heartbeat` | Extend lease, report progress | `directive`: `continue` \| `cancel` \| `drain` |
 | `POST /v1/jobs/{id}/submit` | Report outputs uploaded, with checksums | `accepted` |
 | `POST /v1/jobs/{id}/fail` | Report a failure with reason and whether it is retryable | — |
@@ -233,7 +237,7 @@ returns `accepted` again.
 
 | Table | Holds |
 |---|---|
-| `recordings` | storage key, size, checksum, duration, consent state, consent source |
+| `recordings` | storage key, size, storage version marker, consent state, consent source (full model: leader spec section 4) |
 | `jobs` | recording, state, pool, required device, attempt count, current lease, settings profile |
 | `job_attempts` | job, follower, lease id, started, ended, outcome, failure reason |
 | `followers` | id, pool, capabilities, credential hash, last seen, state (`active`/`draining`/`revoked`) |
@@ -298,7 +302,8 @@ The local backend requires all leader replicas to see the same path
 - **Follower credentials** — issued on register, one per follower, stored
   hashed, individually revocable. A revoked follower's leases are released
   immediately.
-- **Admin access** — separate credentials from followers; the admin API is
+- **Admin access** — OIDC single sign-on, roles from identity-provider
+  groups (leader spec section 10); separate from follower credentials; the admin API is
   not reachable with a follower credential.
 - **Least privilege** — a follower can only act on a job it currently holds
   the lease for, and only receives links for that job's one input and three
@@ -370,7 +375,7 @@ Add `--gpus all` and the `cuda` tag for a GPU machine.
 | Postgres down | Leader reports not ready; followers back off; no state lost |
 | Corrupt or undecodable recording | Follower reports non-retryable `fail`; job parked as `failed` |
 | Upload succeeds but `submit` is lost | Follower retries `submit`; it is idempotent |
-| Source file changed since ingest | Checksum mismatch on download; follower fails the job as non-retryable; re-ingest creates a fresh job |
+| Source file changed since ingest | The download link pins the storage version, so storage refuses it; follower fails the job with code `source_changed`; the next scan creates a fresh job |
 | Follower revoked mid-job | Next heartbeat is rejected; follower wipes scratch and exits |
 
 ## 14. Testing

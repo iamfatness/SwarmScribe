@@ -35,6 +35,7 @@
         "type": "string"
       },
       "engine_version": {
+        "maxLength": 200,
         "title": "Engine Version",
         "type": "string"
       },
@@ -53,6 +54,7 @@
       "gpu_name": {
         "anyOf": [
           {
+            "maxLength": 200,
             "type": "string"
           },
           {
@@ -64,12 +66,15 @@
       },
       "models": {
         "items": {
+          "maxLength": 200,
           "type": "string"
         },
+        "maxItems": 50,
         "title": "Models",
         "type": "array"
       },
       "pool": {
+        "maxLength": 200,
         "title": "Pool",
         "type": "string"
       }
@@ -256,8 +261,9 @@
       "settings": {
         "$ref": "#/$defs/JobSettings"
       },
-      "source_checksum": {
-        "title": "Source Checksum",
+      "source_version": {
+        "minLength": 1,
+        "title": "Source Version",
         "type": "string"
       },
       "upload_urls": {
@@ -274,7 +280,7 @@
       "upload_urls",
       "settings",
       "vocabulary",
-      "source_checksum"
+      "source_version"
     ],
     "title": "ClaimResponse",
     "type": "object"
@@ -300,13 +306,44 @@
     "title": "Correction",
     "type": "object"
   },
+  "ErrorBody": {
+    "description": "Body of every error response from the leader.",
+    "properties": {
+      "code": {
+        "title": "Code",
+        "type": "string"
+      },
+      "message": {
+        "title": "Message",
+        "type": "string"
+      }
+    },
+    "required": [
+      "code",
+      "message"
+    ],
+    "title": "ErrorBody",
+    "type": "object"
+  },
   "FailRequest": {
     "properties": {
+      "code": {
+        "enum": [
+          "source_changed",
+          "undecodable",
+          "engine_error",
+          "out_of_resources",
+          "other"
+        ],
+        "title": "Code",
+        "type": "string"
+      },
       "lease_id": {
         "title": "Lease Id",
         "type": "string"
       },
       "reason": {
+        "maxLength": 2000,
         "title": "Reason",
         "type": "string"
       },
@@ -317,6 +354,7 @@
     },
     "required": [
       "lease_id",
+      "code",
       "reason",
       "retryable"
     ],
@@ -456,19 +494,28 @@
   "OutputChecksums": {
     "properties": {
       "segments_json": {
+        "pattern": "^[0-9a-f]{64}$",
         "title": "Segments Json",
         "type": "string"
       },
+      "source": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Source",
+        "type": "string"
+      },
       "srt": {
+        "pattern": "^[0-9a-f]{64}$",
         "title": "Srt",
         "type": "string"
       },
       "txt": {
+        "pattern": "^[0-9a-f]{64}$",
         "title": "Txt",
         "type": "string"
       }
     },
     "required": [
+      "source",
       "txt",
       "srt",
       "segments_json"
@@ -489,6 +536,7 @@
             "type": "string"
           },
           "engine_version": {
+            "maxLength": 200,
             "title": "Engine Version",
             "type": "string"
           },
@@ -507,6 +555,7 @@
           "gpu_name": {
             "anyOf": [
               {
+                "maxLength": 200,
                 "type": "string"
               },
               {
@@ -518,12 +567,15 @@
           },
           "models": {
             "items": {
+              "maxLength": 200,
               "type": "string"
             },
+            "maxItems": 50,
             "title": "Models",
             "type": "array"
           },
           "pool": {
+            "maxLength": 200,
             "title": "Pool",
             "type": "string"
           }
@@ -875,6 +927,7 @@
         "$ref": "#/$defs/JobSettings"
       },
       "source_checksum": {
+        "pattern": "^[0-9a-f]{64}$",
         "title": "Source Checksum",
         "type": "string"
       },
@@ -911,19 +964,28 @@
       "OutputChecksums": {
         "properties": {
           "segments_json": {
+            "pattern": "^[0-9a-f]{64}$",
             "title": "Segments Json",
             "type": "string"
           },
+          "source": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source",
+            "type": "string"
+          },
           "srt": {
+            "pattern": "^[0-9a-f]{64}$",
             "title": "Srt",
             "type": "string"
           },
           "txt": {
+            "pattern": "^[0-9a-f]{64}$",
             "title": "Txt",
             "type": "string"
           }
         },
         "required": [
+          "source",
           "txt",
           "srt",
           "segments_json"

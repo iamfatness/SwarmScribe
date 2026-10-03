@@ -28,6 +28,7 @@ MODELS: tuple[type[WireModel], ...] = (
     messages.SubmitResponse,
     messages.FailRequest,
     messages.ReleaseRequest,
+    messages.ErrorBody,
 )
 
 

@@ -4,6 +4,7 @@ from swarmscribe_protocol import (
     Capabilities,
     ClaimResponse,
     Correction,
+    ErrorBody,
     FailRequest,
     HeartbeatRequest,
     HeartbeatResponse,
@@ -36,7 +37,7 @@ def _claim():
             terms=["Ashford"],
             corrections=[Correction(heard="ash ford", replacement="Ashford")],
         ),
-        source_checksum="a" * 64,
+        source_version="etag-1",
     )
 
 
@@ -63,10 +64,14 @@ def _claim():
         HeartbeatResponse(directive="drain"),
         SubmitRequest(
             lease_id="lease-1",
-            checksums=OutputChecksums(txt="a" * 64, srt="b" * 64, segments_json="c" * 64),
+            checksums=OutputChecksums(
+                source="d" * 64, txt="a" * 64, srt="b" * 64, segments_json="c" * 64
+            ),
         ),
         SubmitResponse(accepted=True),
-        FailRequest(lease_id="lease-1", reason="undecodable audio", retryable=False),
+        FailRequest(
+            lease_id="lease-1", code="undecodable", reason="undecodable audio", retryable=False
+        ),
         ReleaseRequest(lease_id="lease-1"),
     ],
     ids=lambda m: type(m).__name__,
@@ -129,3 +134,57 @@ def test_claim_carries_the_vocabulary_and_no_glossary():
     assert claim.vocabulary.version == 2
     assert claim.vocabulary.corrections[0].replacement == "Ashford"
     assert "glossary" not in ClaimResponse.model_fields
+
+
+def test_claim_carries_a_source_version_and_no_checksum():
+    assert _claim().source_version == "etag-1"
+    assert "source_checksum" not in ClaimResponse.model_fields
+
+
+@pytest.mark.parametrize("bad", ["A" * 64, "a" * 63, "a" * 65, "g" * 64, ""])
+def test_checksums_must_be_lowercase_hex_sha256(bad):
+    with pytest.raises(ValidationError):
+        OutputChecksums(source=bad, txt="a" * 64, srt="a" * 64, segments_json="a" * 64)
+
+
+def test_fail_request_code_must_be_known():
+    with pytest.raises(ValidationError):
+        FailRequest(lease_id="lease-1", code="exploded", reason="x", retryable=True)
+
+
+def test_error_body_round_trips():
+    body = ErrorBody(code="stale_lease", message="this job is not leased to you")
+    assert ErrorBody.model_validate_json(body.model_dump_json()) == body
+
+
+def test_fail_request_reason_is_bounded():
+    FailRequest(lease_id="lease-1", code="other", reason="x" * 2000, retryable=True)
+    with pytest.raises(ValidationError):
+        FailRequest(lease_id="lease-1", code="other", reason="x" * 2001, retryable=True)
+
+
+def _capabilities(**overrides):
+    values = {
+        "device": "cpu",
+        "gpu_name": None,
+        "models": ["distil-large-v3"],
+        "engine_version": "0.1.0",
+        "pool": "default",
+    }
+    values.update(overrides)
+    return Capabilities(**values)
+
+
+@pytest.mark.parametrize("field", ["gpu_name", "engine_version", "pool"])
+def test_capability_strings_are_bounded(field):
+    assert getattr(_capabilities(**{field: "x" * 200}), field) == "x" * 200
+    with pytest.raises(ValidationError):
+        _capabilities(**{field: "x" * 201})
+
+
+def test_capability_models_are_bounded():
+    assert len(_capabilities(models=["m"] * 50).models) == 50
+    with pytest.raises(ValidationError):
+        _capabilities(models=["m"] * 51)
+    with pytest.raises(ValidationError):
+        _capabilities(models=["m" * 201])

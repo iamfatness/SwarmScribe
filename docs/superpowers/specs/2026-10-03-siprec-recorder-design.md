@@ -169,6 +169,13 @@ only), `started_at`, `ended_at`, `duration_s`, `media_node`,
 `stored`, or `failed`), `failure_reason`, `recording_id`, `live` (reserved
 for sub-project 4, always false). Nothing else from `rs-metadata` is stored.
 
+*Roadmap note (2026-10-03):* search and indexing by agent, group and queue
+(roadmap item 8) need business metadata per call. Call rules will therefore be
+able to name extra fields to keep — from `rs-metadata` extensions or sender
+headers (for example agent ID, queue, group) — stored in a `calls.fields`
+map. Phone numbers and names stay out of transcripts either way. This is
+designed with roadmap item 8, not in S1.
+
 ### 5.3 Calls locations
 
 `storage_locations` gains `source` (`files` default, or `calls`). The scanner

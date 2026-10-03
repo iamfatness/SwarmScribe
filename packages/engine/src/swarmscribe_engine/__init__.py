@@ -1,12 +1,14 @@
 from .device import resolve_device
 from .transcriber import Transcriber, transcribe
 from .types import (
+    DEFAULT_CHANNEL_LABELS,
     DEFAULT_TEMPERATURES,
     EMPTY_VOCABULARY,
     FIXED_SETTINGS,
     LANGUAGE,
     MAX_TEMPERATURE,
     AppliedCorrection,
+    ChannelMode,
     Correction,
     Device,
     DeviceChoice,
@@ -25,6 +27,7 @@ from .version import ENGINE_VERSION
 from .writers import write_outputs
 
 __all__ = [
+    "DEFAULT_CHANNEL_LABELS",
     "DEFAULT_TEMPERATURES",
     "EMPTY_VOCABULARY",
     "ENGINE_VERSION",
@@ -32,6 +35,7 @@ __all__ = [
     "LANGUAGE",
     "MAX_TEMPERATURE",
     "AppliedCorrection",
+    "ChannelMode",
     "Correction",
     "Device",
     "DeviceChoice",

@@ -1,6 +1,8 @@
 import math
 import struct
 import wave
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from swarmscribe_engine import (
@@ -15,6 +17,7 @@ from swarmscribe_protocol import SegmentsDocument
 
 pytestmark = pytest.mark.smoke
 
+STEREO_SPEECH = Path(__file__).parent / "fixtures" / "stereo_speech.wav"
 SETTINGS = TranscribeSettings(model="tiny.en", compute_type="int8", device="cpu")
 
 
@@ -71,3 +74,47 @@ def test_real_decoder_rejects_a_corrupt_file(transcriber, tmp_path):
     corrupt.write_bytes(bytes(range(256)) * 64)
     with pytest.raises(UndecodableAudioError, match="corrupt.mp3"):
         transcriber.transcribe(corrupt)
+
+
+def test_real_model_transcribes_a_stereo_file_in_split_mode(transcriber, tmp_path):
+    # Left says one phrase and right another, never at the same time (see make_stereo_speech.ps1).
+    stereo = STEREO_SPEECH
+    settings = replace(SETTINGS, channel_mode="stereo_split", channel_labels=("Agent", "Customer"))
+    vocabulary = Vocabulary(
+        version=3, terms=("Ashford",), corrections=(Correction("ash ford", "Ashford"),)
+    )
+    model = transcriber._model
+    transcript = transcriber.transcribe(stereo, vocabulary, settings=settings)
+    assert transcriber._model is model  # the module-scoped model served both channels
+    assert transcript.duration == pytest.approx(5.04, abs=0.1)
+    assert transcript.channel_labels == ("Agent", "Customer")
+
+    files = write_outputs(transcript, tmp_path / "out")
+    document = SegmentsDocument.model_validate_json(files.segments_json.read_text("utf-8"))
+    assert document.channel_labels == ("Agent", "Customer")
+    assert document.vocabulary_terms_used == ["Ashford"]
+    assert all(segment.channel in (0, 1) for segment in document.segments)
+    lines = files.txt.read_text("utf-8").splitlines()
+    assert len(lines) == len(document.segments)
+    assert all(line.startswith(("Agent: ", "Customer: ")) for line in lines)
+    assert files.srt.is_file()
+
+    def said(channel):
+        return " ".join(s.text for s in transcript.segments if s.channel == channel).lower()
+
+    assert any(s.channel == 0 for s in transcript.segments)
+    assert any(s.channel == 1 for s in transcript.segments)
+    assert "weather" in said(0)
+    assert "report" in said(1)
+    assert "weather" not in said(1)
+    assert "report" not in said(0)
+    for segment, line in zip(transcript.segments, lines, strict=True):
+        assert line.startswith("Agent: " if segment.channel == 0 else "Customer: ")
+    starts = [segment.start for segment in transcript.segments]
+    assert starts == sorted(starts)
+
+
+def test_real_decoder_refuses_a_mono_file_in_split_mode(transcriber, tone):
+    settings = replace(SETTINGS, channel_mode="stereo_split")
+    with pytest.raises(UndecodableAudioError, match=r"tone\.wav has 1 audio channel"):
+        transcriber.transcribe(tone, settings=settings)

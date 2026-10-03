@@ -1,7 +1,14 @@
 import json
 
 import pytest
-from swarmscribe_engine import ENGINE_VERSION, AppliedCorrection, Segment, Word, write_outputs
+from swarmscribe_engine import (
+    ENGINE_VERSION,
+    AppliedCorrection,
+    Segment,
+    TranscribeSettings,
+    Word,
+    write_outputs,
+)
 from swarmscribe_engine.writers import format_srt_time, render_srt, render_txt
 from swarmscribe_protocol import SegmentsDocument
 
@@ -154,8 +161,12 @@ def test_segments_json_declares_every_field_it_writes(make_transcript, tmp_path)
     )
     raw = write_outputs(transcript, tmp_path).segments_json.read_text("utf-8")
     # The protocol models ignore unknown fields, so a round trip drops anything undeclared.
+    # exclude_unset: fields with protocol defaults (channel_mode, channel_labels) that the
+    # writer deliberately omits for a mono transcript must not count as dropped.
     document = SegmentsDocument.model_validate_json(raw)
-    assert json.loads(raw) == json.loads(document.model_dump_json(exclude_none=True))
+    assert json.loads(raw) == json.loads(
+        document.model_dump_json(exclude_none=True, exclude_unset=True)
+    )
 
 
 def test_a_non_finite_number_is_an_error_not_invalid_json(make_transcript, tmp_path):
@@ -174,3 +185,235 @@ def test_rewriting_replaces_existing_outputs(make_transcript, tmp_path):
     write_outputs(make_transcript(), tmp_path)
     files = write_outputs(make_transcript(segments=()), tmp_path)
     assert files.txt.read_text("utf-8") == ""
+
+
+PINNED_SEGMENTS_JSON = """{
+  "schema_version": 1,
+  "source_checksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "duration": 3.25,
+  "device": "cuda",
+  "engine_version": "@ENGINE_VERSION@",
+  "settings": {
+    "model": "large-v3",
+    "compute_type": "float16",
+    "language": "en",
+    "condition_on_previous_text": false,
+    "vad_filter": true,
+    "word_timestamps": true,
+    "temperatures": [
+      0.0,
+      0.2,
+      0.4
+    ]
+  },
+  "vocabulary_version": 5,
+  "vocabulary_terms_used": [
+    "Ashford"
+  ],
+  "corrections_applied": [
+    {
+      "heard": "jay son",
+      "replacement": "Jason",
+      "count": 1
+    }
+  ],
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 1.5,
+      "text": "Welcome to Ashford.",
+      "words": [
+        {
+          "start": 0.0,
+          "end": 0.4,
+          "word": " Welcome",
+          "probability": 0.98
+        },
+        {
+          "start": 0.4,
+          "end": 0.6,
+          "word": " to",
+          "probability": 0.99
+        },
+        {
+          "start": 0.6,
+          "end": 1.5,
+          "word": " Ashford.",
+          "probability": 0.71
+        }
+      ]
+    },
+    {
+      "start": 2.0,
+      "end": 3.25,
+      "text": "Thanks Jason.",
+      "words": [
+        {
+          "start": 2.0,
+          "end": 2.5,
+          "word": " Thanks",
+          "probability": 0.9
+        },
+        {
+          "start": 2.5,
+          "end": 3.25,
+          "word": " Jason.",
+          "probability": 0.3,
+          "original": " jay son."
+        }
+      ]
+    }
+  ]
+}
+"""
+
+
+def test_mono_outputs_are_pinned_byte_for_byte(make_transcript, tmp_path):
+    # Written before per-channel transcription existed; splitting must not change one byte.
+    segments = (
+        Segment(
+            start=0.0,
+            end=1.5,
+            text="Welcome to Ashford.",
+            words=(
+                Word(start=0.0, end=0.4, word=" Welcome", probability=0.98),
+                Word(start=0.4, end=0.6, word=" to", probability=0.99),
+                Word(start=0.6, end=1.5, word=" Ashford.", probability=0.71),
+            ),
+        ),
+        Segment(
+            start=2.0,
+            end=3.25,
+            text="Thanks Jason.",
+            words=(
+                Word(start=2.0, end=2.5, word=" Thanks", probability=0.9),
+                Word(start=2.5, end=3.25, word=" Jason.", probability=0.3, original=" jay son."),
+            ),
+        ),
+    )
+    transcript = make_transcript(
+        segments=segments,
+        vocabulary_version=5,
+        corrections_applied=(AppliedCorrection(heard="jay son", replacement="Jason", count=1),),
+    )
+    files = write_outputs(transcript, tmp_path)
+    assert files.txt.read_bytes() == b"Welcome to Ashford.\nThanks Jason.\n"
+    assert files.srt.read_bytes() == (
+        b"1\n00:00:00,000 --> 00:00:01,500\nWelcome to Ashford.\n"
+        b"\n"
+        b"2\n00:00:02,000 --> 00:00:03,250\nThanks Jason.\n"
+    )
+    expected = PINNED_SEGMENTS_JSON.replace("@ENGINE_VERSION@", ENGINE_VERSION)
+    assert files.segments_json.read_bytes() == expected.encode("utf-8")
+
+
+SPLIT_SETTINGS = TranscribeSettings(
+    model="large-v3",
+    compute_type="float16",
+    device="cuda",
+    channel_mode="stereo_split",
+    channel_labels=("Agent", "Customer"),
+)
+SPLIT_SEGMENTS = (
+    Segment(start=0.0, end=1.0, text="Good morning.", words=(), channel=0),
+    Segment(
+        start=0.5,
+        end=1.5,
+        text="Hello.",
+        words=(Word(start=0.5, end=1.5, word=" Hello.", probability=0.9),),
+        channel=1,
+    ),
+)
+
+
+def split_transcript(make_transcript, **overrides):
+    values = {
+        "segments": SPLIT_SEGMENTS,
+        "settings": SPLIT_SETTINGS,
+        "channel_labels": ("Agent", "Customer"),
+    }
+    values.update(overrides)
+    return make_transcript(**values)
+
+
+def test_split_txt_prefixes_each_line_with_its_label(make_transcript):
+    text = render_txt(split_transcript(make_transcript))
+    assert text == "Agent: Good morning.\nCustomer: Hello.\n"
+
+
+def test_split_srt_prefixes_each_cue_with_its_label(make_transcript):
+    assert render_srt(split_transcript(make_transcript)) == (
+        "1\n00:00:00,000 --> 00:00:01,000\nAgent: Good morning.\n"
+        "\n"
+        "2\n00:00:00,500 --> 00:00:01,500\nCustomer: Hello.\n"
+    )
+
+
+def test_split_segments_json_records_channels_and_labels(make_transcript, tmp_path):
+    files = write_outputs(split_transcript(make_transcript), tmp_path)
+    raw = json.loads(files.segments_json.read_text("utf-8"))
+    assert raw["channel_labels"] == ["Agent", "Customer"]
+    assert list(raw)[-2:] == ["channel_labels", "segments"]
+    assert [segment["channel"] for segment in raw["segments"]] == [0, 1]
+    assert list(raw["segments"][1]) == ["start", "end", "text", "words", "channel"]
+    assert raw["settings"]["channel_mode"] == "stereo_split"
+    assert raw["settings"]["channel_labels"] == ["Agent", "Customer"]
+    document = SegmentsDocument.model_validate_json(files.segments_json.read_text("utf-8"))
+    assert document.channel_labels == ("Agent", "Customer")
+    assert [segment.channel for segment in document.segments] == [0, 1]
+
+
+def test_split_segments_json_declares_every_field_it_writes(make_transcript, tmp_path):
+    raw = write_outputs(split_transcript(make_transcript), tmp_path).segments_json.read_text(
+        "utf-8"
+    )
+    document = SegmentsDocument.model_validate_json(raw)
+    assert json.loads(raw) == json.loads(document.model_dump_json(exclude_none=True))
+
+
+def test_a_split_recording_with_no_speech_keeps_its_labels(make_transcript, tmp_path):
+    files = write_outputs(split_transcript(make_transcript, segments=()), tmp_path)
+    assert files.txt.read_text("utf-8") == ""
+    assert files.srt.read_text("utf-8") == ""
+    document = SegmentsDocument.model_validate_json(files.segments_json.read_text("utf-8"))
+    assert (document.segments, document.channel_labels) == ([], ("Agent", "Customer"))
+
+
+def test_mono_segments_json_writes_no_channel_fields(make_transcript, tmp_path):
+    raw = json.loads(write_outputs(make_transcript(), tmp_path).segments_json.read_text("utf-8"))
+    assert "channel_labels" not in raw
+    assert all("channel" not in segment for segment in raw["segments"])
+
+
+def test_a_split_document_re_read_and_re_serialised_keeps_its_mode_and_labels(
+    make_transcript, tmp_path
+):
+    raw = write_outputs(split_transcript(make_transcript), tmp_path).segments_json.read_text(
+        "utf-8"
+    )
+    document = SegmentsDocument.model_validate_json(raw)
+    assert document.settings.channel_mode == "stereo_split"
+    assert document.settings.channel_labels == ("Agent", "Customer")
+    again = json.loads(document.model_dump_json(exclude_none=True))
+    assert again["settings"]["channel_mode"] == "stereo_split"
+    assert again["settings"]["channel_labels"] == ["Agent", "Customer"]
+    assert again["channel_labels"] == ["Agent", "Customer"]
+    assert again == json.loads(raw)
+
+
+def test_an_unsplit_auto_document_asks_for_auto_and_records_no_split(make_transcript, tmp_path):
+    settings = TranscribeSettings(
+        model="large-v3", compute_type="float16", device="cuda", channel_mode="auto"
+    )
+    raw = write_outputs(make_transcript(settings=settings), tmp_path).segments_json.read_text(
+        "utf-8"
+    )
+    parsed = json.loads(raw)
+    assert parsed["settings"]["channel_mode"] == "auto"
+    assert parsed["settings"]["channel_labels"] == ["Left", "Right"]
+    assert "channel_labels" not in parsed
+    document = SegmentsDocument.model_validate_json(raw)
+    assert document.channel_labels is None
+    assert document.settings.channel_mode == "auto"
+    assert json.loads(document.model_dump_json(exclude_none=True)) == parsed
+

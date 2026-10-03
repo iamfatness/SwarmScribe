@@ -1,6 +1,13 @@
 import pytest
 from pydantic import ValidationError
-from swarmscribe_protocol import AppliedCorrection, JobSettings, Segment, SegmentsDocument, Word
+from swarmscribe_protocol import (
+    DEFAULT_CHANNEL_LABELS,
+    AppliedCorrection,
+    JobSettings,
+    Segment,
+    SegmentsDocument,
+    Word,
+)
 
 
 def _settings(**overrides):
@@ -123,3 +130,166 @@ def test_vocabulary_version_cannot_be_negative():
             corrections_applied=[],
             segments=[],
         )
+
+
+def test_job_settings_default_to_mono_with_left_and_right_labels():
+    settings = _settings()
+    assert settings.channel_mode == "mono"
+    assert settings.channel_labels == ("Left", "Right") == DEFAULT_CHANNEL_LABELS
+
+
+@pytest.mark.parametrize("mode", ["mono", "stereo_split", "auto"])
+def test_job_settings_accept_each_channel_mode(mode):
+    assert _settings(channel_mode=mode).channel_mode == mode
+
+
+@pytest.mark.parametrize("mode", ["stereo", "stereo-split", "split", ""])
+def test_job_settings_reject_unknown_channel_modes(mode):
+    with pytest.raises(ValidationError):
+        _settings(channel_mode=mode)
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        ("Left",),
+        ("Left", "Middle", "Right"),
+        ("", "Right"),
+        ("x" * 41, "Right"),
+        (" Left", "Right"),
+        ("Left ", "Right"),
+        ("   ", "Right"),
+        ("Left\nSide", "Right"),
+        ("Left\tSide", "Right"),
+        ("Left\u2028Side", "Right"),
+        ("Left\u2029Side", "Right"),
+        ("Left\u0085Side", "Right"),
+        ("Same", "same"),
+    ],
+)
+def test_job_settings_reject_bad_channel_labels(labels):
+    with pytest.raises(ValidationError):
+        _settings(channel_mode="stereo_split", channel_labels=labels)
+
+
+def test_channel_labels_of_up_to_forty_characters_are_accepted():
+    labels = ("x" * 40, "José Ashford")
+    assert _settings(channel_mode="stereo_split", channel_labels=labels).channel_labels == labels
+
+
+def test_job_settings_without_channel_fields_are_mono():
+    settings = JobSettings.model_validate_json('{"model": "large-v3", "compute_type": "float16"}')
+    assert (settings.channel_mode, settings.channel_labels) == ("mono", ("Left", "Right"))
+
+
+def test_segment_channel_is_optional_and_left_or_right():
+    assert Segment(start=0.0, end=1.0, text="Hello.", words=[]).channel is None
+    assert Segment(start=0.0, end=1.0, text="Hello.", words=[], channel=1).channel == 1
+    for bad in (-1, 2):
+        with pytest.raises(ValidationError):
+            Segment(start=0.0, end=1.0, text="Hello.", words=[], channel=bad)
+
+
+def test_a_split_segments_document_round_trips_through_json():
+    document = SegmentsDocument(
+        schema_version=1,
+        source_checksum="a" * 64,
+        duration=4.0,
+        device="cpu",
+        engine_version="0.1.0",
+        settings=_settings(channel_mode="stereo_split", channel_labels=("Agent", "Customer")),
+        vocabulary_version=0,
+        vocabulary_terms_used=[],
+        corrections_applied=[],
+        channel_labels=["Agent", "Customer"],
+        segments=[
+            Segment(start=0.0, end=1.0, text="Good morning.", words=[], channel=0),
+            Segment(start=1.5, end=2.0, text="Hello.", words=[], channel=1),
+        ],
+    )
+    assert SegmentsDocument.model_validate_json(document.model_dump_json()) == document
+
+
+def test_a_mono_segments_document_has_no_channel_labels():
+    document = SegmentsDocument(
+        schema_version=1,
+        source_checksum="a" * 64,
+        duration=3.0,
+        device="cpu",
+        engine_version="0.1.0",
+        settings=_settings(),
+        vocabulary_version=0,
+        vocabulary_terms_used=[],
+        corrections_applied=[],
+        segments=[],
+    )
+    assert document.channel_labels is None
+
+
+def _document(*, labels=None, channels=(), settings=None):
+    return SegmentsDocument(
+        schema_version=1,
+        source_checksum="a" * 64,
+        duration=4.0,
+        device="cpu",
+        engine_version="0.1.0",
+        settings=settings or _settings(),
+        vocabulary_version=0,
+        vocabulary_terms_used=[],
+        corrections_applied=[],
+        channel_labels=labels,
+        segments=[
+            Segment(start=float(i), end=i + 0.5, text="Hi.", words=[], channel=channel)
+            for i, channel in enumerate(channels)
+        ],
+    )
+
+
+def test_an_unsplit_auto_document_round_trips_through_json():
+    document = _document(settings=_settings(channel_mode="auto"), channels=(None, None))
+    again = SegmentsDocument.model_validate_json(document.model_dump_json())
+    assert again == document
+    assert (again.settings.channel_mode, again.channel_labels) == ("auto", None)
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        ("Left",),
+        ("Left", "Middle", "Right"),
+        ("", "Right"),
+        ("x" * 41, "Right"),
+        (" Left", "Right"),
+        ("Left\nSide", "Right"),
+        ("Left\u2028Side", "Right"),
+        ("Same", "same"),
+    ],
+)
+def test_document_channel_labels_follow_the_label_rules(labels):
+    with pytest.raises(ValidationError):
+        _document(labels=labels, channels=(0, 1))
+
+
+def test_a_segment_channel_without_document_labels_is_rejected():
+    with pytest.raises(ValidationError, match="no channel_labels"):
+        _document(labels=None, channels=(0,))
+
+
+@pytest.mark.parametrize("channels", [(0, None), (None, None)])
+def test_a_split_document_needs_a_channel_on_every_segment(channels):
+    with pytest.raises(ValidationError, match="every segment"):
+        _document(labels=("Agent", "Customer"), channels=channels)
+
+
+def test_a_segment_channel_outside_zero_and_one_is_rejected_in_a_split_document():
+    with pytest.raises(ValidationError):
+        _document(labels=("Agent", "Customer"), channels=(0, 2))
+
+
+def test_a_split_document_with_no_segments_is_valid():
+    assert _document(labels=("Agent", "Customer")).channel_labels == ("Agent", "Customer")
+
+
+def test_a_document_written_before_channels_existed_is_still_valid():
+    document = _document(channels=(None, None))
+    assert document.channel_labels is None

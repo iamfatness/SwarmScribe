@@ -28,6 +28,20 @@ def check_owner(file_uid: int, my_uid: int, path: Path) -> None:
         )
 
 
+def check_folder(mode: int, uid: int, my_uid: int, path: Path) -> None:
+    """Refuse (POSIX) a credentials folder that another user owns or that others can write to:
+    they could swap the file for one of their own."""
+    if uid != my_uid:
+        raise CredentialsFileError(
+            f"the folder {path} is owned by another user and will not be trusted"
+        )
+    if mode & 0o022:
+        raise CredentialsFileError(
+            f"the folder {path} is writable by others and will not be trusted; "
+            f"run `chmod 700 {path}`"
+        )
+
+
 def default_path() -> Path:
     override = os.environ.get(PATH_ENV)
     if override:
@@ -51,14 +65,30 @@ class CredentialStore:
     def __init__(self, path: Path | None = None):
         self.path = path or default_path()
 
+    def _check_folder(self) -> None:
+        if os.name == "nt":
+            return
+        try:
+            status = self.path.parent.stat()
+        except FileNotFoundError:
+            return  # we create it 0700
+        except OSError as exc:
+            raise CredentialsFileError(f"cannot read {self.path.parent}: {exc.strerror}") from None
+        check_folder(stat.S_IMODE(status.st_mode), status.st_uid, os.getuid(), self.path.parent)
+
     def _read(self) -> dict[str, Any]:
         empty: dict[str, Any] = {"leaders": {}}
+        self._check_folder()
         try:
-            status = self.path.stat()
+            status = self.path.lstat()
         except FileNotFoundError:
             return empty  # never signed in
         except OSError as exc:
             raise CredentialsFileError(f"cannot read {self.path}: {exc.strerror}") from None
+        if stat.S_ISLNK(status.st_mode):
+            raise CredentialsFileError(
+                f"{self.path} is a symbolic link and will not be trusted; remove it"
+            )
         if not stat.S_ISREG(status.st_mode):
             raise CredentialsFileError(f"{self.path} is not a regular file; remove it")
         if os.name != "nt":
@@ -80,6 +110,7 @@ class CredentialStore:
 
     def _write(self, data: dict[str, Any]) -> None:
         folder = self.path.parent
+        self._check_folder()
         folder.mkdir(mode=0o700, parents=True, exist_ok=True)  # the mode applies if created
         temp = folder / f".{self.path.name}.{os.getpid()}.tmp"
         temp.unlink(missing_ok=True)  # a stale temp of ours; O_EXCL then never follows a link
@@ -94,17 +125,31 @@ class CredentialStore:
         except BaseException:
             temp.unlink(missing_ok=True)
             raise
-        if os.name != "nt":
-            os.chmod(self.path, 0o600)
 
     def load(self, leader: str) -> SignIn | None:
         entry = self._read()["leaders"].get(leader)
-        if not isinstance(entry, dict):
+        if entry is None:
             return None
+        return self._sign_in(leader, entry)
+
+    def _sign_in(self, leader: str, entry: Any) -> SignIn:
+        corrupt = CredentialsFileError(
+            f"the sign-in for {leader} in {self.path} is corrupted and will not be trusted; "
+            "run `swarmscribe-admin login` again"
+        )
+        if not isinstance(entry, dict) or entry.get("leader") != leader:
+            raise corrupt
         try:
-            return SignIn(**entry)
+            sign_in = SignIn(**entry)
         except TypeError:
-            return None
+            raise corrupt from None
+        required = (sign_in.provider, sign_in.client_id, sign_in.token_endpoint, sign_in.scope)
+        optional = (sign_in.refresh_token, sign_in.client_secret)
+        if not all(isinstance(v, str) for v in (sign_in.id_token, *required)):
+            raise corrupt
+        if not all(v is None or isinstance(v, str) for v in optional):
+            raise corrupt
+        return sign_in
 
     def save(self, sign_in: SignIn) -> None:
         data = self._read()

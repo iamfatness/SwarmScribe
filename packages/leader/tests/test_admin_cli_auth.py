@@ -1,5 +1,7 @@
+import json
 import os
 import stat
+from dataclasses import asdict
 from pathlib import Path
 from urllib.parse import parse_qsl
 
@@ -10,6 +12,7 @@ from swarmscribe_leader.admin_cli.credentials import (
     CredentialsFileError,
     CredentialStore,
     SignIn,
+    check_folder,
     check_owner,
 )
 from swarmscribe_leader.admin_cli.device_flow import (
@@ -337,3 +340,239 @@ async def test_no_token_or_device_code_is_ever_printed(idp, capsys, caplog):
 async def test_a_token_response_without_an_id_token_is_an_error():
     with pytest.raises(SignInError, match="no ID token"):
         await sign_in(ENTRA, ScriptedProvider([(200, {"access_token": "a"})]))
+
+
+# ---- fix round 1: endpoints, polling robustness, stricter reads ----------------------------
+
+BAD_ENDPOINTS = [
+    "http://login.microsoftonline.com/t/oauth2/v2.0/token",
+    "https://evil.test/t/oauth2/v2.0/token",
+    "https://login.microsoftonline.com.evil.test/t/oauth2/v2.0/token",
+    "https://login.microsoftonline.com@evil.test/",
+    "https://login.microsoftonline.com:8443/t/oauth2/v2.0/token",
+    "https://sub.login.microsoftonline.com/t/oauth2/v2.0/token",
+    "https://oauth2.googleapis.com/token",  # a Google host is not an Entra host
+    "ftp://login.microsoftonline.com/x",
+    "",
+]
+
+
+class CountingProvider(ScriptedProvider):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.requests = 0
+
+    def __call__(self, request):
+        self.requests += 1
+        return super().__call__(request)
+
+
+@pytest.mark.parametrize("endpoint", BAD_ENDPOINTS)
+async def test_device_sign_in_refuses_a_bad_endpoint_before_any_request(endpoint):
+    for config in (
+        ProviderConfig("entra", "c", endpoint, ENTRA.token_endpoint, "s"),
+        ProviderConfig("entra", "c", ENTRA.device_authorization_endpoint, endpoint, "s"),
+    ):
+        provider = CountingProvider([])
+        with pytest.raises(SignInError, match="not a trusted"):
+            await sign_in(config, provider)
+        assert provider.requests == 0
+
+
+async def test_google_endpoints_must_be_googles():
+    config = ProviderConfig(
+        "google", "c", "https://login.microsoftonline.com/device", GOOGLE.token_endpoint, "s", "x"
+    )
+    provider = CountingProvider([])
+    with pytest.raises(SignInError, match="not a trusted"):
+        await sign_in(config, provider)
+    assert provider.requests == 0
+
+
+async def test_an_unknown_provider_name_is_refused():
+    config = ProviderConfig(
+        "evil", "c", ENTRA.device_authorization_endpoint, ENTRA.token_endpoint, "s"
+    )
+    with pytest.raises(SignInError, match="not a trusted"):
+        await sign_in(config, CountingProvider([]))
+
+
+@pytest.mark.parametrize("endpoint", BAD_ENDPOINTS[:-1])
+async def test_refresh_refuses_a_bad_endpoint_before_any_request(endpoint):
+    provider = CountingProvider([])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
+        with pytest.raises(SignInError, match="not a trusted") as excinfo:
+            await refresh_tokens(
+                http, token_endpoint=endpoint, client_id="c", refresh_token="r-9", provider="entra"
+            )
+    assert provider.requests == 0
+    assert "r-9" not in str(excinfo.value)
+
+
+async def test_refresh_without_a_provider_still_only_trusts_known_hosts():
+    provider = CountingProvider([])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
+        with pytest.raises(SignInError, match="not a trusted"):
+            await refresh_tokens(
+                http, token_endpoint="https://evil.test/token", client_id="c", refresh_token="r"
+            )
+    assert provider.requests == 0
+
+
+async def test_an_interval_of_zero_is_raised_to_one_second(idp):
+    provider = ScriptedProvider([(200, {"id_token": idp.entra()})], interval=0)
+    _tokens, sleeps, _prompts = await sign_in(ENTRA, provider)
+    assert sleeps == [1.0]
+
+
+async def test_a_missing_interval_defaults_to_five_seconds(idp):
+    provider = ScriptedProvider([(200, {"id_token": idp.entra()})])
+    del provider.start["interval"]
+    _tokens, sleeps, _prompts = await sign_in(ENTRA, provider)
+    assert sleeps == [5]
+
+
+@pytest.mark.parametrize(
+    "start",
+    [
+        {"interval": None},
+        {"interval": "soon"},
+        {"interval": True},
+        {"expires_in": None},
+        {"expires_in": "later"},
+        {"verification_uri": None},  # and no verification_url either
+    ],
+)
+async def test_a_malformed_start_answer_is_an_error_before_any_polling(start):
+    provider = CountingProvider([], **start)
+    with pytest.raises(SignInError):
+        await sign_in(ENTRA, provider)
+    assert provider.requests == 1  # the start request only
+
+
+def test_a_symlinked_cache_is_refused(tmp_path):
+    target = tmp_path / "elsewhere.json"
+    target.write_text('{"leaders": {}}', encoding="utf-8")
+    link = tmp_path / "credentials.json"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not permitted")
+    with pytest.raises(CredentialsFileError, match="symbolic link") as excinfo:
+        CredentialStore(link).load("x")
+    assert "leaders" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("mode", [0o777, 0o770, 0o707, 0o752, 0o720])
+def test_a_writable_credentials_folder_is_refused(tmp_path, mode):
+    with pytest.raises(CredentialsFileError, match="writable by others"):
+        check_folder(mode, 1000, 1000, tmp_path)
+
+
+def test_a_foreign_or_private_credentials_folder(tmp_path):
+    with pytest.raises(CredentialsFileError, match="owned by another user"):
+        check_folder(0o700, 1001, 1000, tmp_path)
+    check_folder(0o700, 1000, 1000, tmp_path)
+    check_folder(0o755, 1000, 1000, tmp_path)  # readable is fine; only writable is not
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_an_existing_loose_credentials_folder_is_refused(tmp_path):
+    folder = tmp_path / "config"
+    folder.mkdir()
+    os.chmod(folder, 0o777)
+    store = CredentialStore(folder / "credentials.json")
+    with pytest.raises(CredentialsFileError, match="writable by others"):
+        store.load("x")
+    with pytest.raises(CredentialsFileError, match="writable by others"):
+        store.save(sign_in_record())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership")
+def test_the_owner_check_uses_the_files_uid(tmp_path, monkeypatch):
+    path = tmp_path / "credentials.json"
+    store = CredentialStore(path)
+    store.save(sign_in_record())
+    monkeypatch.setattr(os, "getuid", lambda: path.stat().st_uid + 1)
+    with pytest.raises(CredentialsFileError, match="owned by another user"):
+        store.load("https://leader.example.org")
+
+
+def write_cache(path, entry, key="https://leader.example.org"):
+    path.write_text(json.dumps({"leaders": {key: entry}}), encoding="utf-8")
+
+
+def good_entry(**overrides):
+    return {**asdict(sign_in_record()), **overrides}
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"leader": "https://other.example.org"},
+        {"id_token": 5},
+        {"refresh_token": ["x"]},
+        {"client_id": None},
+        {"extra": "field"},
+    ],
+)
+def test_a_malformed_per_leader_entry_is_refused(tmp_path, overrides):
+    path = tmp_path / "credentials.json"
+    write_cache(path, good_entry(**overrides))
+    with pytest.raises(CredentialsFileError, match="corrupted") as excinfo:
+        CredentialStore(path).load("https://leader.example.org")
+    assert "id-token-secret" not in str(excinfo.value)
+
+
+def test_an_entry_missing_a_field_is_refused(tmp_path):
+    entry = good_entry()
+    del entry["token_endpoint"]
+    path = tmp_path / "credentials.json"
+    write_cache(path, entry)
+    with pytest.raises(CredentialsFileError, match="corrupted"):
+        CredentialStore(path).load("https://leader.example.org")
+
+
+def test_an_entry_for_another_leader_is_not_looked_at(tmp_path):
+    path = tmp_path / "credentials.json"
+    write_cache(path, good_entry())
+    assert CredentialStore(path).load("https://nobody.example.org") is None
+
+
+@pytest.mark.parametrize("status", [400, 401])
+async def test_invalid_grant_asks_for_a_new_login(status):
+    provider = ScriptedProvider([(status, {"error": "invalid_grant"})])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
+        with pytest.raises(SignInError, match="run `swarmscribe-admin login`"):
+            await refresh_tokens(
+                http, token_endpoint=ENTRA.token_endpoint, client_id="c", refresh_token="r"
+            )
+
+
+@pytest.mark.parametrize(
+    "status, body",
+    [
+        (503, {}),
+        (500, {"error": "server_error"}),
+        (400, {"error": "temporarily_unavailable"}),
+        (502, {"error": "invalid_grant"}),
+    ],
+)
+async def test_a_provider_outage_says_try_again_not_log_in_again(status, body):
+    provider = ScriptedProvider([(status, body)])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
+        with pytest.raises(SignInError, match="unavailable") as excinfo:
+            await refresh_tokens(
+                http, token_endpoint=ENTRA.token_endpoint, client_id="c", refresh_token="r"
+            )
+    assert "login" not in str(excinfo.value)
+
+
+async def test_another_refusal_names_the_error_but_not_the_token():
+    provider = ScriptedProvider([(400, {"error": "invalid_client"})])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
+        with pytest.raises(SignInError, match="invalid_client") as excinfo:
+            await refresh_tokens(
+                http, token_endpoint=ENTRA.token_endpoint, client_id="c", refresh_token="r-9"
+            )
+    assert "r-9" not in str(excinfo.value)

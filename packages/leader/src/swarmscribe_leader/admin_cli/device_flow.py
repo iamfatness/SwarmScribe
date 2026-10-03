@@ -4,15 +4,29 @@ refresh. Nothing here prints a token or the device code; only the user code is s
 import asyncio
 import base64
 import json
+import math
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
 DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 SLOW_DOWN_SECONDS = 5
+DEFAULT_INTERVAL_SECONDS = 5
+MINIMUM_INTERVAL_SECONDS = 1.0
+DEFAULT_EXPIRES_IN_SECONDS = 900
+
+# The endpoints come from the leader's unauthenticated login-config, or from the credentials
+# file, so they are not trusted: sign-in material (device code, client secret, refresh token)
+# goes only to https on the provider's own host, default port.
+TRUSTED_HOSTS = {
+    "entra": "login.microsoftonline.com",
+    "google": "oauth2.googleapis.com",
+}
 
 
 class SignInError(Exception):
@@ -34,6 +48,35 @@ class TokenSet:
     id_token: str = field(repr=False)
     refresh_token: str | None = field(repr=False)
     expires_at: float
+
+
+def _require_trusted(endpoint: str, hosts: set[str]) -> None:
+    """Refuse (before any request) an endpoint that is not https on exactly a trusted host:
+    no userinfo, no subdomain, no odd port."""
+    try:
+        parts = urlsplit(endpoint)
+        port = parts.port
+    except ValueError:
+        port = -1
+        parts = urlsplit("")
+    host = (parts.hostname or "").lower()
+    if (
+        parts.scheme != "https"
+        or host not in hosts
+        or port is not None
+        or parts.netloc.lower() != host
+    ):
+        raise SignInError(
+            "refusing to send sign-in material to an endpoint that is not a trusted "
+            "identity-provider address (https on the provider's own host)"
+        )
+
+
+def _number(start: dict[str, Any], key: str, default: float) -> float:
+    value = start.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+        raise SignInError(f"the identity provider sent an invalid {key}")
+    return float(value)
 
 
 def id_token_expiry(token: str) -> float | None:
@@ -76,6 +119,9 @@ async def device_sign_in(
     sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
     clock: Callable[[], float] = time.time,
 ) -> TokenSet:
+    hosts = {TRUSTED_HOSTS[provider.name]} if provider.name in TRUSTED_HOSTS else set()
+    _require_trusted(provider.device_authorization_endpoint, hosts)
+    _require_trusted(provider.token_endpoint, hosts)
     response = await http.post(
         provider.device_authorization_endpoint,
         data={"client_id": provider.client_id, "scope": provider.scope},
@@ -85,9 +131,12 @@ async def device_sign_in(
         reason = start.get("error") or response.status_code
         raise SignInError(f"{provider.name} would not start a sign-in ({reason})")
     uri = start.get("verification_uri") or start.get("verification_url")
+    if not isinstance(uri, str) or not uri:
+        raise SignInError("the identity provider sent no verification address")
+    interval = max(_number(start, "interval", DEFAULT_INTERVAL_SECONDS), MINIMUM_INTERVAL_SECONDS)
+    expires_in = _number(start, "expires_in", DEFAULT_EXPIRES_IN_SECONDS)
     prompt(f"To sign in, open {uri} and enter the code {start.get('user_code')}")
-    interval = float(start.get("interval", SLOW_DOWN_SECONDS))
-    deadline = clock() + float(start.get("expires_in", 900))
+    deadline = clock() + expires_in
     poll = {
         "grant_type": DEVICE_GRANT,
         "client_id": provider.client_id,
@@ -123,8 +172,15 @@ async def refresh_tokens(
     refresh_token: str,
     scope: str = "",
     client_secret: str | None = None,
+    provider: str | None = None,
     clock: Callable[[], float] = time.time,
 ) -> TokenSet:
+    """`provider` ("entra" or "google"), when known, narrows the trusted host to that one."""
+    if provider is None:
+        hosts = set(TRUSTED_HOSTS.values())
+    else:
+        hosts = {TRUSTED_HOSTS[provider]} if provider in TRUSTED_HOSTS else set()
+    _require_trusted(token_endpoint, hosts)
     form = {"grant_type": "refresh_token", "client_id": client_id, "refresh_token": refresh_token}
     if scope:
         form["scope"] = scope
@@ -132,5 +188,13 @@ async def refresh_tokens(
         form["client_secret"] = client_secret
     response = await http.post(token_endpoint, data=form)
     if response.status_code != 200:
-        raise SignInError("your sign-in has expired; run `swarmscribe-admin login` again")
+        error = _json(response).get("error")
+        if response.status_code in (400, 401) and error == "invalid_grant":
+            raise SignInError("your sign-in has expired; run `swarmscribe-admin login` again")
+        if response.status_code >= 500 or error == "temporarily_unavailable":
+            raise SignInError("the identity provider is unavailable; try again in a moment")
+        reason = error if isinstance(error, str) and re.fullmatch(r"[a-z_]{1,40}", error) else None
+        raise SignInError(
+            f"the identity provider refused the refresh ({reason or response.status_code})"
+        )
     return _token_set(_json(response), clock)

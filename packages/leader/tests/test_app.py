@@ -440,6 +440,45 @@ async def test_request_validation_errors_answer_422_error_body(app, client):
     assert set(response.json()) == {"code", "message"}
 
 
+REGISTER = "/v1/followers/register"
+
+
+async def test_an_api_body_over_1_mib_is_refused_with_413(client):
+    big = b"{" + b" " * (1024 * 1024) + b"}"
+    response = await client.post(
+        REGISTER, content=big, headers={"content-type": "application/json"}
+    )
+    assert (response.status_code, response.json()["code"]) == (413, "too_large")
+
+
+async def test_an_api_body_over_1_mib_without_a_length_is_refused_with_413(client):
+    async def chunks():
+        for _ in range(17):
+            yield b" " * (64 * 1024)
+
+    response = await client.post(
+        REGISTER, content=chunks(), headers={"content-type": "application/json"}
+    )
+    assert "content-length" not in response.request.headers
+    assert (response.status_code, response.json()["code"]) == (413, "too_large")
+
+
+async def test_an_api_body_just_under_1_mib_is_read(client):
+    body = b"{" + b" " * (1024 * 1024 - 2) + b"}"
+    response = await client.post(
+        REGISTER, content=body, headers={"content-type": "application/json"}
+    )
+    assert response.status_code == 422  # read and validated (no join token in it)
+
+
+async def test_file_uploads_are_not_held_to_the_api_body_limit(app, client, factory, tmp_path):
+    location = await factory.location()
+    link = await upload_link(app, factory, location, "big.txt")
+    data = b"x" * (2 * 1024 * 1024)
+    assert (await client.put(link.url, content=data)).status_code == 201
+    assert (tmp_path / "big.txt").read_bytes() == data
+
+
 async def test_docs_and_openapi_are_not_served(client):
     for path in ("/docs", "/redoc", "/openapi.json"):
         response = await client.get(path)

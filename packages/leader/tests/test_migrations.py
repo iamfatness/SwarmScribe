@@ -1,3 +1,10 @@
+import asyncio
+import subprocess
+import sys
+import time
+from urllib.parse import urlsplit, urlunsplit
+
+import asyncpg
 import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
@@ -52,6 +59,59 @@ async def test_a_device_has_at_most_one_settings_profile(sessionmaker):
                 delete(SettingsProfile).where(SettingsProfile.name == "second-cpu")
             )
             await session.commit()
+
+
+async def _recreate(admin_url: str, name: str, *, drop_only: bool = False) -> None:
+    conn = await asyncpg.connect(admin_url)
+    try:
+        await conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+        if not drop_only:
+            await conn.execute(f'CREATE DATABASE "{name}"')
+    finally:
+        await conn.close()
+
+
+UPGRADE_SCRIPT = """
+import sys, time
+from swarmscribe_leader.db.migrate import upgrade
+start_at = float(sys.argv[2])
+time.sleep(max(0.0, start_at - time.time()))
+upgrade(sys.argv[1])
+"""
+
+
+def test_concurrent_migrate_runs_serialise(database_url):
+    # Separate processes, as two replicas running `migrate` would be: Alembic's `context` is a
+    # process-wide global, so two upgrades in threads of one process interfere regardless of
+    # the database.
+    name = "swarmscribe_migrate_race"
+    url = urlunsplit(urlsplit(database_url)._replace(path="/" + name))
+    asyncio.run(_recreate(database_url, name))
+    try:
+        start_at = str(time.time() + 3)  # both start together, after interpreter start-up
+        runs = [
+            subprocess.Popen(
+                [sys.executable, "-c", UPGRADE_SCRIPT, url, start_at],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            for _ in range(2)
+        ]
+        outcomes = [
+            (run.communicate(timeout=120)[1].decode()[-2000:], run.returncode) for run in runs
+        ]
+        assert [code for _, code in outcomes] == [0, 0], outcomes
+
+        async def revision() -> str:
+            conn = await asyncpg.connect(url)
+            try:
+                return await conn.fetchval("select version_num from alembic_version")
+            finally:
+                await conn.close()
+
+        assert asyncio.run(revision()) == head_revision()
+    finally:
+        asyncio.run(_recreate(database_url, name, drop_only=True))
 
 
 async def test_default_settings_profiles_are_seeded(sessionmaker):

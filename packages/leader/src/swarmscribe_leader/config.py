@@ -1,4 +1,6 @@
-from pydantic import Field, field_validator, model_validator
+from urllib.parse import urlsplit
+
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -7,9 +9,10 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="SWARMSCRIBE_", extra="ignore")
 
-    database_url: str
+    # Secrets: never shown in repr, logs or validation errors; use .get_secret_value().
+    database_url: SecretStr
     public_url: str
-    link_key: str = Field(min_length=32)
+    link_key: SecretStr
 
     lease_seconds: int = Field(default=120, gt=0)
     heartbeat_seconds: int = Field(default=30, gt=0)
@@ -23,11 +26,27 @@ class Settings(BaseSettings):
 
     @field_validator("public_url")
     @classmethod
-    def _strip_trailing_slash(cls, value: str) -> str:
+    def _absolute_http_url(cls, value: str) -> str:
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            raise ValueError("public_url must be an absolute http(s) URL, e.g. https://leader")
         return value.rstrip("/")
+
+    @field_validator("link_key")
+    @classmethod
+    def _long_enough(cls, value: SecretStr) -> SecretStr:
+        if len(value.get_secret_value()) < 32:
+            raise ValueError("link_key must be at least 32 characters")
+        return value
 
     @model_validator(mode="after")
     def _heartbeat_inside_lease(self) -> "Settings":
         if self.heartbeat_seconds >= self.lease_seconds:
             raise ValueError("heartbeat_seconds must be shorter than lease_seconds")
+        return self
+
+    @model_validator(mode="after")
+    def _gone_only_after_a_lease(self) -> "Settings":
+        if self.follower_gone_after_seconds <= self.lease_seconds:
+            raise ValueError("follower_gone_after_seconds must be longer than lease_seconds")
         return self

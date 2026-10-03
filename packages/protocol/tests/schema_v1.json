@@ -35,6 +35,7 @@
         "type": "string"
       },
       "engine_version": {
+        "maxLength": 200,
         "title": "Engine Version",
         "type": "string"
       },
@@ -53,6 +54,7 @@
       "gpu_name": {
         "anyOf": [
           {
+            "maxLength": 200,
             "type": "string"
           },
           {
@@ -64,12 +66,15 @@
       },
       "models": {
         "items": {
+          "maxLength": 200,
           "type": "string"
         },
+        "maxItems": 50,
         "title": "Models",
         "type": "array"
       },
       "pool": {
+        "maxLength": 200,
         "title": "Pool",
         "type": "string"
       }
@@ -531,6 +536,7 @@
             "type": "string"
           },
           "engine_version": {
+            "maxLength": 200,
             "title": "Engine Version",
             "type": "string"
           },
@@ -549,6 +555,7 @@
           "gpu_name": {
             "anyOf": [
               {
+                "maxLength": 200,
                 "type": "string"
               },
               {
@@ -560,12 +567,15 @@
           },
           "models": {
             "items": {
+              "maxLength": 200,
               "type": "string"
             },
+            "maxItems": 50,
             "title": "Models",
             "type": "array"
           },
           "pool": {
+            "maxLength": 200,
             "title": "Pool",
             "type": "string"
           }

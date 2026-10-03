@@ -39,8 +39,29 @@ def test_reads_the_environment(monkeypatch):
     monkeypatch.setenv("SWARMSCRIBE_LINK_KEY", "z" * 40)
     monkeypatch.setenv("SWARMSCRIBE_LEASE_SECONDS", "300")
     settings = Settings()
-    assert settings.database_url == "postgresql://x/y"
+    assert settings.database_url.get_secret_value() == "postgresql://x/y"
     assert settings.lease_seconds == 300
+
+
+def test_secrets_are_not_shown_in_the_settings_repr():
+    settings = Settings(**{**BASE, "link_key": "s3cr3t" * 8})
+    assert "s3cr3t" not in repr(settings)
+    assert "u:p@db" not in repr(settings)
+    assert settings.link_key.get_secret_value() == "s3cr3t" * 8
+
+
+def test_followers_are_not_gone_before_their_lease_could_expire():
+    with pytest.raises(ValidationError, match="follower_gone_after_seconds"):
+        Settings(**BASE, lease_seconds=600, follower_gone_after_seconds=600)
+    assert Settings(**BASE, lease_seconds=120, follower_gone_after_seconds=121)
+
+
+@pytest.mark.parametrize(
+    "url", ["leader.example", "/v1", "ftp://leader.example", "https://", "http:/leader"]
+)
+def test_public_url_must_be_an_absolute_http_url(url):
+    with pytest.raises(ValidationError, match="public_url"):
+        Settings(**{**BASE, "public_url": url})
 
 
 def test_database_url_is_required():

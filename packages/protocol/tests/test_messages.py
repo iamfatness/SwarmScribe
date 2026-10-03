@@ -161,3 +161,30 @@ def test_fail_request_reason_is_bounded():
     FailRequest(lease_id="lease-1", code="other", reason="x" * 2000, retryable=True)
     with pytest.raises(ValidationError):
         FailRequest(lease_id="lease-1", code="other", reason="x" * 2001, retryable=True)
+
+
+def _capabilities(**overrides):
+    values = {
+        "device": "cpu",
+        "gpu_name": None,
+        "models": ["distil-large-v3"],
+        "engine_version": "0.1.0",
+        "pool": "default",
+    }
+    values.update(overrides)
+    return Capabilities(**values)
+
+
+@pytest.mark.parametrize("field", ["gpu_name", "engine_version", "pool"])
+def test_capability_strings_are_bounded(field):
+    assert getattr(_capabilities(**{field: "x" * 200}), field) == "x" * 200
+    with pytest.raises(ValidationError):
+        _capabilities(**{field: "x" * 201})
+
+
+def test_capability_models_are_bounded():
+    assert len(_capabilities(models=["m"] * 50).models) == 50
+    with pytest.raises(ValidationError):
+        _capabilities(models=["m"] * 51)
+    with pytest.raises(ValidationError):
+        _capabilities(models=["m" * 201])

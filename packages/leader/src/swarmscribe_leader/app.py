@@ -7,6 +7,7 @@ from fastapi import FastAPI
 
 from .api import errors as api_errors
 from .api import files, follower, health
+from .api.body_limit import BodyLimit
 from .background import run_exclusive, run_periodically
 from .clock import utcnow
 from .config import Settings
@@ -21,9 +22,9 @@ SHUTDOWN_GRACE_SECONDS = 10
 
 
 def create_app(settings: Settings, *, background: bool = True) -> FastAPI:
-    engine = make_engine(settings.database_url)
+    engine = make_engine(settings.database_url.get_secret_value())
     sessionmaker = make_sessionmaker(engine)
-    signer = LinkSigner(settings.link_key.encode("utf-8"))
+    signer = LinkSigner(settings.link_key.get_secret_value().encode("utf-8"))
     backend_factory = partial(backend_for, signer=signer, public_url=settings.public_url)
 
     async def reaper_step() -> None:
@@ -89,6 +90,7 @@ def create_app(settings: Settings, *, background: bool = True) -> FastAPI:
     app.state.head_revision = head_revision()
     app.state.backend_factory = backend_factory
     api_errors.install(app)
+    app.add_middleware(BodyLimit)
     app.include_router(health.router)
     app.include_router(files.router)
     app.include_router(follower.router)

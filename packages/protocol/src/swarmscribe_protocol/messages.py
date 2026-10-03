@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field
 
@@ -18,13 +18,17 @@ class Link(WireModel):
     headers: dict[str, str] = Field(default_factory=dict)
 
 
+CapabilityText = Annotated[str, Field(max_length=200)]
+"""A follower-supplied capability string; bounded because the leader stores it."""
+
+
 class Capabilities(WireModel):
     device: Device
-    gpu_name: str | None = None
+    gpu_name: CapabilityText | None = None
     gpu_memory_mb: int | None = None
-    models: list[str]
-    engine_version: str
-    pool: str
+    models: list[CapabilityText] = Field(max_length=50)
+    engine_version: CapabilityText
+    pool: CapabilityText
 
 
 class RegisterRequest(WireModel):

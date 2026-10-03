@@ -3,6 +3,8 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from alembic.script.revision import RevisionError
+from alembic.util import CommandError
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -32,6 +34,15 @@ def autogenerate(database_url: str, message: str, rev_id: str) -> None:
 
 def head_revision() -> str:
     return ScriptDirectory.from_config(alembic_config()).get_current_head()
+
+
+def is_known_revision(revision: str) -> bool:
+    """Whether `revision` is in this leader's migration history (False: a newer leader
+    migrated the database)."""
+    try:
+        return ScriptDirectory.from_config(alembic_config()).get_revision(revision) is not None
+    except (CommandError, RevisionError):
+        return False
 
 
 async def current_revision(engine: AsyncEngine) -> str | None:

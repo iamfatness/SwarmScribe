@@ -389,3 +389,82 @@ async def test_cancel_a_queued_job(sessionmaker, factory):
         await session.commit()
     stored = await load(sessionmaker, job.id)
     assert (stored.state, stored.failure_reason) == ("cancelled", "recording missing")
+
+
+@pytest.mark.parametrize("state", ["completed", "failed"])
+async def test_cancel_leaves_a_finished_job_unchanged(sessionmaker, factory, state):
+    reason = "boom" if state == "failed" else None
+    job = await factory.job(state=state, failure_reason=reason)
+    async with sessionmaker() as session:
+        locked = await session.get(Job, job.id, with_for_update=True)
+        await store.cancel(session, locked, now=utcnow(), reason="too late")
+        await session.commit()
+    stored = await load(sessionmaker, job.id)
+    assert (stored.state, stored.failure_reason) == (state, reason)
+
+
+async def cancel_while_leased(sessionmaker, factory):
+    job = await factory.job()
+    follower, _ = await factory.follower()
+    claimed = await claim(sessionmaker, follower)
+    async with sessionmaker() as session:
+        locked = await session.get(Job, job.id, with_for_update=True)
+        await store.cancel(session, locked, now=utcnow(), reason="consent withdrawn")
+        await session.commit()
+    return job, follower, claimed
+
+
+async def test_fail_on_a_job_cancelled_while_leased_is_refused(sessionmaker, factory):
+    job, follower, claimed = await cancel_while_leased(sessionmaker, factory)
+    with pytest.raises(StaleLease):
+        await fail_with(sessionmaker, job.id, claimed.lease_id, follower)
+    assert (await load(sessionmaker, job.id)).state == "cancelled"
+
+
+async def test_release_on_a_job_cancelled_while_leased_is_refused(sessionmaker, factory):
+    job, follower, claimed = await cancel_while_leased(sessionmaker, factory)
+    async with sessionmaker() as session:
+        with pytest.raises(StaleLease):
+            await store.release(session, job.id, str(claimed.lease_id), follower, now=utcnow())
+    assert (await load(sessionmaker, job.id)).state == "cancelled"
+
+
+async def test_release_all_does_not_touch_a_cancelled_job_that_keeps_its_lease(
+    sessionmaker, factory
+):
+    job, follower, _ = await cancel_while_leased(sessionmaker, factory)
+    stored = await load(sessionmaker, job.id)
+    assert stored.leased_by == follower.id
+    async with sessionmaker() as session:
+        released = await store.release_all(session, follower, now=utcnow())
+        await session.commit()
+    assert released == 0
+    stored = await load(sessionmaker, job.id)
+    assert (stored.state, stored.leased_by) == ("cancelled", follower.id)
+
+
+async def test_a_different_follower_cannot_resubmit_a_completed_job(sessionmaker, factory):
+    job = await factory.job()
+    follower, _ = await factory.follower()
+    other, _ = await factory.follower()
+    claimed = await claim(sessionmaker, follower)
+    async with sessionmaker() as session:
+        await store.submit(
+            session,
+            job.id,
+            submission(claimed.lease_id),
+            follower,
+            now=utcnow(),
+            outputs_present=present,
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        with pytest.raises(StaleLease):
+            await store.submit(
+                session,
+                job.id,
+                submission(claimed.lease_id),
+                other,
+                now=utcnow(),
+                outputs_present=present,
+            )

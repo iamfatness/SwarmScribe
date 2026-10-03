@@ -220,7 +220,11 @@ async def release(
 async def release_all(session: AsyncSession, follower: Follower, *, now: datetime) -> int:
     jobs = (
         await session.scalars(
-            select(Job).where(Job.leased_by == follower.id, Job.state == "leased").with_for_update()
+            select(Job)
+            .where(Job.leased_by == follower.id, Job.state == "leased")
+            .order_by(Job.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).all()
     for job in jobs:
@@ -230,6 +234,8 @@ async def release_all(session: AsyncSession, follower: Follower, *, now: datetim
 
 async def cancel(session: AsyncSession, job: Job, *, now: datetime, reason: str) -> None:
     """Cancel a queued or leased job. A leased job keeps its lease id so the holder hears cancel."""
+    if job.state not in OPEN_STATES:
+        return
     if job.state == "leased":
         await close_attempt(session, job, "cancelled", reason, now)
         job.lease_expires_at = None

@@ -1,0 +1,28 @@
+# Throwaway feasibility spike (branch spike/rtpengine only). Not product code.
+name: spike-rtpengine
+on:
+  push:
+    branches: [spike/rtpengine]
+  workflow_dispatch:
+jobs:
+  distro:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: install
+        run: |
+          sudo apt-get update -q
+          apt-cache policy rtpengine rtpengine-daemon rtpengine-recording-daemon rtpengine-kernel-dkms | tee apt-policy.txt
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q rtpengine-daemon rtpengine-recording-daemon ffmpeg python3-numpy "linux-headers-$(uname -r)" || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q rtpengine-kernel-dkms || echo "DKMS INSTALL FAILED"
+          pip install --break-system-packages pylibsrtp || pip install pylibsrtp
+      - name: spike
+        run: OUT=$PWD/out bash spike/run.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rtpengine-spike-distro
+          path: |
+            out
+            apt-policy.txt

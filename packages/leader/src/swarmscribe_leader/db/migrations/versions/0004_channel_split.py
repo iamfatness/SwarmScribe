@@ -40,7 +40,9 @@ def upgrade() -> None:
     op.create_check_constraint(
         "ck_storage_locations_channel_labels",
         "storage_locations",
-        "jsonb_typeof(channel_labels) = 'array' AND jsonb_array_length(channel_labels) = 2",
+        "jsonb_typeof(channel_labels) = 'array' AND jsonb_array_length(channel_labels) = 2"
+        " AND jsonb_typeof(channel_labels->0) = 'string'"
+        " AND jsonb_typeof(channel_labels->1) = 'string'",
     )
 
 

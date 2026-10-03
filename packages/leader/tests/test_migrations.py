@@ -8,7 +8,7 @@ import asyncpg
 import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
-from sqlalchemy import delete, select, text
+from sqlalchemy import CheckConstraint, delete, select, text
 from sqlalchemy.exc import IntegrityError
 from swarmscribe_leader.db.migrate import current_revision, head_revision
 from swarmscribe_leader.db.models import Base, SettingsProfile, StorageLocation
@@ -147,6 +147,7 @@ BAD_CHANNEL_SETTINGS = [
     ("channel_labels", "'\"ab\"'::jsonb"),
     ("channel_labels", "'[\"a\", \"b\", \"c\"]'::jsonb"),
     ("channel_labels", "'{\"x\": 1, \"y\": 2}'::jsonb"),
+    ("channel_labels", "'[1, 2]'::jsonb"),
 ]
 
 
@@ -180,6 +181,37 @@ async def test_a_location_cannot_be_updated_to_bad_channel_settings(
                 {"id": location.id},
             )
         await session.rollback()
+
+
+async def test_the_models_check_constraints_match_the_migrations(engine):
+    model = {
+        c.name: c.sqltext.text
+        for c in StorageLocation.__table__.constraints
+        if isinstance(c, CheckConstraint)
+    }
+    assert sorted(model) == [
+        "ck_storage_locations_channel_labels",
+        "ck_storage_locations_channel_mode",
+    ]
+    definitions = (
+        "select conname, pg_get_constraintdef(oid) from pg_constraint"
+        " where conrelid = '{table}'::regclass and contype = 'c' and conname like 'ck_%'"
+    )
+    async with engine.connect() as conn:
+        real = await conn.execute(text(definitions.format(table="storage_locations")))
+        migrated = dict(real.all())
+        # The model's own CHECK text, deparsed by Postgres the same way as the migration's.
+        clauses = ", ".join(f"constraint {n} check ({t})" for n, t in model.items())
+        await conn.execute(
+            text(
+                "create temp table model_probe (channel_mode varchar(16),"
+                f" channel_labels jsonb, {clauses})"
+            )
+        )
+        probe = await conn.execute(text(definitions.format(table="model_probe")))
+        from_model = dict(probe.all())
+        await conn.rollback()
+    assert from_model == migrated
 
 
 MIGRATE_SCRIPT = """

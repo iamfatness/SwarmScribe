@@ -169,8 +169,15 @@ uv run swarmscribe-admin consent report
 For recordings with one speaker per channel (such as call recordings), add
 `--channels stereo-split --labels "Agent,Customer"`: each recording is
 transcribed per channel and every transcript line starts with its channel's
-label. `--channels auto` splits two-channel files and mixes the rest. The
-default, `mono`, mixes the channels as before.
+label. `--channels auto` splits two-channel files and mixes the rest, but it assumes
+one speaker per channel: ordinary stereo, such as music or a dual-mono export,
+is split too, so use it only for archives where that holds. The default,
+`mono`, mixes the channels as before.
+
+Labels are 1 to 40 characters, with no leading or trailing spaces and no
+control characters, and the two must differ ignoring case. The CLI splits
+`--labels` on commas, so a label cannot contain one there. Channel settings are
+fixed when the location is added; this release has no command to change them.
 
 The CLI accepts HTTPS leaders only; HTTP is allowed only for localhost
 (`http://localhost`, `http://127.0.0.1`, or `http://[::1]`).

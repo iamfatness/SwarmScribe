@@ -896,9 +896,12 @@ async def test_a_location_with_labels_the_protocol_refuses_is_skipped_not_a_500(
         row.channel_labels = ["Same", "Same"]
         await session.commit()
     headers = await register(client, sessionmaker)
+    started = utcnow()
     claimed = await claim(client, headers)
     jobs, attempts = await job_rows(sessionmaker)
     by_state = {job.state: job for job in jobs}
+    # The broken job was tried and pushed back, not merely sorted behind the healthy one.
+    assert by_state["queued"].available_at >= started + timedelta(seconds=59)
     assert str(by_state["leased"].id) == claimed.job_id
     assert (claimed.settings.channel_mode, by_state["queued"].attempts, len(attempts)) == (
         "mono",

@@ -103,6 +103,11 @@ async def _refuse_overlap(session: AsyncSession, root: Path) -> None:
             )
 
 
+def _violated_constraint(exc: IntegrityError) -> str | None:
+    cause = getattr(exc.orig, "__cause__", None)
+    return getattr(cause, "constraint_name", None) or getattr(exc.orig, "constraint_name", None)
+
+
 async def add_location(
     session: AsyncSession,
     *,
@@ -147,6 +152,8 @@ async def add_location(
     try:
         await session.flush()
     except IntegrityError as exc:
+        if _violated_constraint(exc) != "storage_locations_name_key":
+            raise
         raise Conflict(f"a location named {name!r} already exists", code="exists") from exc
     await session.refresh(location)
     audit.record(
@@ -155,7 +162,14 @@ async def add_location(
         action="location.add",
         subject_type="location",
         subject_id=location.id,
-        detail={"name": name, "backend": "local", "root": str(canonical), "pool": pool},
+        detail={
+            "name": name,
+            "backend": "local",
+            "root": str(canonical),
+            "pool": pool,
+            "channel_mode": channel_mode,
+            "channel_labels": list(channel_labels),
+        },
     )
     return location
 

@@ -6,6 +6,7 @@ from datetime import timedelta
 
 import pytest
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from swarmscribe_leader.auth.followers import create_join_token
 from swarmscribe_leader.clock import utcnow
 from swarmscribe_leader.db.models import (
@@ -16,6 +17,7 @@ from swarmscribe_leader.db.models import (
     JoinToken,
     StorageLocation,
 )
+from swarmscribe_leader.ingest.locations import _violated_constraint, add_location
 from swarmscribe_leader.ingest.scanner import scan_due_locations
 from swarmscribe_leader.jobs import store
 
@@ -327,6 +329,49 @@ async def test_add_a_location_then_list_it(admin_client, idp, sessionmaker, tmp_
     assert [row["name"] for row in listed] == ["archive-1"]
     (entry,) = await audit_rows(sessionmaker, "location.add")
     assert entry.actor == actor(idp, "admin")
+
+
+async def test_the_location_audit_entry_records_its_channel_settings(
+    admin_client, idp, sessionmaker, tmp_path
+):
+    response = await post(
+        admin_client,
+        idp,
+        "/v1/admin/locations",
+        "admin",
+        {
+            "name": "calls-1",
+            "root": str(tmp_path),
+            "channel_mode": "stereo_split",
+            "channel_labels": ["Agent", "Customer"],
+        },
+    )
+    assert response.status_code == 201, response.text
+    (entry,) = await audit_rows(sessionmaker, "location.add")
+    assert (entry.detail["channel_mode"], entry.detail["channel_labels"]) == (
+        "stereo_split",
+        ["Agent", "Customer"],
+    )
+
+
+async def test_a_check_violation_is_not_reported_as_a_taken_name(sessionmaker, tmp_path):
+    # The API refuses bad settings first; a caller that bypasses it reaches the CHECK.
+    async with sessionmaker() as session:
+        with pytest.raises(IntegrityError) as raised:
+            await add_location(
+                session,
+                name="calls-2",
+                root=str(tmp_path),
+                input_prefix="",
+                output_prefix="transcripts/",
+                pool="default",
+                required_device="any",
+                scan_interval_s=900,
+                actor="test",
+                channel_mode="stereo",
+            )
+        await session.rollback()
+    assert _violated_constraint(raised.value) == "ck_storage_locations_channel_mode"
 
 
 async def test_a_duplicate_location_name_is_409(admin_client, idp, tmp_path):

@@ -266,6 +266,7 @@ async def dispatch(args: argparse.Namespace, client: LeaderClient) -> tuple[Any,
                 "input_prefix",
                 "pool",
                 "channel_mode",
+                "channel_labels",
                 "last_scan_at",
                 "last_scan_error",
             )

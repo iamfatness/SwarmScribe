@@ -684,7 +684,9 @@ async def test_locations_add_with_channels_and_labels(cli, store, idp, sessionma
         "stereo_split",
         ["Agent", "Customer"],
     )
-    assert "stereo_split" in (await cli("locations", "list"))[1]
+    listed = (await cli("locations", "list"))[1]
+    assert "stereo_split" in listed
+    assert "Agent, Customer" in listed
 
 
 async def test_locations_add_is_mono_by_default(cli, store, idp, sessionmaker, tmp_path):

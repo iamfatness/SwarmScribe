@@ -41,7 +41,9 @@ class StorageLocation(_Row, Base):
             name="ck_storage_locations_channel_mode",
         ),
         CheckConstraint(
-            "jsonb_typeof(channel_labels) = 'array' AND jsonb_array_length(channel_labels) = 2",
+            "jsonb_typeof(channel_labels) = 'array' AND jsonb_array_length(channel_labels) = 2"
+            " AND jsonb_typeof(channel_labels->0) = 'string'"
+            " AND jsonb_typeof(channel_labels->1) = 'string'",
             name="ck_storage_locations_channel_labels",
         ),
     )

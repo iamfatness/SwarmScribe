@@ -7,3 +7,4 @@ dist/
 *.egg-info/
 *.tmp
 .pgdata/
+e2e/compose/work/

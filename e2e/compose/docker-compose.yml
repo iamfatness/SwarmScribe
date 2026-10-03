@@ -1,0 +1,76 @@
+# Postgres, a one-shot migration, two leader replicas and an nginx proxy in front of them.
+# The image is built beforehand (see .github/workflows/ci.yml); run_e2e.py drives the test.
+name: swarmscribe-e2e
+
+x-leader: &leader
+  image: swarmscribe-leader:e2e
+  pull_policy: never
+  environment:
+    SWARMSCRIBE_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/swarmscribe
+    SWARMSCRIBE_PUBLIC_URL: http://localhost:8080
+    SWARMSCRIBE_LINK_KEY: e2e-only-link-key-0123456789abcdef
+    SWARMSCRIBE_LEASE_SECONDS: "8"
+    SWARMSCRIBE_HEARTBEAT_SECONDS: "2"
+    SWARMSCRIBE_REAPER_INTERVAL_SECONDS: "1"
+    SWARMSCRIBE_SCANNER_INTERVAL_SECONDS: "1"
+    SWARMSCRIBE_CLAIM_RETRY_AFTER: "1"
+    SWARMSCRIBE_FOLLOWER_GONE_AFTER_SECONDS: "60"
+  volumes:
+    - ./work/data:/data
+
+x-ready: &ready
+  test:
+    - CMD
+    - python
+    - -c
+    - "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/readyz', timeout=2).status == 200 else 1)"
+  interval: 2s
+  timeout: 3s
+  retries: 30
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: swarmscribe
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d swarmscribe"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    <<: *leader
+    command: ["swarmscribe-leader", "migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  leader-1:
+    <<: *leader
+    healthcheck: *ready
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  leader-2:
+    <<: *leader
+    healthcheck: *ready
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  proxy:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8080:80"
+    depends_on:
+      leader-1:
+        condition: service_healthy
+      leader-2:
+        condition: service_healthy

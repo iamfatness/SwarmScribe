@@ -232,6 +232,9 @@ def test_blank_secrets_count_as_unset():
         ("role_viewer_emails", "a@b@example.org"),
         ("role_viewer_emails", "@example.org"),
         ("role_viewer_emails", "a@localhost"),
+        ("role_admin_domains", "straße.example"),
+        ("role_viewer_emails", "x@straße.example"),
+        ("role_viewer_emails", "é@example.org"),
     ],
 )
 def test_malformed_role_entries_are_refused_naming_setting_and_position(setting, entry):

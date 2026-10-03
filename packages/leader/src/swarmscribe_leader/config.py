@@ -96,7 +96,9 @@ class Settings(BaseSettings):
     def _entries_are_well_formed(cls, names: tuple[str, ...], info: ValidationInfo) -> Any:
         kind = (info.field_name or "").rsplit("_", 1)[-1]
         for position, name in enumerate(names, start=1):
-            if kind == "domains":
+            if kind in ("domains", "emails") and not name.isascii():
+                ok = False  # Unicode lookalikes of an ASCII domain must never match
+            elif kind == "domains":
                 ok = _is_domain(name)
             elif kind == "emails":
                 local, at, domain = name.partition("@")
@@ -106,7 +108,7 @@ class Settings(BaseSettings):
             if not ok:
                 raise ValueError(
                     f"{info.field_name} entry {position} ({name!r}) is not a valid "
-                    f"{'domain' if kind == 'domains' else 'email address'}"
+                    f"{'domain' if kind == 'domains' else 'email address'} (ASCII only)"
                 )
         return names
 
@@ -178,8 +180,7 @@ class Settings(BaseSettings):
                 raise ValueError(f"role_{role}_entra_groups needs Entra ID sign-in")
             if getattr(self, f"role_{role}_google_groups") and self.google_service_account is None:
                 raise ValueError(
-                    f"role_{role}_google_groups needs google_service_account "
-                    "to read Google Groups"
+                    f"role_{role}_google_groups needs google_service_account to read Google Groups"
                 )
             for kind in ("emails", "domains"):
                 if getattr(self, f"role_{role}_{kind}") and not self.google_client_id:

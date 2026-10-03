@@ -282,3 +282,115 @@ async def test_a_graph_failure_on_overage_raises_and_is_not_cached(make_resolver
     graph.failing = False
     graph.groups[OID] = {idp.ENTRA_GROUPS["viewer"]}
     assert await resolver.role_for(identity) == "viewer"
+
+
+@pytest.fixture
+def strasse_resolver(make_resolver, sign_in_settings):
+    settings = sign_in_settings(
+        role_viewer_emails=(),
+        role_operator_emails=(),
+        role_admin_emails=(),
+        role_operator_domains=("strasse.example",),
+    )
+    return make_resolver(settings=settings, with_groups=False)
+
+
+@pytest.mark.parametrize("email", ["x@straße.example", "x@ﬆrasse.example"])
+async def test_unicode_lookalike_domains_get_no_role(strasse_resolver, idp, email):
+    assert await strasse_resolver.role_for(google_identity(idp, email)) is None
+
+
+async def test_ascii_upper_case_still_matches(strasse_resolver, idp):
+    assert await strasse_resolver.role_for(google_identity(idp, "X@Strasse.Example")) == "operator"
+
+
+async def test_a_non_ascii_email_skips_lists_but_not_google_groups(
+    make_resolver, idp, google_groups
+):
+    email = "x@straße.example"
+    google_groups.groups[email] = {"admins@example.org"}
+    assert await make_resolver().role_for(google_identity(idp, email)) == "admin"
+
+
+def test_max_entries_must_be_positive(sign_in_settings):
+    with pytest.raises(ValueError, match="max_entries"):
+        RoleResolver(RoleMapping.from_settings(sign_in_settings()), max_entries=0)
+
+
+async def test_hitting_the_page_limit_warns_without_identifiers(sign_in_settings, caplog):
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "oauth2.googleapis.com":
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
+        return httpx.Response(
+            200, json={"memberships": [{"groupKey": {"id": "g@x.org"}}], "nextPageToken": "more"}
+        )
+
+    client = GoogleCloudIdentity(
+        sign_in_settings().google_service_account_key(), transport=httpx.MockTransport(answer)
+    )
+    with caplog.at_level("WARNING"):
+        await client.group_emails("person@example.org")
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings and all("person@example.org" not in r.getMessage() for r in warnings)
+
+
+async def test_an_unsafe_email_is_skipped_with_a_debug_log(sign_in_settings, caplog):
+    client = GoogleCloudIdentity(
+        sign_in_settings().google_service_account_key(),
+        transport=httpx.MockTransport(lambda request: httpx.Response(500)),
+    )
+    with caplog.at_level("DEBUG"):
+        assert await client.group_emails("x' || true || '@example.org") == set()
+    assert any("skipped" in r.getMessage() for r in caplog.records)
+    assert all("true" not in r.getMessage() for r in caplog.records)
+
+
+async def test_claim_sources_are_never_followed(make_resolver, idp, graph):
+    identity = entra_identity(
+        idp,
+        _claim_names={"groups": "src1"},
+        _claim_sources={"src1": {"endpoint": "https://evil.example/groups"}},
+    )
+    graph.groups[OID] = {idp.ENTRA_GROUPS["viewer"]}
+    assert await make_resolver().role_for(identity) == "viewer"
+    assert graph.calls == [OID]
+
+
+async def test_the_graph_only_ever_talks_to_its_fixed_hosts():
+    hosts = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        hosts.append(request.url.host)
+        if request.url.path.endswith("/token"):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
+        return httpx.Response(200, json={"value": []})
+
+    graph = MicrosoftGraph("tenant-1", "c", SecretStr("s"), transport=httpx.MockTransport(answer))
+    await graph.member_object_ids(OID)
+    assert set(hosts) == {"login.microsoftonline.com", "graph.microsoft.com"}
+
+
+async def test_the_cache_never_exceeds_max_entries(sign_in_settings, google_groups, idp, clock):
+    resolver = RoleResolver(
+        RoleMapping.from_settings(sign_in_settings()),
+        google_groups=google_groups,
+        clock=clock,
+        max_entries=3,
+    )
+    for n in range(10):
+        await resolver.role_for(google_identity(idp, f"p{n}@example.org"))
+    assert len(resolver._cache) == 3
+
+
+async def test_two_subjects_never_share_a_cached_result(make_resolver, idp):
+    resolver = make_resolver()
+    admin = google_identity(idp, "admin@example.org")
+    other = Identity(
+        provider="google",
+        issuer=admin.issuer,
+        subject="someone-else",
+        email="nobody@elsewhere.org",
+        claims={},
+    )
+    assert await resolver.role_for(admin) == "admin"
+    assert await resolver.role_for(other) is None

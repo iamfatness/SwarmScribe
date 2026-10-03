@@ -63,7 +63,7 @@ class RoleMapping:
 
         def folded(kind: str) -> dict[str, frozenset[str]]:
             return {
-                role: frozenset(n.casefold() for n in names)
+                role: frozenset(n.lower() for n in names)
                 for role, names in per_role(kind).items()
             }
 
@@ -96,6 +96,8 @@ class RoleResolver:
         clock: Callable[[], float] = time.monotonic,
         max_entries: int = 4096,
     ):
+        if max_entries < 1:
+            raise ValueError("max_entries must be at least 1")
         self.mapping = mapping
         self.graph = graph
         self.google_groups = google_groups
@@ -126,8 +128,8 @@ class RoleResolver:
         if email and self.google_groups is not None and self.mapping.wants_google_groups():
             groups = {group.lower() for group in await self.google_groups.group_emails(email)}
             roles |= {role for role, names in self.mapping.google_groups.items() if names & groups}
-        if email:
-            address = email.casefold()
+        if email and email.isascii():  # Unicode lookalikes never match the ASCII lists
+            address = email.lower()
             roles |= {role for role, names in self.mapping.emails.items() if address in names}
             local, at, domain = address.partition("@")
             if local and at and domain and "@" not in domain:  # exactly one "@"
@@ -263,6 +265,7 @@ class GoogleCloudIdentity:
 
     async def group_emails(self, email: str) -> set[str]:
         if not self._SAFE_EMAIL.fullmatch(email):
+            logger.debug("an email with unsafe characters was skipped for the Google Groups lookup")
             return set()  # cannot be quoted safely into the search query
         query = (
             f"member_key_id == '{email}' "
@@ -270,6 +273,7 @@ class GoogleCloudIdentity:
         )
         found: set[str] = set()
         page_token: str | None = None
+        exhausted = False
         try:
             async with httpx.AsyncClient(
                 timeout=DIRECTORY_TIMEOUT_SECONDS, transport=self.transport
@@ -293,8 +297,16 @@ class GoogleCloudIdentity:
                     page_token = body.get("nextPageToken")
                     if not page_token:
                         break
+                else:
+                    exhausted = True
         except (httpx.HTTPError, KeyError, TypeError, ValueError, jwt.PyJWTError) as exc:
             raise RoleLookupFailed(
                 f"Google Cloud Identity could not be asked: {type(exc).__name__}"
             ) from exc
+        if exhausted:
+            logger.warning(
+                "a Google Groups lookup stopped at %d pages; the person's group list may be "
+                "incomplete",
+                self.MAX_PAGES,
+            )
         return found

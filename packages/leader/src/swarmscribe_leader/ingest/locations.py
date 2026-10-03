@@ -3,6 +3,7 @@ caller commits."""
 
 import asyncio
 import os
+import stat
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -38,8 +39,22 @@ class InvalidRoot(LeaderError):
 _ADD_LOCK = 7_204_511_001
 
 
+def _is_junction(path: Path) -> bool:
+    """A Windows junction (a reparse point that is not a symlink). Path.is_junction exists
+    only from Python 3.12; elsewhere junctions do not exist."""
+    if hasattr(path, "is_junction"):
+        return path.is_junction()
+    if os.name != "nt":
+        return False
+    try:
+        attributes = os.lstat(path).st_file_attributes
+    except OSError:
+        return False
+    return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
 def _is_link(path: Path) -> bool:
-    return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
+    return path.is_symlink() or _is_junction(path)
 
 
 def canonical_root(root: str) -> Path:

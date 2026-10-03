@@ -1,13 +1,21 @@
 import asyncio
+import random
 import re
 import uuid
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from swarmscribe_leader.auth.followers import create_join_token
 from swarmscribe_leader.clock import utcnow
-from swarmscribe_leader.db.models import AuditEntry, Follower, Job, JobAttempt, JoinToken
+from swarmscribe_leader.db.models import (
+    AuditEntry,
+    Follower,
+    Job,
+    JobAttempt,
+    JoinToken,
+    StorageLocation,
+)
 from swarmscribe_leader.ingest.scanner import scan_due_locations
 from swarmscribe_leader.jobs import store
 
@@ -841,42 +849,43 @@ async def test_prefixes_end_in_exactly_one_slash(admin_client, idp, tmp_path, fi
 async def test_a_retry_and_a_scan_of_the_same_recording_queue_it_once(
     admin_app, admin_client, idp, factory, sessionmaker, tmp_path
 ):
+    """Reproduces the race fixed by locking location -> recording -> job in retry. Every scan
+    uses the first scan's `now`, so the recording row is not rewritten (the scanner then takes
+    no recording row lock) and only the location lock orders it against a retry."""
     write(tmp_path, "consent.txt", b"**/*.mp3\n")
     write(tmp_path, "talks/one.mp3")
     await factory.location(name="here")
     backends = admin_app.state.backend_factory
     now = utcnow()
     await scan_due_locations(sessionmaker, backends, now=now, max_attempts=3)
-    for round_ in range(4):
+    async with sessionmaker() as session:
+        first_job = (await session.scalars(select(Job))).one().id
+    headers = idp.bearer("operator")
+
+    async def jittered(coroutine):
+        await asyncio.sleep(random.uniform(0, 0.03))
+        return await coroutine
+
+    for _ in range(60):
         async with sessionmaker() as session:
-            job = (
-                await session.scalars(
-                    select(Job).where(Job.state.in_(("queued", "failed"))).limit(1)
+            # Back to "the system cancelled it": failed jobs would count as already queued once.
+            await session.execute(
+                update(Job).values(
+                    state="cancelled", cancelled_by=None, lease_id=None, leased_by=None
                 )
-            ).first()
-            if job is None:
-                job = (
-                    await session.scalars(select(Job).where(Job.state == "cancelled").limit(1))
-                ).first()
-            # The system cancelled it (no administrator): scanning would queue the version again.
-            job.state, job.cancelled_by = "cancelled", None
+            )
+            await session.execute(
+                update(StorageLocation).values(scan_requested_at=now, last_scan_at=now)
+            )
             await session.commit()
-            job_id = job.id
-        await post(admin_client, idp, "/v1/admin/locations/here/ingest", "operator")
-        retry, scan = await asyncio.gather(
-            post(admin_client, idp, f"/v1/admin/jobs/{job_id}/retry", "operator"),
-            scan_due_locations(
-                sessionmaker, backends, now=now + timedelta(seconds=round_ + 1), max_attempts=3
-            ),
+        retry, _scan = await asyncio.gather(
+            jittered(admin_client.post(f"/v1/admin/jobs/{first_job}/retry", headers=headers)),
+            jittered(scan_due_locations(sessionmaker, backends, now=now, max_attempts=3)),
         )
         assert retry.status_code in (200, 409), retry.text
         async with sessionmaker() as session:
             open_jobs = (await session.scalars(select(Job).where(Job.state == "queued"))).all()
-        assert len(open_jobs) <= 1
-        async with sessionmaker() as session:  # close the open one so the next round starts clean
-            for open_job in open_jobs:
-                open_job.state = "failed"
-            await session.commit()
+        assert len(open_jobs) <= 1, "retry and scan both queued the recording"
 
 
 async def test_cancelling_a_system_cancelled_job_makes_the_cancel_the_administrators(
@@ -933,7 +942,9 @@ async def test_a_refused_read_or_role_is_not_a_refused_change(
     assert await audit_rows(sessionmaker, "admin.change_refused") == []
 
 
-async def test_no_admin_route_is_hidden_or_mounted_as_a_sub_application(admin_app):
+def admin_surface_problems(app) -> tuple[list[str], int]:
+    """Routes under /v1/admin that are hidden from the schema or not plain API routes, and
+    sub-applications mounted at, above or below /v1/admin; and how many admin routes exist."""
     from fastapi.routing import APIRoute
     from starlette.routing import Mount
 
@@ -945,14 +956,50 @@ async def test_no_admin_route_is_hidden_or_mounted_as_a_sub_application(admin_ap
             else:
                 yield route
 
-    seen = 0
-    for route in walk(admin_app.routes):
+    problems, seen = [], 0
+    for route in walk(app.routes):
         path = getattr(route, "path", "")
         if isinstance(route, Mount):
-            assert not "/v1/admin/".startswith(path.rstrip("/") + "/"), f"mounted at {path}"
-            continue
-        if path.startswith("/v1/admin/"):
+            p = path.rstrip("/") + "/"
+            if p.startswith("/v1/admin/") or "/v1/admin/".startswith(p):
+                problems.append(f"sub-application mounted at {path!r}")
+        elif path.startswith("/v1/admin/"):
             seen += 1
-            assert isinstance(route, APIRoute), path
-            assert route.include_in_schema, f"{path} is hidden from the schema"
+            if not isinstance(route, APIRoute):
+                problems.append(f"{path} is not an API route")
+            elif not route.include_in_schema:
+                problems.append(f"{path} is hidden from the schema")
+    return problems, seen
+
+
+async def test_no_admin_route_is_hidden_or_mounted_as_a_sub_application(admin_app):
+    problems, seen = admin_surface_problems(admin_app)
+    assert problems == []
     assert seen >= len(ROUTES)
+
+
+@pytest.mark.parametrize("mount_at", ["/v1/admin/legacy", "/v1/admin", "/v1", "/"])
+def test_the_walk_catches_a_sub_application_mounted_on_or_around_admin(mount_at):
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.mount(mount_at, FastAPI())
+    problems, _ = admin_surface_problems(app)
+    assert len(problems) == 1
+
+
+def test_the_walk_catches_a_hidden_admin_route():
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.add_api_route("/v1/admin/secret", lambda: None, include_in_schema=False)
+    problems, _ = admin_surface_problems(app)
+    assert problems == ["/v1/admin/secret is hidden from the schema"]
+
+
+def test_an_unrelated_mount_is_fine():
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.mount("/static", FastAPI())
+    assert admin_surface_problems(app)[0] == []

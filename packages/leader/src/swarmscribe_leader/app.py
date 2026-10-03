@@ -28,13 +28,13 @@ def create_app(settings: Settings, *, background: bool = True) -> FastAPI:
 
     async def reaper_step() -> None:
         async def work() -> None:
-            async with sessionmaker() as session:
-                await reap(
-                    session,
-                    now=utcnow(),
-                    gone_after=timedelta(seconds=settings.follower_gone_after_seconds),
-                )
-                await session.commit()
+            await reap(
+                sessionmaker,
+                now=utcnow(),
+                gone_after=timedelta(seconds=settings.follower_gone_after_seconds),
+                started_at=app.state.started_at,
+                startup_grace=timedelta(seconds=settings.lease_seconds),
+            )
 
         await run_exclusive(engine, "reaper", work)
 
@@ -48,6 +48,7 @@ def create_app(settings: Settings, *, background: bool = True) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        app.state.started_at = utcnow()
         stop = asyncio.Event()
         tasks = []
         if background:

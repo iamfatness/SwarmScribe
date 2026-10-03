@@ -17,6 +17,7 @@ from swarmscribe_leader.db.models import (
     StorageLocation,
 )
 from swarmscribe_leader.ingest.scanner import scan_location
+from swarmscribe_leader.jobs.reaper import reap
 from swarmscribe_leader.storage.base import StorageUnavailable
 from swarmscribe_leader.storage.links import LinkSigner
 from swarmscribe_leader.storage.registry import backend_for
@@ -298,6 +299,22 @@ async def test_deregister_leaves_a_draining_follower_draining(
         await session.commit()
     assert (await client.post("/v1/jobs/claim", headers=headers)).status_code == 204
     assert (await client.post("/v1/followers/deregister", headers=headers)).status_code == 204
+    assert (await client.post("/v1/jobs/claim", headers=headers)).status_code == 204
+    assert await follower_state(sessionmaker) == "draining"
+
+
+async def test_a_silent_draining_follower_cannot_escape_the_drain_via_the_reaper(
+    client, sessionmaker, factory, tmp_path
+):
+    await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(client, sessionmaker)
+    async with sessionmaker() as session:
+        follower = (await session.scalars(select(Follower))).one()
+        follower.state = "draining"
+        follower.last_seen_at = utcnow() - timedelta(hours=1)
+        await session.commit()
+    await reap(sessionmaker, now=utcnow(), gone_after=timedelta(minutes=10))
+    assert await follower_state(sessionmaker) == "draining"
     assert (await client.post("/v1/jobs/claim", headers=headers)).status_code == 204
     assert await follower_state(sessionmaker) == "draining"
 

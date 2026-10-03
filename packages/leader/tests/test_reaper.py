@@ -1,6 +1,7 @@
 import asyncio
 from datetime import timedelta
 
+import pytest
 from sqlalchemy import select
 from swarmscribe_leader.background import run_exclusive, run_periodically
 from swarmscribe_leader.clock import utcnow
@@ -18,11 +19,8 @@ async def claim(sessionmaker, follower, *, now):
     return job
 
 
-async def run_reaper(sessionmaker, *, now) -> ReapResult:
-    async with sessionmaker() as session:
-        result = await reap(session, now=now, gone_after=GONE_AFTER)
-        await session.commit()
-    return result
+async def run_reaper(sessionmaker, *, now, **kwargs) -> ReapResult:
+    return await reap(sessionmaker, now=now, gone_after=GONE_AFTER, **kwargs)
 
 
 async def test_an_expired_lease_is_requeued(sessionmaker, factory):
@@ -87,6 +85,113 @@ async def test_silent_followers_without_a_lease_are_marked_gone(sessionmaker, fa
     async with sessionmaker() as session:
         states = {f.id: f.state for f in (await session.scalars(select(Follower))).all()}
     assert states == {quiet.id: "gone", busy.id: "active", recent.id: "active"}
+
+
+async def test_a_silent_draining_follower_stays_draining(sessionmaker, factory):
+    now = utcnow()
+    draining, _ = await factory.follower(state="draining", last_seen_at=now - timedelta(hours=1))
+    result = await run_reaper(sessionmaker, now=now)
+    assert result.gone == 0
+    async with sessionmaker() as session:
+        assert (await session.get(Follower, draining.id)).state == "draining"
+
+
+async def test_the_reaper_never_waits_on_a_follower_row(sessionmaker, factory):
+    job = await factory.job()
+    start = utcnow()
+    holder_follower, _ = await factory.follower()
+    await claim(sessionmaker, holder_follower, now=start)
+    later = start + timedelta(minutes=11)
+    busy, _ = await factory.follower(last_seen_at=start)
+    quiet, _ = await factory.follower(last_seen_at=start)
+    async with sessionmaker() as holder:
+        # e.g. a request from `busy` is in flight and holds its follower row
+        await holder.get(Follower, busy.id, with_for_update=True)
+        result = await asyncio.wait_for(run_reaper(sessionmaker, now=later), timeout=10)
+        await holder.rollback()
+    assert (result.requeued, result.gone) == (1, 2)  # the job's holder and `quiet`
+    async with sessionmaker() as session:
+        states = {f.id: f.state for f in (await session.scalars(select(Follower))).all()}
+        assert (await session.get(Job, job.id)).state == "queued"
+    assert states == {holder_follower.id: "gone", busy.id: "active", quiet.id: "gone"}
+
+
+async def test_the_job_requeue_commits_even_if_marking_followers_fails(
+    sessionmaker, factory, monkeypatch
+):
+    job = await factory.job()
+    follower, _ = await factory.follower()
+    start = utcnow()
+    await claim(sessionmaker, follower, now=start)
+
+    async def broken(*_args, **_kwargs):
+        raise RuntimeError("follower update failed")
+
+    monkeypatch.setattr("swarmscribe_leader.jobs.reaper.mark_gone", broken)
+    with pytest.raises(RuntimeError):
+        await run_reaper(sessionmaker, now=start + timedelta(seconds=121))
+    async with sessionmaker() as session:
+        assert (await session.get(Job, job.id)).state == "queued"
+
+
+async def test_no_lease_expires_during_the_startup_grace(sessionmaker, factory):
+    job = await factory.job()
+    follower, _ = await factory.follower()
+    start = utcnow()
+    await claim(sessionmaker, follower, now=start)
+    now = start + timedelta(seconds=121)
+    grace = timedelta(seconds=120)
+    result = await run_reaper(
+        sessionmaker, now=now, started_at=now - timedelta(seconds=10), startup_grace=grace
+    )
+    assert result.requeued == 0
+    async with sessionmaker() as session:
+        assert (await session.get(Job, job.id)).state == "leased"
+    result = await run_reaper(
+        sessionmaker, now=now, started_at=now - timedelta(seconds=120), startup_grace=grace
+    )
+    assert result.requeued == 1
+
+
+async def test_the_app_passes_its_start_time_and_the_lease_as_grace(
+    engine, migrated_database_url, monkeypatch
+):
+    from swarmscribe_leader.app import create_app
+    from swarmscribe_leader.config import Settings
+
+    calls = []
+
+    async def fake_reap(sessionmaker, **kwargs):
+        calls.append(kwargs)
+        return ReapResult(0, 0, 0)
+
+    async def run_now(_engine, _name, work):
+        await work()
+        return True
+
+    monkeypatch.setattr("swarmscribe_leader.app.reap", fake_reap)
+    monkeypatch.setattr("swarmscribe_leader.app.run_exclusive", run_now)
+    async def fake_scan(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr("swarmscribe_leader.app.scan_due_locations", fake_scan)
+    settings = Settings(
+        database_url=migrated_database_url,
+        public_url="http://leader",
+        link_key="k" * 32,
+        lease_seconds=90,
+        heartbeat_seconds=30,
+        reaper_interval_seconds=0.05,
+    )
+    app = create_app(settings, background=True)
+    before = utcnow()
+    async with app.router.lifespan_context(app):
+        await asyncio.sleep(0.2)
+    assert calls
+    started_at = calls[0]["started_at"]
+    assert before <= started_at <= utcnow()
+    assert app.state.started_at == started_at
+    assert calls[0]["startup_grace"] == timedelta(seconds=90)
 
 
 async def test_only_one_process_runs_exclusive_work_at_a_time(engine):

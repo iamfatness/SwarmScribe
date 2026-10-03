@@ -1,4 +1,5 @@
 import hashlib
+import uuid
 from datetime import timedelta
 
 import httpx
@@ -18,6 +19,7 @@ from swarmscribe_leader.db.models import (
     StorageLocation,
 )
 from swarmscribe_leader.ingest.scanner import scan_location
+from swarmscribe_leader.jobs import store
 from swarmscribe_leader.jobs.reaper import reap
 from swarmscribe_leader.storage.base import StorageUnavailable
 from swarmscribe_leader.storage.links import LinkSigner
@@ -205,6 +207,57 @@ async def test_submit_before_uploading_is_409_outputs_missing(
         },
     )
     assert (response.status_code, response.json()["code"]) == (409, "outputs_missing")
+
+
+async def test_an_old_upload_link_cannot_overwrite_the_new_holders_output(
+    client, sessionmaker, factory, tmp_path
+):
+    await queue_one(sessionmaker, factory, tmp_path)
+    slow = await register(client, sessionmaker)
+    first = await claim(client, slow)
+    # The slow follower's lease expires and another follower takes the job over.
+    await reap(sessionmaker, now=utcnow() + timedelta(seconds=121), gone_after=timedelta(hours=1))
+    fast = await register(client, sessionmaker)
+    second = await claim(client, fast)
+    assert (second.job_id, second.lease_id != first.lease_id) == (first.job_id, True)
+    uploaded = await client.put(second.upload_urls.txt.url, content=b"new holder\n")
+    assert uploaded.status_code == 201
+    response = await client.put(first.upload_urls.txt.url, content=b"old holder\n")
+    assert (response.status_code, response.json()["code"]) == (409, "stale_lease")
+    assert (tmp_path / "transcripts" / "talks" / "one.mp3.txt").read_bytes() == b"new holder\n"
+
+
+async def test_a_cancelled_jobs_upload_link_is_refused(client, sessionmaker, factory, tmp_path):
+    await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(client, sessionmaker)
+    claimed = await claim(client, headers)
+    async with sessionmaker() as session:
+        job = await session.get(Job, uuid.UUID(claimed.job_id), with_for_update=True)
+        await store.cancel(session, job, now=utcnow(), reason="consent withdrawn")
+        await session.commit()
+    response = await client.put(claimed.upload_urls.txt.url, content=b"too late\n")
+    assert (response.status_code, response.json()["code"]) == (409, "stale_lease")
+    assert not (tmp_path / "transcripts" / "talks" / "one.mp3.txt").exists()
+
+
+async def test_submit_with_a_checksum_that_does_not_match_storage_is_409(
+    client, sessionmaker, factory, tmp_path
+):
+    await queue_one(sessionmaker, factory, tmp_path, data=b"the recording")
+    headers = await register(client, sessionmaker)
+    claimed = await claim(client, headers)
+    checksums = await upload_outputs(client, claimed)
+    response = await client.post(
+        f"/v1/jobs/{claimed.job_id}/submit",
+        headers=headers,
+        json={
+            "lease_id": claimed.lease_id,
+            "checksums": {"source": sha(b"the recording"), **checksums, "srt": "b" * 64},
+        },
+    )
+    assert (response.status_code, response.json()["code"]) == (409, "checksum_mismatch")
+    async with sessionmaker() as session:
+        assert (await session.scalars(select(Job))).one().state == "leased"
 
 
 async def test_a_stale_lease_is_409(client, sessionmaker, factory, tmp_path):

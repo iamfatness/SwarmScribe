@@ -1,6 +1,7 @@
 import asyncio
 import os
 import time
+import uuid
 from datetime import timedelta
 
 import httpx
@@ -8,6 +9,7 @@ import pytest
 from sqlalchemy.exc import DBAPIError
 from swarmscribe_leader.app import create_app
 from swarmscribe_leader.config import Settings
+from swarmscribe_leader.db.models import Job
 from swarmscribe_leader.storage.links import LinkClaims
 
 LINK_KEY = "k" * 32
@@ -29,6 +31,22 @@ async def client(app):
         transport=httpx.ASGITransport(app=app), base_url="http://leader"
     ) as http:
         yield http
+
+
+async def leased_job(factory, location):
+    follower, _ = await factory.follower()
+    recording = await factory.recording(location, key=f"talks/{uuid.uuid4().hex}.mp3")
+    return await factory.job(
+        recording, state="leased", lease_id=uuid.uuid4(), leased_by=follower.id, attempts=1
+    )
+
+
+async def upload_link(app, factory, location, key, ttl=timedelta(minutes=5)):
+    """An upload link bound, like every real one, to a job and its current lease."""
+    job = await leased_job(factory, location)
+    return app.state.backend_factory(location).upload_link(
+        key, ttl, job_id=str(job.id), lease_id=str(job.lease_id)
+    )
 
 
 def no_temp_files(root):
@@ -84,12 +102,68 @@ async def test_a_missing_file_answers_404(app, client, factory):
 
 async def test_upload_through_a_signed_link_creates_directories(app, client, factory, tmp_path):
     location = await factory.location()
-    link = app.state.backend_factory(location).upload_link(
-        "transcripts/talks/one.mp3.txt", timedelta(minutes=5)
-    )
+    link = await upload_link(app, factory, location, "transcripts/talks/one.mp3.txt")
     response = await client.put(link.url, content=b"hello\n")
     assert response.status_code == 201
     assert (tmp_path / "transcripts" / "talks" / "one.mp3.txt").read_bytes() == b"hello\n"
+    assert no_temp_files(tmp_path)
+
+
+async def test_an_upload_link_not_bound_to_a_lease_is_refused(app, client, factory, tmp_path):
+    location = await factory.location()
+    link = app.state.backend_factory(location).upload_link("out.txt", timedelta(minutes=5))
+    response = await client.put(link.url, content=b"x")
+    assert (response.status_code, response.json()["code"]) == (403, "forbidden")
+    assert not (tmp_path / "out.txt").exists()
+
+
+@pytest.mark.parametrize("problem", ["lease-ended", "other-lease", "no-such-job"])
+async def test_an_upload_for_a_lease_that_is_not_current_is_409(
+    app, client, factory, tmp_path, problem
+):
+    write(tmp_path, "out.txt", b"current")
+    location = await factory.location()
+    job = await leased_job(factory, location)
+    job_id, lease_id = str(job.id), str(job.lease_id)
+    if problem == "lease-ended":
+        async with app.state.sessionmaker() as session:
+            stored = await session.get(Job, job.id)
+            stored.state, stored.lease_id, stored.leased_by = "queued", None, None
+            await session.commit()
+    elif problem == "other-lease":
+        lease_id = str(uuid.uuid4())
+    else:
+        job_id = str(uuid.uuid4())
+    link = app.state.backend_factory(location).upload_link(
+        "out.txt", timedelta(minutes=5), job_id=job_id, lease_id=lease_id
+    )
+    response = await client.put(link.url, content=b"late")
+    assert (response.status_code, response.json()["code"]) == (409, "stale_lease")
+    assert (tmp_path / "out.txt").read_bytes() == b"current"
+    assert no_temp_files(tmp_path)
+
+
+async def test_a_lease_that_ends_during_the_upload_does_not_replace_the_file(
+    app, client, factory, tmp_path
+):
+    write(tmp_path, "out.txt", b"current")
+    location = await factory.location()
+    job = await leased_job(factory, location)
+    link = app.state.backend_factory(location).upload_link(
+        "out.txt", timedelta(minutes=5), job_id=str(job.id), lease_id=str(job.lease_id)
+    )
+
+    async def body():
+        yield b"late "
+        async with app.state.sessionmaker() as session:  # the reaper takes the lease meanwhile
+            stored = await session.get(Job, job.id)
+            stored.state, stored.lease_id, stored.leased_by = "queued", None, None
+            await session.commit()
+        yield b"bytes"
+
+    response = await client.put(link.url, content=body())
+    assert (response.status_code, response.json()["code"]) == (409, "stale_lease")
+    assert (tmp_path / "out.txt").read_bytes() == b"current"
     assert no_temp_files(tmp_path)
 
 
@@ -100,7 +174,7 @@ async def test_a_get_link_cannot_upload_and_a_put_link_cannot_download(
     location = await factory.location()
     backend = app.state.backend_factory(location)
     get_link = backend.download_link("talks/one.mp3", "", timedelta(minutes=5))
-    put_link = backend.upload_link("talks/one.mp3", timedelta(minutes=5))
+    put_link = await upload_link(app, factory, location, "talks/one.mp3")
     assert (await client.put(get_link.url, content=b"x")).status_code == 403
     assert (await client.get(put_link.url)).status_code == 403
 
@@ -121,7 +195,7 @@ async def test_a_link_to_a_missing_root_answers_503_unavailable(app, client, fac
     location = await factory.location(config={"root": str(tmp_path / "removed")})
     backend = app.state.backend_factory(location)
     get_link = backend.download_link("talks/one.mp3", "", timedelta(minutes=5))
-    put_link = backend.upload_link("talks/one.mp3", timedelta(minutes=5))
+    put_link = await upload_link(app, factory, location, "talks/one.mp3")
     for response in (await client.get(get_link.url), await client.put(put_link.url, content=b"x")):
         assert response.status_code == 503
         assert response.json() == {
@@ -135,7 +209,7 @@ async def test_a_link_to_a_missing_root_answers_503_unavailable(app, client, fac
 async def test_uploading_over_a_directory_answers_400(app, client, factory, tmp_path):
     (tmp_path / "talks").mkdir()
     location = await factory.location()
-    link = app.state.backend_factory(location).upload_link("talks", timedelta(minutes=5))
+    link = await upload_link(app, factory, location, "talks")
     response = await client.put(link.url, content=b"x")
     assert response.status_code == 400
     assert response.json()["code"] == "invalid_key"
@@ -147,7 +221,7 @@ async def test_an_oversize_upload_answers_413_and_leaves_nothing(
 ):
     monkeypatch.setattr("swarmscribe_leader.api.files.MAX_UPLOAD_BYTES", 4)
     location = await factory.location()
-    link = app.state.backend_factory(location).upload_link("big.txt", timedelta(minutes=5))
+    link = await upload_link(app, factory, location, "big.txt")
     response = await client.put(link.url, content=b"12345678")
     assert response.status_code == 413
     assert list(tmp_path.iterdir()) == []
@@ -211,8 +285,7 @@ async def test_the_shutdown_grace_is_ten_seconds():
 async def test_upload_under_a_file_answers_400_and_leaves_no_temp(app, client, factory, tmp_path):
     write(tmp_path, "talks/one.mp3")
     location = await factory.location()
-    backend = app.state.backend_factory(location)
-    link = backend.upload_link("talks/one.mp3/x.txt", timedelta(minutes=5))
+    link = await upload_link(app, factory, location, "talks/one.mp3/x.txt")
     response = await client.put(link.url, content=b"x")
     assert (response.status_code, response.json()["code"]) == (400, "invalid_key")
     assert no_temp_files(tmp_path)
@@ -223,7 +296,7 @@ async def test_a_blocked_replace_answers_409_with_retry_after(
 ):
     write(tmp_path, "out.txt", b"old")
     location = await factory.location()
-    link = app.state.backend_factory(location).upload_link("out.txt", timedelta(minutes=5))
+    link = await upload_link(app, factory, location, "out.txt")
 
     def refuse(*_args, **_kwargs):
         raise PermissionError("in use")
@@ -240,7 +313,7 @@ async def test_other_upload_os_errors_answer_503_unavailable(
     app, client, factory, tmp_path, monkeypatch
 ):
     location = await factory.location()
-    link = app.state.backend_factory(location).upload_link("out.txt", timedelta(minutes=5))
+    link = await upload_link(app, factory, location, "out.txt")
 
     def broken(*_args, **_kwargs):
         raise OSError(5, "disk on fire", str(tmp_path))
@@ -304,7 +377,7 @@ async def test_a_240_character_file_name_uploads(app, client, factory, tmp_path)
         pytest.skip("this platform cannot hold a 240 character name under the temp directory")
     key = "a/" + name
     location = await factory.location()
-    link = app.state.backend_factory(location).upload_link(key, timedelta(minutes=5))
+    link = await upload_link(app, factory, location, key)
     response = await client.put(link.url, content=b"long")
     assert response.status_code == 201
     assert (tmp_path / "a" / name).read_bytes() == b"long"
@@ -323,7 +396,7 @@ async def test_the_temp_name_does_not_grow_with_the_target_name(
 
     monkeypatch.setattr("swarmscribe_leader.api.files.os.replace", spy)
     location = await factory.location()
-    link = app.state.backend_factory(location).upload_link("n" * 100 + ".txt", timedelta(minutes=5))
+    link = await upload_link(app, factory, location, "n" * 100 + ".txt")
     assert (await client.put(link.url, content=b"x")).status_code == 201
     assert len(seen[0]) == len(".upload-") + 32
 
@@ -417,7 +490,7 @@ async def test_symlinked_keys_are_refused_for_download_and_upload(app, client, f
     location = await factory.location()
     backend = app.state.backend_factory(location)
     get_link = backend.download_link("alias.txt", "", timedelta(minutes=5))
-    put_link = backend.upload_link("alias.txt", timedelta(minutes=5))
+    put_link = await upload_link(app, factory, location, "alias.txt")
     for response in (await client.get(get_link.url), await client.put(put_link.url, content=b"x")):
         assert (response.status_code, response.json()["code"]) == (400, "invalid_key")
     assert (tmp_path / "real.txt").read_bytes() == b"secret"
@@ -428,7 +501,7 @@ async def test_a_declared_oversize_body_is_refused_before_reading(
 ):
     monkeypatch.setattr("swarmscribe_leader.api.files.MAX_UPLOAD_BYTES", 10)
     location = await factory.location()
-    link = app.state.backend_factory(location).upload_link("big.txt", timedelta(minutes=5))
+    link = await upload_link(app, factory, location, "big.txt")
     response = await client.put(link.url, content=b"x", headers={"content-length": "11"})
     assert (response.status_code, response.json()["code"]) == (413, "too_large")
     assert list(tmp_path.iterdir()) == []

@@ -11,6 +11,7 @@ from swarmscribe_protocol import (
     FailRequest,
     HeartbeatRequest,
     HeartbeatResponse,
+    OutputChecksums,
     RegisterRequest,
     RegisterResponse,
     ReleaseRequest,
@@ -24,7 +25,7 @@ from ..clock import utcnow
 from ..db.models import Follower, Job, Recording
 from ..errors import LeaderError, Unauthorized
 from ..jobs import store
-from ..jobs.claims import build_claim, device_of, outputs_present, profile_for
+from ..jobs.claims import build_claim, device_of, outputs_verified, profile_for
 from ..storage.base import StorageError
 from .deps import db_session, settings_of
 
@@ -161,12 +162,12 @@ async def submit(
     session: Annotated[AsyncSession, Depends(db_session)],
     follower: Annotated[Follower, Depends(current_follower)],
 ) -> SubmitResponse:
-    async def present(job: Job) -> bool:
-        return await outputs_present(
-            session, job, backend_factory=request.app.state.backend_factory
+    async def verified(job: Job, checksums: OutputChecksums) -> str | None:
+        return await outputs_verified(
+            session, job, checksums, backend_factory=request.app.state.backend_factory
         )
 
-    await store.submit(session, job_id, body, follower, now=utcnow(), outputs_present=present)
+    await store.submit(session, job_id, body, follower, now=utcnow(), outputs_verified=verified)
     await session.commit()
     return SubmitResponse(accepted=True)
 

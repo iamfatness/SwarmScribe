@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import stat
 import time
@@ -10,6 +11,8 @@ from swarmscribe_protocol import Link
 
 from .base import ObjectInfo, StorageError, StorageUnavailable
 from .links import LinkClaims, LinkSigner
+
+HASH_CHUNK_BYTES = 1024 * 1024
 
 
 def version_of(stat_result: os.stat_result) -> str:
@@ -150,7 +153,16 @@ class LocalBackend:
             return None
         return ObjectInfo(key=key, size=st.st_size, version=version_of(st))
 
-    def _link(self, key: str, method: str, version: str, ttl: timedelta) -> Link:
+    def _link(
+        self,
+        key: str,
+        method: str,
+        version: str,
+        ttl: timedelta,
+        *,
+        job_id: str = "",
+        lease_id: str = "",
+    ) -> Link:
         self.path_for(key)
         claims = LinkClaims(
             location_id=self.location_id,
@@ -158,14 +170,39 @@ class LocalBackend:
             method=method,
             version=version,
             expires=int(self.clock() + ttl.total_seconds()),
+            job_id=job_id,
+            lease_id=lease_id,
         )
         return Link(url=f"{self.public_url}/v1/files/{self.signer.sign(claims)}", method=method)
 
     def download_link(self, key: str, version: str, ttl: timedelta) -> Link:
         return self._link(key, "GET", version, ttl)
 
-    def upload_link(self, key: str, ttl: timedelta) -> Link:
-        return self._link(key, "PUT", "", ttl)
+    def upload_link(
+        self, key: str, ttl: timedelta, *, job_id: str = "", lease_id: str = ""
+    ) -> Link:
+        """A PUT link. The file route accepts it only while `lease_id` is the job's lease."""
+        return self._link(key, "PUT", "", ttl, job_id=job_id, lease_id=lease_id)
+
+    async def sha256(self, key: str) -> str | None:
+        """Hex SHA-256 of the object's content, or None when there is no such object."""
+        return await asyncio.to_thread(self._sha256_sync, key)
+
+    def _sha256_sync(self, key: str) -> str | None:
+        self._require_root()
+        path = self.path_for(key)
+        if self._stat_file(path, key) is None:
+            return None
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as handle:
+                while chunk := handle.read(HASH_CHUNK_BYTES):
+                    digest.update(chunk)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise StorageUnavailable(f"cannot read {key!r}: {exc.strerror}") from exc
+        return digest.hexdigest()
 
     async def delete(self, key: str) -> None:
         path = self.path_for(key)

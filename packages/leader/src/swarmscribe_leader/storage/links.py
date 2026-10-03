@@ -19,6 +19,13 @@ class LinkClaims:
     method: str
     version: str
     expires: int
+    # Upload links only: the job and lease the upload belongs to. Empty on download links,
+    # and then left out of the signed payload, so those tokens are unchanged.
+    job_id: str = ""
+    lease_id: str = ""
+
+
+_OPTIONAL = frozenset({"job_id", "lease_id"})
 
 
 def _encode(data: bytes) -> str:
@@ -39,7 +46,12 @@ class LinkSigner:
         return hmac.new(self._key, payload.encode("ascii"), hashlib.sha256).digest()
 
     def sign(self, claims: LinkClaims) -> str:
-        body = json.dumps(asdict(claims), separators=(",", ":"), sort_keys=True).encode("utf-8")
+        fields = {
+            name: value
+            for name, value in asdict(claims).items()
+            if name not in _OPTIONAL or value != ""
+        }
+        body = json.dumps(fields, separators=(",", ":"), sort_keys=True).encode("utf-8")
         payload = _encode(body)
         return payload + "." + _encode(self._mac(payload))
 

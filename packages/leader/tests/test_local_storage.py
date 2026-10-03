@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import os
 from datetime import timedelta
 from pathlib import Path
@@ -5,7 +7,7 @@ from urllib.parse import urlsplit
 
 import pytest
 from swarmscribe_leader.storage.base import StorageError, StorageUnavailable
-from swarmscribe_leader.storage.links import LinkSigner
+from swarmscribe_leader.storage.links import LinkClaims, LinkSigner
 from swarmscribe_leader.storage.local import LocalBackend, version_of
 from swarmscribe_leader.storage.registry import backend_for
 
@@ -90,6 +92,29 @@ async def test_upload_link_is_a_signed_put(tmp_path):
     link = backend(tmp_path).upload_link("transcripts/talks/one.mp3.txt", timedelta(hours=2))
     claims = SIGNER.verify(urlsplit(link.url).path.removeprefix("/v1/files/"), now=1_000)
     assert (link.method, claims.method, claims.version) == ("PUT", "PUT", "")
+
+
+async def test_an_upload_link_carries_its_job_and_lease(tmp_path):
+    link = backend(tmp_path).upload_link(
+        "out.txt", timedelta(hours=2), job_id="job-1", lease_id="lease-1"
+    )
+    claims = SIGNER.verify(urlsplit(link.url).path.removeprefix("/v1/files/"), now=1_000)
+    assert (claims.job_id, claims.lease_id) == ("job-1", "lease-1")
+
+
+async def test_a_download_link_is_unchanged_by_the_lease_fields(tmp_path):
+    link = backend(tmp_path).download_link("a.mp3", "1-1", timedelta(minutes=30))
+    expected = SIGNER.sign(LinkClaims("loc-1", "a.mp3", "GET", "1-1", 1_000 + 1_800))
+    assert link.url == f"https://leader/v1/files/{expected}"
+    payload = urlsplit(link.url).path.removeprefix("/v1/files/").split(".")[0]
+    assert b"lease" not in base64.urlsafe_b64decode(payload + "==")
+
+
+async def test_sha256_of_a_stored_object(tmp_path):
+    write(tmp_path, "out.txt", b"hello\n")
+    store = backend(tmp_path)
+    assert await store.sha256("out.txt") == hashlib.sha256(b"hello\n").hexdigest()
+    assert await store.sha256("missing.txt") is None
 
 
 async def test_links_refuse_bad_keys(tmp_path):

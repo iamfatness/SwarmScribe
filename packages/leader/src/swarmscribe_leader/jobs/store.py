@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from swarmscribe_protocol import Directive, FailRequest, SubmitRequest
+from swarmscribe_protocol import Directive, FailRequest, OutputChecksums, SubmitRequest
 
 from .. import audit
 from ..db.models import Follower, Job, JobAttempt, JobResult
@@ -14,6 +14,10 @@ from ..errors import Conflict, NotFound, StaleLease
 
 OPEN_STATES = ("queued", "leased")
 NON_RETRYABLE = frozenset({"source_changed", "undecodable"})
+_OUTPUT_PROBLEMS = {
+    "outputs_missing": "the outputs are not in storage yet",
+    "checksum_mismatch": "the stored outputs do not match the submitted checksums",
+}
 
 
 def _parse_lease(lease_id: str) -> uuid.UUID | None:
@@ -158,8 +162,10 @@ async def submit(
     follower: Follower,
     *,
     now: datetime,
-    outputs_present: Callable[[Job], Awaitable[bool]],
+    outputs_verified: Callable[[Job, OutputChecksums], Awaitable[str | None]],
 ) -> None:
+    """Complete the job. `outputs_verified` checks the stored outputs against the submitted
+    checksums and returns None, or the conflict code ("outputs_missing", "checksum_mismatch")."""
     job = await _locked_job(session, job_id)
     if job.state == "completed":
         result = await session.scalar(select(JobResult).where(JobResult.job_id == job.id))
@@ -172,8 +178,10 @@ async def submit(
             return
         raise StaleLease("this job is already completed")
     _require_lease(job, request.lease_id, follower)
-    if not await outputs_present(job):
-        raise Conflict("the outputs are not in storage yet", code="outputs_missing")
+    problem = await outputs_verified(job, request.checksums)
+    if problem is not None:
+        message = _OUTPUT_PROBLEMS.get(problem, "the outputs cannot be verified")
+        raise Conflict(message, code=problem)
     c = request.checksums
     session.add(
         JobResult(

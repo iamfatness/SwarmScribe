@@ -13,12 +13,16 @@ from swarmscribe_protocol import FailRequest, OutputChecksums, SubmitRequest
 H = "a" * 64
 
 
-async def present(_job):
-    return True
+async def present(_job, _checksums):
+    return None
 
 
-async def absent(_job):
-    return False
+async def absent(_job, _checksums):
+    return "outputs_missing"
+
+
+async def mismatched(_job, _checksums):
+    return "checksum_mismatch"
 
 
 def submission(lease_id, checksum=H) -> SubmitRequest:
@@ -206,7 +210,7 @@ async def test_heartbeat_on_a_cancelled_job_says_cancel_and_submit_is_refused(
                 submission(claimed.lease_id),
                 follower,
                 now=utcnow(),
-                outputs_present=present,
+                outputs_verified=present,
             )
     (attempt,) = await attempts(sessionmaker, job.id)
     assert attempt.outcome == "cancelled"
@@ -235,7 +239,7 @@ async def test_submit_completes_the_job_and_records_checksums(sessionmaker, fact
             submission(claimed.lease_id),
             follower,
             now=utcnow(),
-            outputs_present=present,
+            outputs_verified=present,
         )
         await session.commit()
     stored = await load(sessionmaker, job.id)
@@ -260,7 +264,7 @@ async def test_submit_is_idempotent(sessionmaker, factory):
                 submission(claimed.lease_id),
                 follower,
                 now=utcnow(),
-                outputs_present=present,
+                outputs_verified=present,
             )
             await session.commit()
     async with sessionmaker() as session:
@@ -278,7 +282,7 @@ async def test_resubmitting_different_checksums_is_refused(sessionmaker, factory
             submission(claimed.lease_id),
             follower,
             now=utcnow(),
-            outputs_present=present,
+            outputs_verified=present,
         )
         await session.commit()
     async with sessionmaker() as session:
@@ -289,7 +293,7 @@ async def test_resubmitting_different_checksums_is_refused(sessionmaker, factory
                 submission(claimed.lease_id, "b" * 64),
                 follower,
                 now=utcnow(),
-                outputs_present=present,
+                outputs_verified=present,
             )
 
 
@@ -307,9 +311,34 @@ async def test_submit_without_outputs_in_storage_is_refused_and_keeps_the_lease(
                 submission(claimed.lease_id),
                 follower,
                 now=utcnow(),
-                outputs_present=absent,
+                outputs_verified=absent,
             )
     assert excinfo.value.code == "outputs_missing"
+    assert (await load(sessionmaker, job.id)).state == "leased"
+
+
+async def test_submit_whose_outputs_do_not_match_the_checksums_is_refused(sessionmaker, factory):
+    job = await factory.job()
+    follower, _ = await factory.follower()
+    claimed = await claim(sessionmaker, follower)
+    seen = []
+
+    async def verifier(job_seen, checksums):
+        seen.append((job_seen.id, checksums.txt))
+        return await mismatched(job_seen, checksums)
+
+    async with sessionmaker() as session:
+        with pytest.raises(Conflict) as excinfo:
+            await store.submit(
+                session,
+                job.id,
+                submission(claimed.lease_id),
+                follower,
+                now=utcnow(),
+                outputs_verified=verifier,
+            )
+    assert excinfo.value.code == "checksum_mismatch"
+    assert seen == [(job.id, H)]
     assert (await load(sessionmaker, job.id)).state == "leased"
 
 
@@ -470,7 +499,7 @@ async def test_a_different_follower_cannot_resubmit_a_completed_job(sessionmaker
             submission(claimed.lease_id),
             follower,
             now=utcnow(),
-            outputs_present=present,
+            outputs_verified=present,
         )
         await session.commit()
     async with sessionmaker() as session:
@@ -481,5 +510,5 @@ async def test_a_different_follower_cannot_resubmit_a_completed_job(sessionmaker
                 submission(claimed.lease_id),
                 other,
                 now=utcnow(),
-                outputs_present=present,
+                outputs_verified=present,
             )

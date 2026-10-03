@@ -1,9 +1,17 @@
+import hashlib
 from collections.abc import Callable
 from datetime import timedelta
+from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from swarmscribe_protocol import ClaimResponse, JobSettings, UploadUrls, Vocabulary
+from swarmscribe_protocol import (
+    ClaimResponse,
+    JobSettings,
+    OutputChecksums,
+    UploadUrls,
+    Vocabulary,
+)
 
 from ..config import Settings
 from ..db.models import Follower, Job, Recording, SettingsProfile, StorageLocation
@@ -11,6 +19,7 @@ from ..errors import LeaderError
 from ..storage.base import StorageBackend
 
 BackendFactory = Callable[[StorageLocation], StorageBackend]
+OutputProblem = Literal["outputs_missing", "checksum_mismatch"]
 
 
 def output_keys(prefix: str, key: str) -> dict[str, str]:
@@ -54,7 +63,9 @@ async def build_claim(
     upload_ttl = timedelta(seconds=settings.upload_link_ttl_seconds)
     uploads = UploadUrls(
         **{
-            name: uploader.upload_link(key, upload_ttl)
+            name: uploader.upload_link(
+                key, upload_ttl, job_id=str(job.id), lease_id=str(job.lease_id)
+            )
             for name, key in output_keys(source.output_prefix, recording.key).items()
         }
     )
@@ -80,13 +91,24 @@ async def build_claim(
     )
 
 
-async def outputs_present(
-    session: AsyncSession, job: Job, *, backend_factory: BackendFactory
-) -> bool:
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+
+
+async def outputs_verified(
+    session: AsyncSession,
+    job: Job,
+    checksums: OutputChecksums,
+    *,
+    backend_factory: BackendFactory,
+) -> OutputProblem | None:
+    """Check the three stored outputs against the submitted checksums by hashing them
+    through the backend. None when they match; otherwise what is wrong."""
     recording, source, target = await _places(session, job)
     backend = backend_factory(target)
-    for key in output_keys(source.output_prefix, recording.key).values():
-        info = await backend.stat(key)
-        if info is None or info.size == 0:
-            return False
-    return True
+    mismatch = False
+    for name, key in output_keys(source.output_prefix, recording.key).items():
+        digest = await backend.sha256(key)
+        if digest is None or digest == EMPTY_SHA256:
+            return "outputs_missing"
+        mismatch = mismatch or digest != getattr(checksums, name)
+    return "checksum_mismatch" if mismatch else None

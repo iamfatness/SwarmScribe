@@ -9,8 +9,8 @@ import anyio.to_thread
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import StreamingResponse
 
-from ..db.models import StorageLocation
-from ..errors import Forbidden, NotFound, PayloadTooLarge, PreconditionFailed
+from ..db.models import Job, StorageLocation
+from ..errors import Forbidden, NotFound, PayloadTooLarge, PreconditionFailed, StaleLease
 from ..storage.base import StorageError, StorageUnavailable
 from ..storage.links import InvalidLink, LinkClaims
 from ..storage.local import LocalBackend, version_of
@@ -94,12 +94,28 @@ async def download(token: str, request: Request) -> StreamingResponse:
     )
 
 
+async def _require_current_lease(request: Request, claims: LinkClaims) -> None:
+    """The upload belongs to a lease; once that lease has ended (expired and re-leased,
+    cancelled, completed), its links must not write anything."""
+    try:
+        job_id, lease_id = uuid.UUID(claims.job_id), uuid.UUID(claims.lease_id)
+    except ValueError as exc:
+        raise StaleLease("this upload link's lease is no longer current") from exc
+    async with request.app.state.sessionmaker() as session:
+        job = await session.get(Job, job_id)
+    if job is None or job.state != "leased" or job.lease_id != lease_id:
+        raise StaleLease("this upload link's lease is no longer current")
+
+
 @router.put("/{token}", status_code=201)
 async def upload(token: str, request: Request) -> Response:
     claims = _claims(request, token, "PUT")
+    if not claims.job_id or not claims.lease_id:
+        raise Forbidden("this upload link is not bound to a lease")
     declared = request.headers.get("content-length", "")
     if declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES:
         raise PayloadTooLarge("upload is larger than 512 MiB")
+    await _require_current_lease(request, claims)
     backend = await _backend(request, claims)
     path = backend.file_path(claims.key)
     if path.is_dir():
@@ -114,6 +130,8 @@ async def upload(token: str, request: Request) -> Response:
                 if size > MAX_UPLOAD_BYTES:
                     raise PayloadTooLarge("upload is larger than 512 MiB")
                 out.write(chunk)
+        # Again, right before the target changes: the lease may have ended meanwhile.
+        await _require_current_lease(request, claims)
         os.replace(temp, path)
     except (NotADirectoryError, FileExistsError) as exc:
         raise StorageError(f"invalid storage key {claims.key!r}") from exc

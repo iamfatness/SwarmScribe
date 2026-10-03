@@ -2,8 +2,10 @@ import contextlib
 import os
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from functools import partial
 from pathlib import Path
+from typing import Any
 
 import anyio.to_thread
 from fastapi import APIRouter, Request, Response
@@ -20,6 +22,11 @@ router = APIRouter(prefix="/v1/files")
 
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 CHUNK_BYTES = 256 * 1024
+
+
+async def _in_thread(function: Callable[..., Any], *args: Any) -> Any:
+    """Filesystem calls can block for seconds on a slow or network disk: never on the loop."""
+    return await anyio.to_thread.run_sync(function, *args)
 
 
 def _claims(request: Request, token: str, method: str) -> LinkClaims:
@@ -75,7 +82,7 @@ def _is_file(path: Path) -> bool:
 
 async def _stream(handle) -> AsyncIterator[bytes]:
     try:
-        while chunk := await anyio.to_thread.run_sync(handle.read, CHUNK_BYTES):
+        while chunk := await _in_thread(handle.read, CHUNK_BYTES):
             yield chunk
     finally:
         handle.close()
@@ -85,8 +92,8 @@ async def _stream(handle) -> AsyncIterator[bytes]:
 async def download(token: str, request: Request) -> StreamingResponse:
     claims = _claims(request, token, "GET")
     backend = await _backend(request, claims)
-    path = backend.file_path(claims.key)
-    handle, size = _open_current(path, claims.version)
+    path = await _in_thread(backend.file_path, claims.key)
+    handle, size = await _in_thread(_open_current, path, claims.version)
     return StreamingResponse(
         _stream(handle),
         media_type="application/octet-stream",
@@ -117,22 +124,25 @@ async def upload(token: str, request: Request) -> Response:
         raise PayloadTooLarge("upload is larger than 512 MiB")
     await _require_current_lease(request, claims)
     backend = await _backend(request, claims)
-    path = backend.file_path(claims.key)
-    if path.is_dir():
+    path = await _in_thread(backend.file_path, claims.key)
+    if await _in_thread(path.is_dir):
         raise StorageError(f"{claims.key!r} is a directory, not an object")
     temp = path.with_name(f".upload-{uuid.uuid4().hex}")
     size = 0
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with temp.open("wb") as out:
+        await _in_thread(partial(path.parent.mkdir, parents=True, exist_ok=True))
+        out = await _in_thread(temp.open, "wb")
+        try:
             async for chunk in request.stream():
                 size += len(chunk)
                 if size > MAX_UPLOAD_BYTES:
                     raise PayloadTooLarge("upload is larger than 512 MiB")
-                out.write(chunk)
+                await _in_thread(out.write, chunk)
+        finally:
+            await _in_thread(out.close)
         # Again, right before the target changes: the lease may have ended meanwhile.
         await _require_current_lease(request, claims)
-        os.replace(temp, path)
+        await _in_thread(os.replace, temp, path)
     except (NotADirectoryError, FileExistsError) as exc:
         raise StorageError(f"invalid storage key {claims.key!r}") from exc
     except PermissionError:
@@ -143,5 +153,5 @@ async def upload(token: str, request: Request) -> Response:
         raise StorageUnavailable("the upload could not be stored") from exc
     finally:
         with contextlib.suppress(OSError):
-            temp.unlink(missing_ok=True)
+            await _in_thread(partial(temp.unlink, missing_ok=True))
     return Response(status_code=201)

@@ -5,6 +5,7 @@ import shutil
 import time
 import uuid
 from datetime import timedelta
+from pathlib import Path
 
 from sqlalchemy import func, insert, select
 from swarmscribe_leader.clock import utcnow
@@ -503,3 +504,22 @@ async def test_a_consent_file_that_is_not_utf8_fails_the_scan(sessionmaker, fact
     assert await rows(sessionmaker, Job) == []
     async with sessionmaker() as session:
         assert (await session.get(StorageLocation, location.id)).last_scan_error
+
+
+async def test_an_unreadable_folder_outside_the_input_prefix_does_not_stop_the_scan(
+    sessionmaker, factory, tmp_path, monkeypatch
+):
+    # A drive root holds folders the leader may not read (e.g. system folders); only the
+    # input folder matters.
+    write(tmp_path, "consent.txt", b"**/*.mp3\n")
+    write(tmp_path, "incoming/one.mp3")
+    real_walk = os.walk
+
+    def walk(top, topdown=True, onerror=None, followlinks=False):
+        if Path(top).resolve() == tmp_path.resolve() and onerror is not None:
+            onerror(PermissionError(13, "Access is denied", str(tmp_path / "locked")))
+        yield from real_walk(top, topdown=topdown, onerror=onerror, followlinks=followlinks)
+
+    monkeypatch.setattr(os, "walk", walk)
+    summary = await scan(sessionmaker, await factory.location(input_prefix="incoming/"))
+    assert summary.jobs_created == 1

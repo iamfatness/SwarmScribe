@@ -214,3 +214,31 @@ class FollowerRevoked(BaseModel):
     id: str
     state: str
     released: int
+
+
+ConsoleRole = Literal["viewer", "operator", "admin"]
+
+
+class ConsoleIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=NAME_PATTERN)
+    max_role: ConsoleRole  # no default: the cap is the administrator's decision
+
+
+class ConsoleCreated(BaseModel):
+    id: str
+    name: str
+    max_role: str
+    credential: str
+
+
+class ConsoleOut(BaseModel):
+    id: str
+    name: str
+    max_role: str
+    revoked: bool
+    revoked_at: datetime | None
+    revoked_by: str | None
+    created_by: str
+    created_at: datetime

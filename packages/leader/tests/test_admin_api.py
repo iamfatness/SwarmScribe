@@ -7,10 +7,13 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
+from swarmscribe_leader.auth.consoles import create_console
 from swarmscribe_leader.auth.followers import create_join_token
+from swarmscribe_leader.auth.secrets import hash_secret
 from swarmscribe_leader.clock import utcnow
 from swarmscribe_leader.db.models import (
     AuditEntry,
+    ConsoleCredential,
     Follower,
     Job,
     JobAttempt,
@@ -755,6 +758,9 @@ ROUTES = [
     ("POST", "/v1/admin/tokens", {"pool": "default"}, "admin"),
     ("POST", "/v1/admin/tokens/{token}/revoke", None, "admin"),
     ("POST", "/v1/admin/followers/{follower}/revoke", None, "admin"),
+    ("GET", "/v1/admin/consoles", None, "admin"),
+    ("POST", "/v1/admin/consoles", {"name": "added-console", "max_role": "viewer"}, "admin"),
+    ("POST", "/v1/admin/consoles/{console}/revoke", None, "admin"),
 ]
 BELOW = {"viewer": None, "operator": "viewer", "admin": "operator"}
 
@@ -766,12 +772,16 @@ async def world(factory, sessionmaker, tmp_path_factory):
     open_job = await factory.job(await factory.recording(location, key="talks/b.mp3"))
     follower, _ = await factory.follower()
     token_id, _ = await join_token(sessionmaker)
+    async with sessionmaker() as session:
+        await create_console(session, name="fleet", max_role="admin", actor="test")
+        await session.commit()
     return {
         "name": "here",
         "failed_job": failed.id,
         "open_job": open_job.id,
         "follower": follower.id,
         "token": token_id,
+        "console": "fleet",
         # a folder apart from the factory location's, which would overlap
         "root": str(tmp_path_factory.mktemp("added-root")),
     }
@@ -1159,3 +1169,127 @@ async def test_invalid_channel_settings_are_refused(admin_client, idp, tmp_path,
     assert (response.status_code, response.json()["code"]) == (422, "invalid_request")
     assert "channel" in response.json()["message"]
     assert await get(admin_client, idp, "/v1/admin/locations") == []
+
+
+# --- console credentials --------------------------------------------------------------
+
+
+async def create_console_via_api(client, idp, name="fleet", max_role="operator"):
+    return await post(
+        client, idp, "/v1/admin/consoles", "admin", {"name": name, "max_role": max_role}
+    )
+
+
+async def test_an_admin_creates_a_console_credential_shown_once(
+    admin_client, idp, sessionmaker, caplog
+):
+    with caplog.at_level("DEBUG"):
+        response = await create_console_via_api(admin_client, idp)
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert (created["name"], created["max_role"], len(created["credential"])) == (
+        "fleet",
+        "operator",
+        43,
+    )
+    assert created["credential"] not in caplog.text
+    async with sessionmaker() as session:
+        row = await session.get(ConsoleCredential, uuid.UUID(created["id"]))
+    assert (row.credential_hash, row.created_by) == (
+        hash_secret(created["credential"]),
+        actor(idp, "admin"),
+    )
+    listed = await get(admin_client, idp, "/v1/admin/consoles", role="admin")
+    assert [(r["name"], r["max_role"], r["revoked"], r["created_by"]) for r in listed] == [
+        ("fleet", "operator", False, actor(idp, "admin"))
+    ]
+    assert created["credential"] not in str(listed)
+    assert row.credential_hash not in str(listed)
+    (entry,) = await audit_rows(sessionmaker, "console.create")
+    assert entry.actor == actor(idp, "admin")
+    assert created["credential"] not in f"{entry.actor} {entry.detail}"
+    (viewed,) = await audit_rows(sessionmaker, "consoles.view")
+    assert viewed.actor == actor(idp, "admin")
+
+
+async def test_a_duplicate_console_name_is_409_ignoring_case(admin_client, idp):
+    assert (await create_console_via_api(admin_client, idp, "fleet")).status_code == 201
+    again = await create_console_via_api(admin_client, idp, "Fleet", "admin")
+    assert (again.status_code, again.json()["code"]) == (409, "exists")
+    listed = await get(admin_client, idp, "/v1/admin/consoles", role="admin")
+    assert [(r["name"], r["max_role"]) for r in listed] == [("fleet", "operator")]
+
+
+async def test_two_creations_of_one_console_at_once_create_one(admin_client, idp):
+    responses = await asyncio.gather(
+        create_console_via_api(admin_client, idp), create_console_via_api(admin_client, idp)
+    )
+    assert sorted(r.status_code for r in responses) == [201, 409]
+
+
+@pytest.mark.parametrize(
+    "body, field",
+    [
+        ({"name": "fleet", "max_role": "superadmin"}, "max_role"),
+        ({"name": "fleet", "max_role": "Admin"}, "max_role"),
+        ({"name": "fleet"}, "max_role"),
+        ({"name": "has space", "max_role": "viewer"}, "name"),
+        ({"name": "fleet\n", "max_role": "viewer"}, "name"),
+        ({"name": "fleet\x1b[2J", "max_role": "viewer"}, "name"),
+        ({"name": "a" * 101, "max_role": "viewer"}, "name"),
+        ({"name": "fl\u00ebet", "max_role": "viewer"}, "name"),
+        ({"name": "", "max_role": "viewer"}, "name"),
+        ({"name": "fleet", "max_role": "viewer", "credential": "chosen-by-caller"}, "credential"),
+    ],
+)
+async def test_invalid_console_credentials_are_refused(
+    admin_client, idp, sessionmaker, body, field
+):
+    response = await post(admin_client, idp, "/v1/admin/consoles", "admin", body)
+    assert (response.status_code, response.json()["code"]) == (422, "invalid_request")
+    assert field in response.json()["message"]
+    async with sessionmaker() as session:
+        assert (await session.scalars(select(ConsoleCredential))).all() == []
+
+
+async def test_a_name_the_store_refuses_is_the_same_invalid_request(
+    admin_client, idp, sessionmaker, monkeypatch
+):
+    """Defence in depth: should InvalidConsoleName ever get past the request model, the
+    client still sees the API's one validation code."""
+    monkeypatch.setattr("swarmscribe_leader.auth.consoles._NAME", re.compile(r"never"))
+    response = await create_console_via_api(admin_client, idp)
+    assert (response.status_code, response.json()["code"]) == (422, "invalid_request")
+    async with sessionmaker() as session:
+        assert (await session.scalars(select(ConsoleCredential))).all() == []
+
+
+async def test_revoking_a_malformed_console_name_is_404_not_a_validation_error(
+    admin_client, idp
+):
+    response = await post(admin_client, idp, "/v1/admin/consoles/bad%20name/revoke", "admin")
+    assert (response.status_code, response.json()["code"]) == (404, "not_found")
+
+
+async def test_revoking_a_console_shows_it_revoked_and_twice_is_harmless(
+    admin_client, idp, sessionmaker
+):
+    await create_console_via_api(admin_client, idp)
+    response = await post(admin_client, idp, "/v1/admin/consoles/FLEET/revoke", "admin")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["name"], body["revoked"], body["revoked_by"]) == (
+        "fleet",
+        True,
+        actor(idp, "admin"),
+    )
+    again = await post(admin_client, idp, "/v1/admin/consoles/fleet/revoke", "admin")
+    assert (again.status_code, again.json()["revoked_at"]) == (200, body["revoked_at"])
+    assert len(await audit_rows(sessionmaker, "console.revoke")) == 2
+    (listed,) = await get(admin_client, idp, "/v1/admin/consoles", role="admin")
+    assert listed["revoked"] is True
+
+
+async def test_revoking_an_unknown_console_is_404(admin_client, idp):
+    response = await post(admin_client, idp, "/v1/admin/consoles/nowhere/revoke", "admin")
+    assert (response.status_code, response.json()["code"]) == (404, "not_found")

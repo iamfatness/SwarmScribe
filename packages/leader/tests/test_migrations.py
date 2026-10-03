@@ -341,3 +341,15 @@ def test_0005_downgrades_to_0004_and_upgrades_again(database_url):
         assert asyncio.run(state()) == (head_revision(), "console_credentials")
     finally:
         asyncio.run(_recreate(database_url, name, drop_only=True))
+
+
+async def test_console_names_are_unique_ignoring_case_in_the_database(sessionmaker):
+    insert = (
+        "insert into console_credentials (id, name, credential_hash, max_role, created_by)"
+        " values (gen_random_uuid(), '{name}', repeat('{fill}', 64), 'viewer', 'test')"
+    )
+    async with sessionmaker() as session:
+        await session.execute(text(insert.format(name="fleet", fill="a")))
+        with pytest.raises(IntegrityError):
+            await session.execute(text(insert.format(name="FLEET", fill="b")))
+        await session.rollback()

@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import audit
@@ -54,6 +55,13 @@ class RevokedConsoleCredential(InvalidConsoleCredential):
         self.console = console
 
 
+def _exists(name: str) -> Conflict:
+    return Conflict(
+        f"a console named {name!r} already exists; console names are never reused",
+        code="exists",
+    )
+
+
 async def create_console(
     session: AsyncSession, *, name: str, max_role: Role, actor: str
 ) -> tuple[ConsoleCredential, str]:
@@ -69,10 +77,7 @@ async def create_console(
         select(ConsoleCredential.name).where(func.lower(ConsoleCredential.name) == name.lower())
     )
     if taken is not None:
-        raise Conflict(
-            f"a console named {taken!r} already exists; console names are never reused",
-            code="exists",
-        )
+        raise _exists(taken)
     plaintext = new_secret()
     console = ConsoleCredential(
         id=uuid.uuid4(),
@@ -82,6 +87,11 @@ async def create_console(
         created_by=actor,
     )
     session.add(console)
+    try:
+        # The unique index on lower(name) is the last word if an insert got past the check.
+        await session.flush()
+    except IntegrityError as exc:
+        raise _exists(name) from exc
     audit.record(
         session,
         actor=actor,
@@ -98,6 +108,8 @@ async def revoke_console(
 ) -> ConsoleCredential:
     """Refuse the console's credential from its next request on. Revoking again keeps the
     first revocation's time and administrator; every call is audited."""
+    if not _NAME.fullmatch(name):
+        raise NotFound("no console with that name")
     console = await session.scalar(
         select(ConsoleCredential)
         .where(func.lower(ConsoleCredential.name) == name.lower())

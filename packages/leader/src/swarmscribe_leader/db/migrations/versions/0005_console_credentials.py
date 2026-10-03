@@ -41,6 +41,13 @@ def upgrade() -> None:
         sa.UniqueConstraint("name"),
         sa.UniqueConstraint("credential_hash"),
     )
+    # Names are unique ignoring case; the code checks first, the database has the last word.
+    op.create_index(
+        "uq_console_credentials_name_lower",
+        "console_credentials",
+        [sa.text("lower(name)")],
+        unique=True,
+    )
 
 
 def downgrade() -> None:

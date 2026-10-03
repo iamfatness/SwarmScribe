@@ -121,6 +121,7 @@ class ConsoleCredential(_Row, Base):
         CheckConstraint(
             "max_role IN ('viewer','operator','admin')", name="ck_console_credentials_max_role"
         ),
+        Index("uq_console_credentials_name_lower", func.lower(text("name")), unique=True),
     )
 
     name: Mapped[str] = mapped_column(String(100), unique=True)

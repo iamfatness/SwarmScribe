@@ -2,7 +2,7 @@ import asyncio
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from swarmscribe_leader.auth.consoles import (
     InvalidConsoleCredential,
     InvalidConsoleName,
@@ -139,7 +139,7 @@ def _near_miss(credential: str) -> str:
         lambda c: "x" * 43,
         lambda c: c + " ",
         lambda c: "",
-        lambda c: "é" * 43,
+        lambda c: "\u00e9" * 43,
         lambda c: "a" * 100_000,
         hash_secret,
     ],
@@ -233,9 +233,9 @@ async def test_the_list_shows_every_console_without_its_credential_or_hash(sessi
         "fle et",
         "fleet\n",
         "fle\net",
-        "fleet‮",
+        "fleet\u202e",
         "a" * 101,
-        "é",
+        "\u00e9",
     ],
 )
 async def test_a_bad_console_name_is_refused_and_leaves_no_trace(sessionmaker, bad):
@@ -245,3 +245,38 @@ async def test_a_bad_console_name_is_refused_and_leaves_no_trace(sessionmaker, b
     assert await audit_rows(sessionmaker, "console.create") == []
     async with sessionmaker() as session:
         assert (await session.scalars(select(ConsoleCredential))).all() == []
+
+
+async def test_a_case_variant_racing_creation_creates_one(sessionmaker):
+    results = await asyncio.gather(
+        create(sessionmaker, name="fleet"),
+        create(sessionmaker, name="FLEET"),
+        return_exceptions=True,
+    )
+    assert sorted(type(r).__name__ for r in results) == ["Conflict", "tuple"]
+
+
+async def test_an_insert_that_gets_past_the_check_becomes_a_conflict(sessionmaker):
+    # A row inserted outside create_console (no advisory lock) and not yet committed is
+    # invisible to the name check; the unique index makes the second creator wait, then fail.
+    async with sessionmaker() as other:
+        await other.execute(
+            text(
+                "insert into console_credentials (id, name, credential_hash, max_role,"
+                " created_by) values (gen_random_uuid(), 'Fleet', repeat('b', 64),"
+                " 'viewer', 'test')"
+            )
+        )
+        racing = asyncio.create_task(create(sessionmaker, name="fleet"))
+        await asyncio.sleep(0.5)
+        assert not racing.done()
+        await other.commit()
+        with pytest.raises(Conflict) as raised:
+            await racing
+    assert raised.value.code == "exists"
+    assert await audit_rows(sessionmaker, "console.create") == []
+
+
+async def test_revoking_a_malformed_name_is_not_found(sessionmaker):
+    with pytest.raises(NotFound):
+        await revoke(sessionmaker, "fle et" + chr(10))

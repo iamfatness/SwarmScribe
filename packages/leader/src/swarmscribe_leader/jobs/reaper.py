@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .. import audit
 from ..db.models import Follower, Job
 from .store import clear_lease, close_attempt
 
@@ -37,6 +38,14 @@ async def expire_leases(session: AsyncSession, *, now: datetime) -> tuple[int, i
         else:
             job.state = "queued"
             requeued += 1
+        audit.record(
+            session,
+            actor="system",
+            action="job.expire",
+            subject_type="job",
+            subject_id=job.id,
+            detail={"follower": str(job.leased_by), "attempt": job.attempts, "state": job.state},
+        )
         clear_lease(job)
     return requeued, failed
 
@@ -59,9 +68,19 @@ async def mark_gone(session: AsyncSession, *, now: datetime, gone_after: timedel
         update(Follower)
         .where(Follower.id.in_(silent))
         .values(state="gone")
+        .returning(Follower.id)
         .execution_options(synchronize_session=False)
     )
-    return result.rowcount
+    gone = result.scalars().all()
+    for follower_id in gone:
+        audit.record(
+            session,
+            actor="system",
+            action="follower.gone",
+            subject_type="follower",
+            subject_id=follower_id,
+        )
+    return len(gone)
 
 
 async def reap(

@@ -1,6 +1,5 @@
 import logging
 import uuid
-from datetime import timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -106,9 +105,7 @@ async def claim_job(
         except Exception as exc:
             await savepoint.rollback()
             # Push it back so the next claims reach the healthy jobs queued behind it.
-            await store.push_back(
-                session, job_id, until=utcnow() + timedelta(seconds=UNBUILDABLE_BACKOFF_SECONDS)
-            )
+            await store.push_back(session, job_id, delay_seconds=UNBUILDABLE_BACKOFF_SECONDS)
             await _log_unbuildable(session, job_id, exc)
             skipped.append(job_id)
             continue

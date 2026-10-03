@@ -6,7 +6,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from swarmscribe_leader.background import LOCK_KEYS, run_exclusive, run_periodically
 from swarmscribe_leader.clock import utcnow
-from swarmscribe_leader.db.models import Follower, Job, JobAttempt
+from swarmscribe_leader.db.models import AuditEntry, Follower, Job, JobAttempt
 from swarmscribe_leader.jobs import store
 from swarmscribe_leader.jobs.reaper import ReapResult, reap
 
@@ -326,3 +326,21 @@ async def test_run_periodically_survives_errors_and_stops_when_told():
 
     await asyncio.wait_for(run_periodically(stop, 0.01, step, "test"), timeout=5)
     assert len(calls) == 3
+
+
+async def test_reaper_transitions_are_audited(sessionmaker, factory):
+    job = await factory.job()
+    holder, _ = await factory.follower()
+    start = utcnow()
+    await claim(sessionmaker, holder, now=start)
+    silent, _ = await factory.follower(last_seen_at=start - timedelta(hours=1))
+    await run_reaper(sessionmaker, now=start + timedelta(seconds=121))
+    async with sessionmaker() as session:
+        entries = (
+            await session.scalars(select(AuditEntry).where(AuditEntry.actor == "system"))
+        ).all()
+    (expired,) = [e for e in entries if e.action == "job.expire"]
+    assert (expired.subject_type, expired.subject_id) == ("job", str(job.id))
+    assert expired.detail == {"follower": str(holder.id), "attempt": 1, "state": "queued"}
+    (gone,) = [e for e in entries if e.action == "follower.gone"]
+    assert (gone.subject_type, gone.subject_id) == ("follower", str(silent.id))

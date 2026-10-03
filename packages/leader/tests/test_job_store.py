@@ -3,7 +3,7 @@ import uuid
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from swarmscribe_leader.clock import utcnow
 from swarmscribe_leader.db.models import Job, JobAttempt, JobResult
 from swarmscribe_leader.errors import Conflict, NotFound, StaleLease
@@ -120,10 +120,34 @@ async def test_a_job_not_yet_available_is_not_claimed(sessionmaker, factory):
     )
     ready = await factory.job(await factory.recording(location, key="ready.mp3"))
     follower, _ = await factory.follower()
-    now = utcnow()
-    assert (await claim(sessionmaker, follower, now=now)).id == ready.id
-    assert await claim(sessionmaker, follower, now=now) is None
-    assert (await claim(sessionmaker, follower, now=now + timedelta(seconds=61))).id == later.id
+    assert (await claim(sessionmaker, follower)).id == ready.id
+    assert await claim(sessionmaker, follower) is None
+    async with sessionmaker() as session:
+        await session.execute(
+            update(Job)
+            .where(Job.id == later.id)
+            .values(available_at=func.now() - timedelta(seconds=1))
+        )
+        await session.commit()
+    assert (await claim(sessionmaker, follower)).id == later.id
+
+
+async def test_availability_is_judged_by_the_database_clock(sessionmaker, factory):
+    # A replica whose clock runs an hour fast must not hand out a pushed-back job early.
+    await factory.job(available_at=utcnow() + timedelta(minutes=10))
+    follower, _ = await factory.follower()
+    assert await claim(sessionmaker, follower, now=utcnow() + timedelta(hours=1)) is None
+
+
+async def test_push_back_counts_from_the_database_clock(sessionmaker, factory):
+    job = await factory.job()
+    async with sessionmaker() as session:
+        await store.push_back(session, job.id, delay_seconds=60)
+        await session.commit()
+    async with sessionmaker() as session:
+        database_now = await session.scalar(select(func.now()))
+    stored = await load(sessionmaker, job.id)
+    assert timedelta(seconds=50) <= stored.available_at - database_now <= timedelta(seconds=60)
 
 
 async def test_concurrent_claims_never_share_a_job(sessionmaker, factory):

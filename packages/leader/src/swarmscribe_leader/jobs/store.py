@@ -4,7 +4,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Collection
 from datetime import datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from swarmscribe_protocol import Directive, FailRequest, OutputChecksums, SubmitRequest
 
@@ -79,7 +79,9 @@ async def claim(
             Job.state == "queued",
             Job.pool == follower.pool,
             Job.required_device.in_(("any", device)),
-            Job.available_at <= now,
+            # The database's clock, the same one that stamped available_at: replicas' clocks
+            # may differ from it and from each other.
+            Job.available_at <= func.now(),
             Job.id.not_in(exclude),
         )
         .order_by(Job.priority.desc(), Job.created_at, Job.id)
@@ -107,9 +109,10 @@ async def claim(
     return job
 
 
-async def push_back(session: AsyncSession, job_id: uuid.UUID, *, until: datetime) -> None:
-    """Make a queued job unclaimable until `until`. Never waits: a job someone else has
-    locked meanwhile (e.g. just leased it) is left to them."""
+async def push_back(session: AsyncSession, job_id: uuid.UUID, *, delay_seconds: int) -> None:
+    """Make a queued job unclaimable for `delay_seconds`, counted on the database's clock.
+    Never waits: a job someone else has locked meanwhile (e.g. just leased it) is left to
+    them."""
     lockable = (
         select(Job.id)
         .where(Job.id == job_id, Job.state == "queued")
@@ -118,7 +121,7 @@ async def push_back(session: AsyncSession, job_id: uuid.UUID, *, until: datetime
     await session.execute(
         update(Job)
         .where(Job.id.in_(lockable))
-        .values(available_at=until)
+        .values(available_at=func.now() + timedelta(seconds=delay_seconds))
         .execution_options(synchronize_session=False)
     )
 

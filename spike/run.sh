@@ -82,6 +82,17 @@ while True:
     f.close()
 " & ) ; TCP="--tcp-send-to=127.0.0.1:5555 --tcp-resample=8000"
 fi
+( python3 -c "
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def _h(self):
+        n=int(self.headers.get('Content-Length') or 0); body=self.rfile.read(n) if n else b''
+        open('$OUT/notify.log','a').write(self.command+' '+self.path+'\n'+str(self.headers)+'body bytes: %d\n\n'%len(body))
+        self.send_response(200); self.end_headers()
+    do_GET=_h; do_POST=_h
+http.server.HTTPServer(('127.0.0.1',8088),H).serve_forever()
+" & )
+NOTIFY="--notify-uri=http://127.0.0.1:8088/done --notify-post"
 SCEN=${SCENARIOS:-"rtp_wav srtp_wav srtp_wav2ch srtp_mp3 srtp_tap srs_split srs_publish srtp_wav_userspace pcap"}
 for s in $SCEN; do
   case $s in
@@ -93,6 +104,8 @@ for s in $SCEN; do
     srs_split) run_scenario srs_split proc "" "--output-format=wav --output-mixed --output-single --mix-method=channels --mix-num-inputs=2" "--mode srs-split" ;;
     srs_publish) run_scenario srs_publish proc "" "--output-format=wav --output-mixed --output-single --mix-method=channels --mix-num-inputs=2" "--mode srs-publish" ;;
     srtp_wav_userspace) K=$KERNEL; KERNEL=0; run_scenario srtp_wav_userspace proc "" "--output-format=wav --output-mixed --output-single --mix-method=channels --mix-num-inputs=2" ""; KERNEL=$K ;;
+    fwd_single) run_scenario fwd_single proc "" "--output-format=wav --output-mixed --mix-method=channels --mix-num-inputs=2 $TCP $NOTIFY" "--forward" ;;
+    fwd_mixed) run_scenario fwd_mixed proc "" "--output-format=wav --output-single $TCP --tcp-mixed $NOTIFY" "--forward" ;;
     pcap)     run_scenario pcap pcap "" "" "" ;;
   esac
 done

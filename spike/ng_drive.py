@@ -219,6 +219,7 @@ def main():
     ap.add_argument("--mode", default="call", choices=["call", "srs-split", "srs-publish"])
     ap.add_argument("--plain", action="store_true", help="plain RTP instead of SDES-SRTP")
     ap.add_argument("--subscribe", action="store_true")
+    ap.add_argument("--forward", action="store_true")
     ap.add_argument("--callid", default="spike-%d" % int(time.time()))
     ap.add_argument("--extra-flags", default="")
     a = ap.parse_args()
@@ -239,6 +240,8 @@ def main():
     print(f"rtpengine ports: A->{pA} ({protoA}), B->{pB} ({protoB}); keys present A={kA_from_rtpe is not None} B={kB_from_rtpe is not None}")
     A.setup_srtp(kA_from_rtpe); B.setup_srtp(kB_from_rtpe)
 
+    if a.forward:
+        ng("start forwarding", **{"call-id": a.callid})
     tap = None
     if a.subscribe:
         try:

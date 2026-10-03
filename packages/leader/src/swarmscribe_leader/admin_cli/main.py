@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import io
 import json
 import os
 import re
@@ -12,7 +13,7 @@ from urllib.parse import quote
 
 import httpx
 
-from .client import CliError, LeaderClient, UsageError, normalise_leader
+from .client import CliError, LeaderClient, UsageError, normalise_leader, printable
 from .credentials import CredentialsFileError, CredentialStore, SignIn
 from .device_flow import ProviderConfig, SignInError, device_sign_in
 
@@ -115,8 +116,8 @@ def _cell(value: Any) -> str:
     if isinstance(value, bool):
         return "yes" if value else "no"
     if isinstance(value, list):
-        return ", ".join(str(item) for item in value)
-    return " ".join(str(value).split())
+        return ", ".join(printable(str(item)) for item in value)
+    return printable(str(value))
 
 
 def print_table(out: TextIO, rows: list[dict[str, Any]], columns: Sequence[str]) -> None:
@@ -136,7 +137,7 @@ def print_table(out: TextIO, rows: list[dict[str, Any]], columns: Sequence[str])
 
 def print_fields(data: dict[str, Any], out: TextIO) -> None:
     for name, value in data.items():
-        print(f"{name}: {_cell(value)}", file=out)
+        print(f"{_cell(name)}: {_cell(value)}", file=out)
 
 
 def table(columns: Sequence[str]) -> Renderer:
@@ -145,15 +146,17 @@ def table(columns: Sequence[str]) -> Renderer:
 
 def print_status(data: dict[str, Any], out: TextIO) -> None:
     jobs = data["jobs"]
-    job_counts = ", ".join(f"{state} {jobs.get(state, 0)}" for state in JOB_STATES)
+    job_counts = ", ".join(f"{state} {_cell(jobs.get(state, 0))}" for state in JOB_STATES)
     print(f"jobs: {job_counts}", file=out)
     print(
-        f"completed in the last hour: {data['completed_last_hour']}; "
-        f"failed attempts in the last day: {data['failed_attempts_last_day']}",
+        f"completed in the last hour: {_cell(data['completed_last_hour'])}; "
+        f"failed attempts in the last day: {_cell(data['failed_attempts_last_day'])}",
         file=out,
     )
     followers = data["followers"]
-    follower_counts = ", ".join(f"{state} {followers.get(state, 0)}" for state in FOLLOWER_STATES)
+    follower_counts = ", ".join(
+        f"{state} {_cell(followers.get(state, 0))}" for state in FOLLOWER_STATES
+    )
     print(f"followers: {follower_counts}", file=out)
     print("\nqueues:", file=out)
     print_table(out, data["pools"], ("pool", "queued", "leased"))
@@ -166,7 +169,7 @@ def print_status(data: dict[str, Any], out: TextIO) -> None:
 
 
 def print_token(data: dict[str, Any], out: TextIO) -> None:
-    print(f"join token (shown once; keep it safe): {data['token']}", file=out)
+    print(f"join token (shown once; keep it safe): {_cell(data['token'])}", file=out)
     print_fields({name: value for name, value in data.items() if name != "token"}, out)
 
 
@@ -181,7 +184,18 @@ def print_consent(data: dict[str, Any], out: TextIO) -> None:
 
 
 def print_scan(data: dict[str, Any], out: TextIO) -> None:
-    print(f"scan requested for {data['name']}; it starts within a minute", file=out)
+    print(f"scan requested for {_cell(data['name'])}; it starts within a minute", file=out)
+
+
+def rendered(render: Renderer, data: Any) -> str:
+    """The whole rendering, or one CliError: an answer of an unexpected shape must not end
+    in a traceback or half a table."""
+    buffer = io.StringIO()
+    try:
+        render(data, buffer)
+    except (KeyError, TypeError, AttributeError):
+        raise CliError("the leader's answer is not in the expected form") from None
+    return buffer.getvalue()
 
 
 # --- commands -------------------------------------------------------------------
@@ -285,6 +299,9 @@ async def login(
             for key in ("client_id", "device_authorization_endpoint", "token_endpoint", "scope"):
                 if not isinstance(chosen[key], str):
                     raise TypeError(key)
+            secret = chosen.get("client_secret")
+            if secret is not None and not isinstance(secret, str):
+                raise TypeError("client_secret")
     except (ValueError, KeyError, TypeError):
         raise CliError("the leader's sign-in settings are not in the expected form") from None
     if not providers:
@@ -329,7 +346,11 @@ async def login(
     except CliError as exc:
         print(f"signed in, but the leader refused you: {exc}", file=out)
         return 1
-    print(f"signed in as {me['email'] or me['subject']} ({me['role']})", file=out)
+    try:
+        who, role = me["email"] or me["subject"], me["role"]
+    except (KeyError, TypeError):
+        raise CliError("signed in, but the leader's answer is not in the expected form") from None
+    print(f"signed in as {_cell(who)} ({_cell(role)})", file=out)
     return 0
 
 
@@ -360,6 +381,7 @@ async def amain(
                 print(message, file=out)
                 return 0
             data, render = await dispatch(args, LeaderClient(leader, store, http=http))
+            text = json.dumps(data, indent=2) + "\n" if args.json else rendered(render, data)
     except UsageError as exc:
         print(f"error: {exc}", file=err)
         return 2
@@ -369,10 +391,7 @@ async def amain(
     except httpx.HTTPError as exc:
         print(f"error: cannot reach {leader} ({type(exc).__name__})", file=err)
         return 1
-    if args.json:
-        print(json.dumps(data, indent=2), file=out)
-    else:
-        render(data, out)
+    out.write(text)
     return 0
 
 

@@ -31,20 +31,21 @@ def normalise_leader(text: str) -> str:
     )
     try:
         url = httpx.URL(text.strip())
-    except httpx.InvalidURL:
+        url_host = url.host  # decoded lazily: an invalid IDNA host (xn--) fails here
+    except (httpx.InvalidURL, ValueError):
         raise bad from None
     if (
         url.scheme not in ("http", "https")
-        or not url.host
+        or not url_host
         or url.userinfo
         or url.query
         or url.fragment
         or url.path not in ("", "/")
     ):
         raise bad
-    if url.scheme == "http" and url.host not in LOCAL_HOSTS:
+    if url.scheme == "http" and url_host not in LOCAL_HOSTS:
         raise bad
-    host = f"[{url.host}]" if ":" in url.host else url.host
+    host = f"[{url_host}]" if ":" in url_host else url_host
     port = f":{url.port}" if url.port is not None else ""
     return f"{url.scheme}://{host}{port}"
 
@@ -57,11 +58,13 @@ def _body(response: httpx.Response) -> dict[str, Any]:
     return body if isinstance(body, dict) else {}
 
 
-def _line(value: Any) -> str:
+def printable(text: str) -> str:
     """One printable line: the leader's words never carry terminal control characters."""
-    if not isinstance(value, str):
-        return ""
-    return " ".join("".join(c if c.isprintable() else " " for c in value).split())
+    return " ".join("".join(c if c.isprintable() else " " for c in text).split())
+
+
+def _line(value: Any) -> str:
+    return printable(value) if isinstance(value, str) else ""
 
 
 class LeaderClient:

@@ -301,6 +301,9 @@ class Recorder(httpx.AsyncBaseTransport):
         "https://user:pw@leader.example.org",
         "https://leader.example.org/some/path",
         "https://leader.example.org?x=1",
+        "http://localhost.evil.test",
+        "http://127.0.0.1.evil.test",
+        "https://xn--a.com",  # not valid IDNA
     ],
 )
 @pytest.mark.parametrize("command", [["login"], ["status"], ["logout"]])
@@ -313,6 +316,7 @@ async def test_an_unsafe_leader_url_is_refused_before_any_request(store, leader,
     assert code == 2
     assert transport.requests == []
     assert "leader" in err.getvalue()
+    assert err.getvalue().count("\n") == 1  # one line, no traceback
 
 
 @pytest.mark.parametrize(
@@ -499,3 +503,162 @@ async def test_login_never_prints_tokens_or_secrets(cli, store):
     saved = store.load(LEADER)
     for secret in (saved.id_token, saved.refresh_token):
         assert secret not in out + err
+
+
+# ---- final review: leader answers are untrusted text and shape ---------------------------
+
+CONTROL = "\x1b[2J\x1b]0;owned\x07\r\x08\x00"
+
+
+async def run_cli(store, handler, *argv) -> tuple[int, str, str]:
+    out, err = io.StringIO(), io.StringIO()
+    code = await amain(
+        ["--leader", LEADER, *argv], transport=Recorder(handler), store=store, out=out, err=err
+    )
+    return code, out.getvalue(), err.getvalue()
+
+
+def has_control_characters(text: str) -> bool:
+    return any(not (c.isprintable() or c == "\n") for c in text)
+
+
+@pytest.mark.parametrize(
+    "argv, answer",
+    [
+        (
+            ["jobs", "list"],
+            [{"id": "j1", "state": "failed", "key": f"a{CONTROL}b", "failure_reason": CONTROL}],
+        ),
+        (["whoami"], {"email": f"x{CONTROL}@example.org", "role": "viewer"}),
+        (["ingest", "here"], {"name": f"here{CONTROL}", "requested_at": None}),
+        (
+            ["tokens", "create"],
+            {"id": "t1", "token": f"tok{CONTROL}", "pool": CONTROL, "max_uses": 1},
+        ),
+        (
+            ["status"],
+            {
+                "jobs": {"queued": CONTROL},
+                "completed_last_hour": CONTROL,
+                "failed_attempts_last_day": 0,
+                "followers": {},
+                "pools": [],
+                "locations": [{"name": "x", "last_scan_error": CONTROL}],
+            },
+        ),
+        (
+            ["consent", "report"],
+            {
+                "locations": [],
+                "flagged": [{"job_id": "j", "key": CONTROL, "outputs": [CONTROL]}],
+                "truncated": False,
+            },
+        ),
+    ],
+    ids=["table", "fields", "scan", "token", "status", "consent-list-cell"],
+)
+async def test_leader_values_never_reach_the_terminal_with_control_characters(
+    store, idp, argv, answer
+):
+    sign_in_as(store, idp, "admin")
+    code, out, err = await run_cli(store, lambda request: httpx.Response(200, json=answer), *argv)
+    assert code == 0, err
+    assert out
+    assert not has_control_characters(out), repr(out)
+
+
+@pytest.mark.parametrize(
+    "argv, answer",
+    [
+        (["status"], {}),
+        (["status"], {"jobs": [], "completed_last_hour": 1}),
+        (["whoami"], ["not", "fields"]),
+        (["jobs", "list"], {"not": "rows"}),
+        (["jobs", "list"], [1, 2]),
+        (["consent", "report"], {"locations": []}),
+        (["tokens", "create"], {"id": "t1"}),
+        (["ingest", "here"], None),
+    ],
+)
+async def test_an_answer_of_the_wrong_shape_is_a_one_line_error(store, idp, argv, answer):
+    sign_in_as(store, idp, "admin")
+    code, out, err = await run_cli(store, lambda request: httpx.Response(200, json=answer), *argv)
+    assert (code, out) == (1, "")
+    assert err.startswith("error: ") and err.count("\n") == 1, err
+
+
+def login_leader(idp, *, client_secret=None, whoami=None):
+    """A leader whose login-config offers Entra, plus Entra itself, answering everything."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v1/admin/login-config":
+            base = f"https://login.microsoftonline.com/{idp.ENTRA_TENANT}/oauth2/v2.0"
+            return httpx.Response(
+                200,
+                json={
+                    "providers": [
+                        {
+                            "name": "entra",
+                            "client_id": idp.ENTRA_CLIENT,
+                            "device_authorization_endpoint": f"{base}/devicecode",
+                            "token_endpoint": f"{base}/token",
+                            "scope": ENTRA_SCOPE,
+                            "client_secret": client_secret,
+                        }
+                    ]
+                },
+            )
+        if path.endswith("/devicecode"):
+            return httpx.Response(
+                200,
+                json={
+                    "device_code": "d",
+                    "user_code": "CODE-1",
+                    "verification_uri": "https://microsoft.com/devicelogin",
+                    "expires_in": 900,
+                    "interval": 0,
+                },
+            )
+        if path.endswith("/token"):
+            token = idp.entra(groups=[idp.ENTRA_GROUPS["admin"]])
+            return httpx.Response(200, json={"id_token": token, "refresh_token": "r"})
+        return httpx.Response(200, json=whoami)
+
+    return handler
+
+
+@pytest.mark.parametrize("secret", [5, ["s"], {"s": 1}, True])
+async def test_login_refuses_a_client_secret_that_is_not_text(store, idp, secret):
+    transport = Recorder(login_leader(idp, client_secret=secret))
+    out, err = io.StringIO(), io.StringIO()
+    code = await amain(
+        ["--leader", LEADER, "login", "--provider", "entra"],
+        transport=transport,
+        store=store,
+        out=out,
+        err=err,
+    )
+    assert code == 1
+    assert "not in the expected form" in err.getvalue()
+    assert [r.url.path for r in transport.requests] == ["/v1/admin/login-config"]
+
+
+@pytest.mark.parametrize("whoami", [{}, {"email": "a@example.org"}, ["x"], None])
+async def test_login_reports_an_odd_whoami_answer_as_one_line(store, idp, whoami):
+    code, out, err = await run_cli(
+        store, login_leader(idp, whoami=whoami), "login", "--provider", "entra"
+    )
+    assert code == 1
+    assert err.startswith("error: ") and err.count("\n") == 1, err
+    assert "Traceback" not in out + err
+
+
+async def test_login_shows_the_signed_in_person_without_control_characters(store, idp):
+    whoami = {"email": f"x{CONTROL}@example.org", "subject": "s", "role": f"admin{CONTROL}"}
+    code, out, err = await run_cli(
+        store, login_leader(idp, whoami=whoami), "login", "--provider", "entra"
+    )
+    assert code == 0, err
+    assert "signed in as" in out
+    assert not has_control_characters(out), repr(out)

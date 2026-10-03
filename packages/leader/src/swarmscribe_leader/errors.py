@@ -1,0 +1,45 @@
+class LeaderError(Exception):
+    """An expected failure with an HTTP status and a stable error code."""
+
+    status = 400
+    code = "bad_request"
+
+    def __init__(self, message: str, *, code: str | None = None):
+        super().__init__(message)
+        self.message = message
+        if code is not None:
+            self.code = code
+
+
+class Unauthorized(LeaderError):
+    status = 401
+    code = "unauthorized"
+
+
+class Forbidden(LeaderError):
+    status = 403
+    code = "forbidden"
+
+
+class NotFound(LeaderError):
+    status = 404
+    code = "not_found"
+
+
+class Conflict(LeaderError):
+    status = 409
+    code = "conflict"
+
+
+class StaleLease(Conflict):
+    code = "stale_lease"
+
+
+class PreconditionFailed(LeaderError):
+    status = 412
+    code = "source_changed"
+
+
+class PayloadTooLarge(LeaderError):
+    status = 413
+    code = "too_large"

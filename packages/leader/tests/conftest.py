@@ -1,13 +1,16 @@
 import asyncio
 import os
+import uuid
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
 import pytest
 from sqlalchemy import text
+from swarmscribe_leader.auth.secrets import hash_secret, new_secret
+from swarmscribe_leader.clock import utcnow
 from swarmscribe_leader.db.migrate import upgrade
-from swarmscribe_leader.db.models import Base
+from swarmscribe_leader.db.models import Base, Follower, Job, Recording, StorageLocation
 from swarmscribe_leader.db.session import make_engine, make_sessionmaker
 
 TEST_DATABASE = "swarmscribe_test"
@@ -64,3 +67,87 @@ async def engine(migrated_database_url):
 @pytest.fixture
 def sessionmaker(engine):
     return make_sessionmaker(engine)
+
+
+class Factory:
+    """Creates committed rows for tests. Each method uses its own session."""
+
+    def __init__(self, sessionmaker, root: Path):
+        self.sessionmaker = sessionmaker
+        self.root = root
+
+    async def _save(self, row):
+        async with self.sessionmaker() as session:
+            session.add(row)
+            await session.commit()
+        return row
+
+    async def location(self, **overrides) -> StorageLocation:
+        values = {
+            "id": uuid.uuid4(),
+            "name": f"location-{uuid.uuid4().hex[:8]}",
+            "backend": "local",
+            "config": {"root": str(self.root)},
+            "input_prefix": "",
+            "output_prefix": "transcripts/",
+            "pool": "default",
+            "required_device": "any",
+            "scan_interval_s": 900,
+            "enabled": True,
+            "vocabulary_version": 0,
+        }
+        values.update(overrides)
+        return await self._save(StorageLocation(**values))
+
+    async def recording(self, location=None, *, key="talks/one.mp3", **overrides) -> Recording:
+        location = location or await self.location()
+        now = utcnow()
+        values = {
+            "id": uuid.uuid4(),
+            "location_id": location.id,
+            "key": key,
+            "size": 10,
+            "source_version": "10-1",
+            "consent": "consented",
+            "first_seen_at": now,
+            "last_seen_at": now,
+            "missing": False,
+        }
+        values.update(overrides)
+        return await self._save(Recording(**values))
+
+    async def job(self, recording=None, **overrides) -> Job:
+        recording = recording or await self.recording()
+        values = {
+            "id": uuid.uuid4(),
+            "recording_id": recording.id,
+            "source_version": recording.source_version,
+            "state": "queued",
+            "pool": "default",
+            "required_device": "any",
+            "priority": 0,
+            "attempts": 0,
+            "max_attempts": 3,
+        }
+        values.update(overrides)
+        return await self._save(Job(**values))
+
+    async def follower(
+        self, *, pool="default", device="cpu", state="active", last_seen_at=None
+    ) -> tuple[Follower, str]:
+        credential = new_secret()
+        follower = Follower(
+            id=uuid.uuid4(),
+            pool=pool,
+            capabilities={"device": device, "models": [], "engine_version": "0.1.0", "pool": pool},
+            credential_hash=hash_secret(credential),
+            state=state,
+            last_seen_at=last_seen_at or utcnow(),
+        )
+        await self._save(follower)
+        return follower, credential
+
+
+@pytest.fixture
+def factory(sessionmaker, tmp_path):
+    return Factory(sessionmaker, tmp_path)

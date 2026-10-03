@@ -1,3 +1,4 @@
+import os
 import shutil
 from datetime import timedelta
 
@@ -246,3 +247,121 @@ async def test_a_location_whose_root_vanished_fails_without_marking_anything_mis
     async with sessionmaker() as session:
         stored = await session.get(StorageLocation, location.id)
     assert stored.last_scan_error
+
+
+async def test_consent_is_reevaluated_for_a_recording_missing_from_the_listing(
+    sessionmaker, factory, tmp_path
+):
+    write(tmp_path, "consent.txt", b"talks/*.mp3\n")
+    write(tmp_path, "talks/one.mp3")
+    location = await factory.location()
+    await scan(sessionmaker, location)
+    follower, _ = await factory.follower()
+    async with sessionmaker() as session:
+        job = await store.claim(session, follower, now=utcnow(), lease_seconds=120)
+        await session.commit()
+    async with sessionmaker() as session:
+        (await session.get(Job, job.id)).state = "completed"
+        await session.commit()
+    (tmp_path / "talks" / "one.mp3").unlink()
+    await scan(sessionmaker, location)
+    write(tmp_path, "consent.txt", b"other/*.mp3\n")
+    await scan(sessionmaker, location)
+    (recording,) = await rows(sessionmaker, Recording)
+    (job,) = await rows(sessionmaker, Job)
+    assert (recording.consent, recording.missing) == ("withdrawn", True)
+    assert job.outputs_flagged_for_deletion is True
+
+
+async def test_a_bad_pattern_fails_the_scan_and_queues_nothing(sessionmaker, factory, tmp_path):
+    write(tmp_path, "consent.txt", b"talks/*.mp3\n[z-a].mp3\n")
+    write(tmp_path, "talks/one.mp3")
+    location = await factory.location()
+    results = await scan_due_locations(sessionmaker, backends, now=utcnow(), max_attempts=3)
+    assert "line 2" in results[location.name]
+    assert await rows(sessionmaker, Job) == []
+    assert await rows(sessionmaker, Recording) == []
+    async with sessionmaker() as session:
+        stored = await session.get(StorageLocation, location.id)
+    assert "line 2" in stored.last_scan_error
+
+
+class OverListingBackend:
+    """Lists every key under the root, ignoring the prefix it was asked for."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def list(self, prefix=""):
+        async for obj in self.inner.list(""):
+            yield obj
+
+    async def read_text(self, key):
+        return await self.inner.read_text(key)
+
+
+async def test_keys_outside_the_input_prefix_are_ignored(sessionmaker, factory, tmp_path):
+    write(tmp_path, "consent.txt", b"**\n")
+    write(tmp_path, "incoming/one.mp3")
+    write(tmp_path, "elsewhere/two.mp3")
+    location = await factory.location(input_prefix="incoming/")
+    async with sessionmaker() as session:
+        loc = await session.get(StorageLocation, location.id, with_for_update=True)
+        await scan_location(
+            session, loc, OverListingBackend(backends(loc)), now=utcnow(), max_attempts=3
+        )
+        await session.commit()
+    assert [r.key for r in await rows(sessionmaker, Recording)] == ["incoming/one.mp3"]
+
+
+async def test_restoring_consent_requeues_only_when_no_live_job_exists(
+    sessionmaker, factory, tmp_path
+):
+    write(tmp_path, "consent.txt", b"**/*.mp3\n")
+    write(tmp_path, "talks/one.mp3")
+    write(tmp_path, "talks/two.mp3")
+    location = await factory.location()
+    await scan(sessionmaker, location)
+    follower, _ = await factory.follower()
+    async with sessionmaker() as session:
+        done = await store.claim(session, follower, now=utcnow(), lease_seconds=120)
+        await session.commit()
+    async with sessionmaker() as session:
+        (await session.get(Job, done.id)).state = "completed"
+        await session.commit()
+    write(tmp_path, "consent.txt", b"")
+    await scan(sessionmaker, location)
+    write(tmp_path, "consent.txt", b"**/*.mp3\n")
+    summary = await scan(sessionmaker, location)
+    assert {r.consent for r in await rows(sessionmaker, Recording)} == {"consented"}
+    assert summary.jobs_created == 1
+    jobs = await rows(sessionmaker, Job)
+    assert sorted(j.state for j in jobs) == ["cancelled", "completed", "queued"]
+
+
+async def test_a_recording_that_reappears_is_queued_again(sessionmaker, factory, tmp_path):
+    write(tmp_path, "consent.txt", b"**/*.mp3\n")
+    write(tmp_path, "talks/one.mp3", b"same")
+    location = await factory.location()
+    await scan(sessionmaker, location)
+    path = tmp_path / "talks" / "one.mp3"
+    stat = path.stat()
+    path.unlink()
+    await scan(sessionmaker, location)
+    write(tmp_path, "talks/one.mp3", b"same")
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    await scan(sessionmaker, location)
+    (recording,) = await rows(sessionmaker, Recording)
+    assert recording.missing is False
+    assert sorted(j.state for j in await rows(sessionmaker, Job)) == ["cancelled", "queued"]
+
+
+async def test_a_consent_file_that_is_not_utf8_fails_the_scan(sessionmaker, factory, tmp_path):
+    write(tmp_path, "consent.txt", b"\xff\xfe\x00bad\x80\n")
+    write(tmp_path, "talks/one.mp3")
+    location = await factory.location()
+    results = await scan_due_locations(sessionmaker, backends, now=utcnow(), max_attempts=3)
+    assert isinstance(results[location.name], str)
+    assert await rows(sessionmaker, Job) == []
+    async with sessionmaker() as session:
+        assert (await session.get(StorageLocation, location.id)).last_scan_error

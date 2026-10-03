@@ -23,6 +23,30 @@ def parse_consent(text: str | None) -> tuple[str, ...]:
     )
 
 
+class ConsentFileError(ValueError):
+    """consent.txt holds a pattern that cannot be used."""
+
+
+def _class_end(pattern: str, start: int) -> int:
+    """Index of the `]` closing the class opened at `start`, or -1 (then `[` is literal)."""
+    j = start + 1
+    if j < len(pattern) and pattern[j] == "!":
+        j += 1
+    if j < len(pattern) and pattern[j] == "]":
+        j += 1
+    return pattern.find("]", j)
+
+
+def _translate_class(body: str) -> str:
+    """fnmatch semantics: `!` negates, `^` is literal, and a class never matches `/`."""
+    negated = body.startswith("!")
+    if negated:
+        body = body[1:]
+    for char in ("\\", "[", "]", "^", "&", "~", "|"):
+        body = body.replace(char, "\\" + char)
+    return "(?!/)[" + ("^" if negated else "") + body + "]"
+
+
 def glob_to_regex(pattern: str) -> re.Pattern[str]:
     """Glob with `/` as separator: `*` and `?` stay inside one path part, `**` crosses parts."""
     out: list[str] = []
@@ -40,16 +64,38 @@ def glob_to_regex(pattern: str) -> re.Pattern[str]:
         elif pattern[i] == "?":
             out.append("[^/]")
             i += 1
-        elif pattern[i] == "[" and (end := pattern.find("]", i + 1)) != -1:
-            body = pattern[i + 1 : end]
-            if body.startswith("!"):
-                body = "^" + body[1:]
-            out.append("[" + body.replace("\\", "\\\\") + "]")
+        elif pattern[i] == "[" and (end := _class_end(pattern, i)) != -1:
+            out.append(_translate_class(pattern[i + 1 : end]))
             i = end + 1
         else:
             out.append(re.escape(pattern[i]))
             i += 1
     return re.compile("".join(out))
+
+
+def compile_consent(text: str | None) -> tuple[tuple[str, re.Pattern[str]], ...]:
+    """Parse consent.txt and compile every pattern, naming the line of one that is unusable."""
+    if not text:
+        return ()
+    if text.startswith("﻿"):
+        text = text[1:]
+    compiled: list[tuple[str, re.Pattern[str]]] = []
+    for number, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            compiled.append((line, glob_to_regex(line)))
+        except (re.error, RecursionError) as exc:
+            raise ConsentFileError(f"consent.txt line {number}: {exc}") from exc
+    return tuple(compiled)
+
+
+def first_match(compiled: tuple[tuple[str, re.Pattern[str]], ...], key: str) -> str | None:
+    for pattern, regex in compiled:
+        if regex.fullmatch(key):
+            return pattern
+    return None
 
 
 def matching_pattern(patterns: tuple[str, ...], key: str) -> str | None:

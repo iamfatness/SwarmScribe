@@ -11,7 +11,7 @@ from .. import audit
 from ..db.models import Job, Recording, StorageLocation
 from ..jobs.store import OPEN_STATES, cancel
 from ..storage.base import StorageBackend
-from .consent import is_recording, matching_pattern, parse_consent
+from .consent import compile_consent, first_match, is_recording
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ async def scan_location(
     max_attempts: int,
 ) -> ScanSummary:
     summary = ScanSummary()
-    patterns = parse_consent(await backend.read_text("consent.txt"))
+    patterns = compile_consent(await backend.read_text("consent.txt"))
     existing = {
         r.key: r
         for r in (
@@ -53,11 +53,11 @@ async def scan_location(
     }
     seen: set[str] = set()
     async for obj in backend.list(location.input_prefix):
-        if not is_recording(obj.key):
+        if not obj.key.startswith(location.input_prefix) or not is_recording(obj.key):
             continue
         seen.add(obj.key)
         summary.listed += 1
-        pattern = matching_pattern(patterns, obj.key[len(location.input_prefix) :])
+        pattern = first_match(patterns, obj.key[len(location.input_prefix) :])
         recording = existing.get(obj.key)
         if recording is None:
             recording = Recording(
@@ -83,6 +83,10 @@ async def scan_location(
             recording.missing = False
     for key, recording in existing.items():
         if key not in seen:
+            if key.startswith(location.input_prefix):
+                pattern = first_match(patterns, key[len(location.input_prefix) :])
+                recording.consent = _consent_state(recording.consent, pattern)
+                recording.consent_pattern = pattern
             recording.missing = True
             summary.missing += 1
         elif recording.consent == "consented":

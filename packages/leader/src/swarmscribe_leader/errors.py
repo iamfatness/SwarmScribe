@@ -3,6 +3,7 @@ class LeaderError(Exception):
 
     status = 400
     code = "bad_request"
+    retry_after: int | None = None
 
     def __init__(self, message: str, *, code: str | None = None):
         super().__init__(message)
@@ -43,3 +44,12 @@ class PreconditionFailed(LeaderError):
 class PayloadTooLarge(LeaderError):
     status = 413
     code = "too_large"
+
+
+class ServiceUnavailable(LeaderError):
+    """Something the leader depends on (an identity provider, a group directory) cannot be
+    reached right now; the caller should retry."""
+
+    status = 503
+    code = "unavailable"
+    retry_after = 10

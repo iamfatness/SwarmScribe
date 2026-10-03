@@ -14,6 +14,8 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
 from sqlalchemy import text
+from swarmscribe_leader.api.admin_auth import AdminAuth
+from swarmscribe_leader.app import create_app
 from swarmscribe_leader.auth.roles import RoleLookupFailed
 from swarmscribe_leader.auth.secrets import hash_secret, new_secret
 from swarmscribe_leader.clock import utcnow
@@ -375,3 +377,22 @@ def graph():
 @pytest.fixture
 def google_groups():
     return FakeGoogleGroups()
+
+
+@pytest.fixture
+async def admin_app(engine, migrated_database_url, sign_in_settings, idp, graph, google_groups):
+    settings = sign_in_settings(database_url=migrated_database_url)
+    auth = AdminAuth.from_settings(
+        settings, fetch=idp.fetch, graph=graph, google_groups=google_groups
+    )
+    application = create_app(settings, background=False, admin_auth=auth)
+    async with application.router.lifespan_context(application):
+        yield application
+
+
+@pytest.fixture
+async def admin_client(admin_app):
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=admin_app), base_url="http://leader"
+    ) as http:
+        yield http

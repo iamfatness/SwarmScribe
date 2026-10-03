@@ -23,4 +23,6 @@ async def readyz(request: Request) -> JSONResponse:
         return JSONResponse({"status": "database unreachable"}, status_code=503)
     if revision != request.app.state.head_revision:
         return JSONResponse({"status": "database migrations are not current"}, status_code=503)
+    if not await request.app.state.admin_auth.verifier.ready():
+        return JSONResponse({"status": "sign-in metadata unavailable"}, status_code=503)
     return JSONResponse({"status": "ready"})

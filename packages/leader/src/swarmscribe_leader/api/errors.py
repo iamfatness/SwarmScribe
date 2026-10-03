@@ -38,7 +38,8 @@ def install(app: FastAPI) -> None:
     # Nothing here logs the request URL or path: signed-link tokens live in paths.
     @app.exception_handler(LeaderError)
     async def leader_error(_request: Request, exc: LeaderError) -> JSONResponse:
-        return error_response(exc.code, exc.message, exc.status)
+        headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+        return error_response(exc.code, exc.message, exc.status, headers=headers)
 
     @app.exception_handler(StorageError)
     async def storage_error(_request: Request, exc: StorageError) -> JSONResponse:

@@ -308,7 +308,10 @@ issuer with its own client registration.
     emails to roles.
   - *Google, fallback:* when no service account is configured, or as an
     addition, roles come from configured email-address and domain lists per
-    role.
+    role. These lists need Google Workspace membership: a domain entry matches
+    only when the token's `hd` and the email's domain both equal it, and an
+    email entry only when `hd` equals the address's domain — except
+    `gmail.com`/`googlemail.com` addresses, which carry no `hd`.
   - Role lookups are cached for 5 minutes per person. A person with no role
     is refused with `403`.
 

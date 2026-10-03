@@ -123,9 +123,16 @@ matches only when the address belongs to its own Workspace. Personal Google
 accounts registered with a work address never match; the exception is a
 `gmail.com` or `googlemail.com` address on an email list.
 
+Use one app registration (client ID) per deployment, and sign in only to
+leaders you trust: an ID token is accepted by any leader configured with the
+same client ID, so a leader you sign in to could replay your token to another
+one that shares it. A `503` while signing in or calling the API (an identity
+provider or group directory that cannot be reached) is transient; retry
+shortly.
+
 `/readyz` reports ready once each configured provider's signing keys have been
-fetched. When identity providers are unreachable, this may take up to
-approximately 40 seconds; set probe timeouts accordingly.
+fetched. When identity providers are unreachable, the check can take about
+20 seconds per configured identity provider; set probe timeouts accordingly.
 
 ### `swarmscribe-admin`
 
@@ -148,12 +155,16 @@ The CLI accepts HTTPS leaders only; HTTP is allowed only for localhost
 `~/.config/swarmscribe/credentials.json` (readable by you only; override the
 path with `SWARMSCRIBE_ADMIN_CREDENTIALS`) and refreshed silently; the leader
 URL is remembered, or set `SWARMSCRIBE_LEADER_URL`. `--json` prints the
-leader's answer as JSON. A join token is shown once, by `tokens create`.
+leader's answer as JSON. `--json` and `--leader` go before the command
+(`swarmscribe-admin --json jobs list`, not `jobs list --json`). A join token is
+shown once, by `tokens create`.
 
 A location's root must be visible at the same path to every leader replica.
+
 Local storage locations use the file's size, modification time and inode number
 to detect changes; all leader replicas must see the same real filesystem. Network
 filesystems that invent inode numbers per client are not supported.
+
 `ingest` asks for a scan within a minute; `jobs cancel` is final for that
 version of the recording until `jobs retry`; `followers revoke` releases the
 follower's work at once.

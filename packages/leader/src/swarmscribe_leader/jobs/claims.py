@@ -3,12 +3,14 @@ from collections.abc import Callable
 from datetime import timedelta
 from typing import Literal
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from swarmscribe_protocol import (
     ClaimResponse,
     JobSettings,
     OutputChecksums,
+    SegmentsDocument,
     UploadUrls,
     Vocabulary,
 )
@@ -16,10 +18,12 @@ from swarmscribe_protocol import (
 from ..config import Settings
 from ..db.models import Follower, Job, Recording, SettingsProfile, StorageLocation
 from ..errors import LeaderError
-from ..storage.base import StorageBackend
+from ..storage.base import StorageBackend, StorageError, StorageUnavailable
+from .store import OutputsCheck
 
 BackendFactory = Callable[[StorageLocation], StorageBackend]
-OutputProblem = Literal["outputs_missing", "checksum_mismatch"]
+OutputProblem = Literal["outputs_missing", "checksum_mismatch", "outputs_inconsistent"]
+NO_SPEECH_SEGMENTS_LIMIT = 1024 * 1024
 
 
 def output_keys(prefix: str, key: str) -> dict[str, str]:
@@ -94,21 +98,72 @@ async def build_claim(
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 
+async def _has_no_segments(backend: StorageBackend, key: str) -> bool:
+    """Whether segments.json is a valid, small document listing no segments: the only
+    thing an empty .txt and .srt may sit beside."""
+    info = await backend.stat(key)
+    if info is None or info.size > NO_SPEECH_SEGMENTS_LIMIT:
+        return False
+    try:
+        text = await backend.read_text(key)
+        document = SegmentsDocument.model_validate_json(text or "")
+    except StorageUnavailable:
+        raise
+    except (StorageError, ValidationError):
+        return False
+    return not document.segments
+
+
 async def outputs_verified(
     session: AsyncSession,
     job: Job,
     checksums: OutputChecksums,
     *,
     backend_factory: BackendFactory,
-) -> OutputProblem | None:
-    """Check the three stored outputs against the submitted checksums by hashing them
-    through the backend. None when they match; otherwise what is wrong."""
+) -> OutputsCheck:
+    """Hash the three stored outputs and compare them with the submitted checksums.
+
+    Each output's version is noted before it is hashed, so the caller can confirm later,
+    cheaply, that nothing was replaced. A missing output, or an empty segments.json, is
+    `outputs_missing`. An empty .txt and .srt are a no-speech result, accepted only together
+    and only beside a segments.json with no segments.
+    """
     recording, source, target = await _places(session, job)
     backend = backend_factory(target)
-    mismatch = False
-    for name, key in output_keys(source.output_prefix, recording.key).items():
+    keys = output_keys(source.output_prefix, recording.key)
+    digests: dict[str, str] = {}
+    versions: list[tuple[str, str]] = []
+    for name, key in keys.items():
+        before = await backend.stat(key)
         digest = await backend.sha256(key)
-        if digest is None or digest == EMPTY_SHA256:
-            return "outputs_missing"
-        mismatch = mismatch or digest != getattr(checksums, name)
-    return "checksum_mismatch" if mismatch else None
+        if before is None or digest is None:
+            return OutputsCheck(problem="outputs_missing")
+        digests[name] = digest
+        versions.append((key, before.version))
+    if digests["segments_json"] == EMPTY_SHA256:
+        return OutputsCheck(problem="outputs_missing")
+    if any(digests[name] != getattr(checksums, name) for name in keys):
+        return OutputsCheck(problem="checksum_mismatch")
+    empty = {name for name in ("txt", "srt") if digests[name] == EMPTY_SHA256}
+    if empty and (
+        empty != {"txt", "srt"} or not await _has_no_segments(backend, keys["segments_json"])
+    ):
+        return OutputsCheck(problem="outputs_inconsistent")
+    return OutputsCheck(no_speech=bool(empty), versions=tuple(versions))
+
+
+async def outputs_unchanged(
+    session: AsyncSession,
+    job: Job,
+    check: OutputsCheck,
+    *,
+    backend_factory: BackendFactory,
+) -> bool:
+    """Whether every output still has the version it had when it was hashed."""
+    _recording, _source, target = await _places(session, job)
+    backend = backend_factory(target)
+    for key, version in check.versions:
+        info = await backend.stat(key)
+        if info is None or info.version != version:
+            return False
+    return True

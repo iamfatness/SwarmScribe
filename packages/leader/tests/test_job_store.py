@@ -14,15 +14,15 @@ H = "a" * 64
 
 
 async def present(_job, _checksums):
-    return None
+    return store.OutputsCheck()
 
 
 async def absent(_job, _checksums):
-    return "outputs_missing"
+    return store.OutputsCheck(problem="outputs_missing")
 
 
 async def mismatched(_job, _checksums):
-    return "checksum_mismatch"
+    return store.OutputsCheck(problem="checksum_mismatch")
 
 
 def submission(lease_id, checksum=H) -> SubmitRequest:
@@ -364,6 +364,107 @@ async def test_submit_whose_outputs_do_not_match_the_checksums_is_refused(sessio
     assert excinfo.value.code == "checksum_mismatch"
     assert seen == [(job.id, H)]
     assert (await load(sessionmaker, job.id)).state == "leased"
+
+
+async def test_outputs_are_hashed_before_the_job_row_is_locked(sessionmaker, factory):
+    job = await factory.job()
+    follower, _ = await factory.follower()
+    claimed = await claim(sessionmaker, follower)
+    locked_while_hashing = []
+
+    async def verifier(job_seen, _checksums):
+        async with sessionmaker() as other:
+            row = await other.scalar(
+                select(Job).where(Job.id == job_seen.id).with_for_update(skip_locked=True)
+            )
+            locked_while_hashing.append(row is None)
+            await other.rollback()
+        return store.OutputsCheck()
+
+    async with sessionmaker() as session:
+        await store.submit(
+            session,
+            job.id,
+            submission(claimed.lease_id),
+            follower,
+            now=utcnow(),
+            outputs_verified=verifier,
+        )
+        await session.commit()
+    assert locked_while_hashing == [False]
+    assert (await load(sessionmaker, job.id)).state == "completed"
+
+
+async def test_outputs_replaced_after_hashing_are_refused(sessionmaker, factory):
+    job = await factory.job()
+    follower, _ = await factory.follower()
+    claimed = await claim(sessionmaker, follower)
+
+    async def replaced(_job, _check):
+        return False
+
+    async with sessionmaker() as session:
+        with pytest.raises(Conflict) as excinfo:
+            await store.submit(
+                session,
+                job.id,
+                submission(claimed.lease_id),
+                follower,
+                now=utcnow(),
+                outputs_verified=present,
+                outputs_unchanged=replaced,
+            )
+    assert excinfo.value.code == "outputs_changed"
+    assert (await load(sessionmaker, job.id)).state == "leased"
+
+
+async def test_a_lease_lost_while_the_outputs_were_hashed_is_refused(sessionmaker, factory):
+    job = await factory.job()
+    follower, _ = await factory.follower()
+    claimed = await claim(sessionmaker, follower)
+
+    async def reaped_meanwhile(job_seen, _checksums):
+        async with sessionmaker() as other:
+            row = await other.get(Job, job_seen.id, with_for_update=True)
+            row.state = "queued"
+            store.clear_lease(row)
+            await other.commit()
+        return store.OutputsCheck()
+
+    async with sessionmaker() as session:
+        with pytest.raises(StaleLease):
+            await store.submit(
+                session,
+                job.id,
+                submission(claimed.lease_id),
+                follower,
+                now=utcnow(),
+                outputs_verified=reaped_meanwhile,
+            )
+    assert (await load(sessionmaker, job.id)).state == "queued"
+
+
+async def test_a_no_speech_result_is_recorded(sessionmaker, factory):
+    job = await factory.job()
+    follower, _ = await factory.follower()
+    claimed = await claim(sessionmaker, follower)
+
+    async def silent(_job, _checksums):
+        return store.OutputsCheck(no_speech=True)
+
+    async with sessionmaker() as session:
+        await store.submit(
+            session,
+            job.id,
+            submission(claimed.lease_id),
+            follower,
+            now=utcnow(),
+            outputs_verified=silent,
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        result = (await session.scalars(select(JobResult))).one()
+    assert result.no_speech is True
 
 
 # --- fail, release, release_all -------------------------------------------------

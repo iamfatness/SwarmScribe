@@ -2,6 +2,7 @@
 
 import uuid
 from collections.abc import Awaitable, Callable, Collection
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from sqlalchemy import func, select, update
@@ -17,7 +18,21 @@ NON_RETRYABLE = frozenset({"source_changed", "undecodable"})
 _OUTPUT_PROBLEMS = {
     "outputs_missing": "the outputs are not in storage yet",
     "checksum_mismatch": "the stored outputs do not match the submitted checksums",
+    "outputs_inconsistent": (
+        "an empty transcript needs an empty .txt and .srt and a segments.json without segments"
+    ),
+    "outputs_changed": "the outputs changed while they were being checked; submit again",
 }
+
+
+@dataclass(frozen=True)
+class OutputsCheck:
+    """What checking the stored outputs found: the problem (None when there is none),
+    whether they are a no-speech result, and each output's (key, version) as it was hashed."""
+
+    problem: str | None = None
+    no_speech: bool = False
+    versions: tuple[tuple[str, str], ...] = ()
 
 
 def _parse_lease(lease_id: str) -> uuid.UUID | None:
@@ -165,10 +180,25 @@ async def submit(
     follower: Follower,
     *,
     now: datetime,
-    outputs_verified: Callable[[Job, OutputChecksums], Awaitable[str | None]],
+    outputs_verified: Callable[[Job, OutputChecksums], Awaitable[OutputsCheck]],
+    outputs_unchanged: Callable[[Job, OutputsCheck], Awaitable[bool]] | None = None,
 ) -> None:
-    """Complete the job. `outputs_verified` checks the stored outputs against the submitted
-    checksums and returns None, or the conflict code ("outputs_missing", "checksum_mismatch")."""
+    """Complete the job.
+
+    The outputs are hashed before the job row is locked: hashing reads every byte, and the
+    reaper and administrators must not wait for it. Under the lock the lease is checked again
+    and `outputs_unchanged` confirms that no output was replaced after it was hashed.
+    """
+    job = await session.get(Job, job_id, populate_existing=True)
+    if job is None:
+        raise NotFound("no such job")
+    check: OutputsCheck | None = None
+    if job.state != "completed":
+        _require_lease(job, request.lease_id, follower)
+        check = await outputs_verified(job, request.checksums)
+        if check.problem is not None:
+            message = _OUTPUT_PROBLEMS.get(check.problem, "the outputs cannot be verified")
+            raise Conflict(message, code=check.problem)
     job = await _locked_job(session, job_id)
     if job.state == "completed":
         result = await session.scalar(select(JobResult).where(JobResult.job_id == job.id))
@@ -181,10 +211,10 @@ async def submit(
             return
         raise StaleLease("this job is already completed")
     _require_lease(job, request.lease_id, follower)
-    problem = await outputs_verified(job, request.checksums)
-    if problem is not None:
-        message = _OUTPUT_PROBLEMS.get(problem, "the outputs cannot be verified")
-        raise Conflict(message, code=problem)
+    if check is None:
+        raise StaleLease("this job is not leased to you with that lease")
+    if outputs_unchanged is not None and not await outputs_unchanged(job, check):
+        raise Conflict(_OUTPUT_PROBLEMS["outputs_changed"], code="outputs_changed")
     c = request.checksums
     session.add(
         JobResult(
@@ -193,6 +223,7 @@ async def submit(
             txt_sha256=c.txt,
             srt_sha256=c.srt,
             segments_sha256=c.segments_json,
+            no_speech=check.no_speech,
         )
     )
     await close_attempt(session, job, "completed", None, now)
@@ -205,6 +236,7 @@ async def submit(
         action="job.submit",
         subject_type="job",
         subject_id=job.id,
+        detail={"no_speech": check.no_speech},
     )
 
 

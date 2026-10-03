@@ -300,3 +300,41 @@ def test_a_service_account_file_with_bad_contents_does_not_leak_them(tmp_path):
     message = str(excinfo.value.errors(include_input=False, include_url=False))
     assert "google_service_account" in message
     assert "file-secret-material" not in message
+
+
+def test_a_model_validation_error_never_echoes_the_settings():
+    secrets = {
+        "database_url": "postgresql://u:db-password-value@db:5432/swarm",
+        "link_key": "lk-" + "x" * 32,
+        "google_service_account": SERVICE_ACCOUNT,
+    }
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(
+            **secrets,
+            public_url="https://leader.example",
+            **GOOGLE,
+            heartbeat_seconds=500,  # longer than the lease: a model-level refusal
+        )
+    shown = str(excinfo.value)
+    assert "heartbeat_seconds must be shorter" in shown
+    assert "input_value" not in shown
+    for value in secrets.values():
+        # Not even the start or end of a value (pydantic truncates long inputs in the middle).
+        assert value[:8] not in shown
+        assert value[-8:] not in shown
+
+
+@pytest.mark.parametrize(
+    "setting, entry",
+    [
+        ("role_admin_domains", "Kiwi.example"),  # KELVIN SIGN lowercases to ASCII "k"
+        ("role_viewer_emails", "K@example.org"),
+        ("role_viewer_emails", "a@Kiwi.example"),
+    ],
+)
+def test_an_entry_that_only_lowercases_to_ascii_is_refused(setting, entry):
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(**BASE, **GOOGLE, **{setting: entry})
+    message = str(excinfo.value.errors(include_input=False, include_url=False))
+    assert setting in message
+    assert "entry 1" in message

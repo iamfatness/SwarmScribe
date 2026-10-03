@@ -26,7 +26,11 @@ def _is_domain(name: str) -> bool:
 class Settings(BaseSettings):
     """Leader configuration, read from SWARMSCRIBE_* environment variables."""
 
-    model_config = SettingsConfigDict(env_prefix="SWARMSCRIBE_", extra="ignore")
+    # hide_input_in_errors: a model-level ValidationError would otherwise echo (a truncated
+    # repr of) every setting, secrets included.
+    model_config = SettingsConfigDict(
+        env_prefix="SWARMSCRIBE_", extra="ignore", hide_input_in_errors=True
+    )
 
     # Secrets: never shown in repr, logs or validation errors; use .get_secret_value().
     database_url: SecretStr
@@ -87,7 +91,12 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             value = value.split(",")
         if isinstance(value, list | tuple):
-            names = (str(item).strip().lower().removeprefix("@") for item in value)
+            # Lowercase ASCII entries only: a non-ASCII entry is kept as written so the
+            # ASCII check refuses it (KELVIN SIGN, U+212A, would otherwise lowercase to "k").
+            stripped = (str(item).strip() for item in value)
+            names = (
+                (name.lower() if name.isascii() else name).removeprefix("@") for name in stripped
+            )
             return tuple(name for name in names if name)
         return value
 

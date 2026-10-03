@@ -75,6 +75,7 @@ async def claim(
             Job.state == "queued",
             Job.pool == follower.pool,
             Job.required_device.in_(("any", device)),
+            Job.available_at <= now,
             Job.id.not_in(exclude),
         )
         .order_by(Job.priority.desc(), Job.created_at, Job.id)
@@ -100,6 +101,22 @@ async def claim(
         detail={"attempt": job.attempts},
     )
     return job
+
+
+async def push_back(session: AsyncSession, job_id: uuid.UUID, *, until: datetime) -> None:
+    """Make a queued job unclaimable until `until`. Never waits: a job someone else has
+    locked meanwhile (e.g. just leased it) is left to them."""
+    lockable = (
+        select(Job.id)
+        .where(Job.id == job_id, Job.state == "queued")
+        .with_for_update(skip_locked=True)
+    )
+    await session.execute(
+        update(Job)
+        .where(Job.id.in_(lockable))
+        .values(available_at=until)
+        .execution_options(synchronize_session=False)
+    )
 
 
 async def heartbeat(

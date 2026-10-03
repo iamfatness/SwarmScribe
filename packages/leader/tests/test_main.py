@@ -1,4 +1,5 @@
 from swarmscribe_leader import main as entry
+from swarmscribe_leader.db.migrate import head_revision
 
 
 def test_serve_refuses_an_unmigrated_database(monkeypatch, capsys):
@@ -40,4 +41,4 @@ def test_migrate_upgrades_and_reports_the_revision(monkeypatch, capsys, migrated
     monkeypatch.setenv("SWARMSCRIBE_PUBLIC_URL", "http://leader")
     monkeypatch.setenv("SWARMSCRIBE_LINK_KEY", "k" * 32)
     assert entry.main(["migrate"]) == 0
-    assert "0001" in capsys.readouterr().out
+    assert head_revision() in capsys.readouterr().out

@@ -93,7 +93,7 @@ class SettingsProfile(_Row, Base):
     __tablename__ = "settings_profiles"
 
     name: Mapped[str] = mapped_column(String(100), unique=True)
-    device: Mapped[str] = mapped_column(String(8))
+    device: Mapped[str] = mapped_column(String(8), unique=True)
     model: Mapped[str] = mapped_column(String(100))
     compute_type: Mapped[str] = mapped_column(String(32))
     temperatures: Mapped[list[Any]]
@@ -101,7 +101,7 @@ class SettingsProfile(_Row, Base):
 
 class Job(_Row, Base):
     __tablename__ = "jobs"
-    __table_args__ = (Index("ix_jobs_claim", "state", "pool", "priority", "created_at"),)
+    __table_args__ = (Index("ix_jobs_recording_id", "recording_id"),)
 
     recording_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("recordings.id"))
     source_version: Mapped[str] = mapped_column(String(200))
@@ -121,6 +121,12 @@ class Job(_Row, Base):
     failure_reason: Mapped[str | None] = mapped_column(Text)
     completed_at: Mapped[datetime | None]
     outputs_flagged_for_deletion: Mapped[bool] = mapped_column(default=False)
+    # Not before: a job whose claim could not be built is pushed back so others are reached.
+    available_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+# Serves the claim query: queued jobs of a pool, highest priority first, then oldest.
+Index("ix_jobs_claim", Job.state, Job.pool, Job.priority.desc(), Job.created_at)
 
 
 class JobAttempt(_Row, Base):

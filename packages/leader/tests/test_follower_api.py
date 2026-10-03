@@ -386,10 +386,79 @@ async def test_only_an_unbuildable_job_gives_204(client, app, sessionmaker, fact
     )
 
 
+async def test_a_whole_broken_location_ahead_of_the_queue_does_not_stall_it(
+    client, app, sessionmaker, factory, tmp_path
+):
+    broken = await factory.location()
+    for i in range(6):
+        await factory.job(await factory.recording(broken, key=f"talks/broken-{i}.mp3"))
+    healthy_root = tmp_path / "healthy"
+    write(healthy_root, "talks/ok.mp3", b"ok")
+    healthy = await factory.location(config={"root": str(healthy_root)})
+    good = await factory.job(await factory.recording(healthy, key="talks/ok.mp3"))
+    app.state.backend_factory = Broken(app.state.backend_factory, broken.id)
+    headers = await register(client, sessionmaker)
+    started = utcnow()
+    response = await client.post("/v1/jobs/claim", headers=headers)
+    if response.status_code == 204:  # the cap of 5 skips per claim was hit first
+        response = await client.post("/v1/jobs/claim", headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["job_id"] == str(good.id)
+    jobs, attempts = await job_rows(sessionmaker)
+    pushed_back = [job for job in jobs if job.id != good.id]
+    assert len(pushed_back) == 6
+    assert all(job.state == "queued" and job.attempts == 0 for job in pushed_back)
+    assert all(job.available_at >= started + timedelta(seconds=59) for job in pushed_back)
+    assert len(attempts) == 1
+
+
+async def test_a_pushed_back_job_is_not_offered_again_until_it_is_available(
+    client, app, sessionmaker, factory, tmp_path
+):
+    broken, _ = await two_locations(sessionmaker, factory, tmp_path)
+    app.state.backend_factory = Broken(app.state.backend_factory, broken.id)
+    headers = await register(client, sessionmaker)
+    await claim(client, headers)
+    app.state.backend_factory = app.state.backend_factory.real  # the location recovers
+    response = await client.post("/v1/jobs/claim", headers=headers)
+    assert response.status_code == 204
+    jobs, _ = await job_rows(sessionmaker)
+    assert sorted(job.state for job in jobs) == ["leased", "queued"]
+
+
+class Buggy(Broken):
+    def __call__(self, location):
+        if location.id == self.broken_location_id:
+            raise RuntimeError("unexpected")
+        return self.real(location)
+
+
+async def test_an_unexpected_claim_build_error_is_logged_with_its_traceback(
+    client, app, sessionmaker, factory, tmp_path, caplog
+):
+    broken, _ = await two_locations(sessionmaker, factory, tmp_path)
+    app.state.backend_factory = Buggy(app.state.backend_factory, broken.id)
+    headers = await register(client, sessionmaker)
+    with caplog.at_level("WARNING"):
+        await claim(client, headers)
+    (record,) = [r for r in caplog.records if "could not be built" in r.getMessage()]
+    assert record.exc_info is not None
+    caplog.clear()
+    app.state.backend_factory = Broken(app.state.backend_factory.real, broken.id)
+    async with sessionmaker() as session:
+        await session.execute(update(Job).values(available_at=utcnow() - timedelta(seconds=1)))
+        await session.commit()
+    with caplog.at_level("WARNING"):
+        await client.post("/v1/jobs/claim", headers=headers)
+    (record,) = [r for r in caplog.records if "could not be built" in r.getMessage()]
+    assert record.exc_info is None
+
+
 async def test_no_settings_profile_for_the_device_gives_204(
     client, sessionmaker, factory, tmp_path, caplog
 ):
     await queue_one(sessionmaker, factory, tmp_path)
+    (before,), _ = await job_rows(sessionmaker)
     headers = await register(client, sessionmaker, device="cuda")
 
     async def set_cuda_profiles_device(old: str, new: str) -> None:
@@ -406,6 +475,7 @@ async def test_no_settings_profile_for_the_device_gives_204(
         assert response.status_code == 204
         jobs, attempts = await job_rows(sessionmaker)
         assert ([job.state for job in jobs], attempts) == (["queued"], [])
+        assert jobs[0].available_at == before.available_at  # not even pushed back
     finally:
         await set_cuda_profiles_device("retired", "cuda")
     assert "cuda" in caplog.text

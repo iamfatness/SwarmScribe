@@ -29,6 +29,14 @@ async def _places(
     return recording, source, target
 
 
+def device_of(follower: Follower) -> str:
+    return follower.capabilities.get("device", "cpu")
+
+
+async def profile_for(session: AsyncSession, device: str) -> SettingsProfile | None:
+    return await session.scalar(select(SettingsProfile).where(SettingsProfile.device == device))
+
+
 async def build_claim(
     session: AsyncSession,
     job: Job,
@@ -36,6 +44,7 @@ async def build_claim(
     *,
     settings: Settings,
     backend_factory: BackendFactory,
+    profile: SettingsProfile | None = None,
 ) -> ClaimResponse:
     recording, source, target = await _places(session, job)
     download = backend_factory(source).download_link(
@@ -49,8 +58,9 @@ async def build_claim(
             for name, key in output_keys(source.output_prefix, recording.key).items()
         }
     )
-    device = follower.capabilities.get("device", "cpu")
-    profile = await session.scalar(select(SettingsProfile).where(SettingsProfile.device == device))
+    device = device_of(follower)
+    if profile is None:
+        profile = await profile_for(session, device)
     if profile is None:
         raise LeaderError(f"no settings profile for device {device!r}", code="no_settings_profile")
     job.settings_profile_id = profile.id

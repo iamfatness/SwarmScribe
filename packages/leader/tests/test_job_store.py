@@ -107,6 +107,21 @@ async def test_claim_takes_priority_first_then_oldest(sessionmaker, factory):
     assert order == [urgent.id, first.id, second.id]
 
 
+async def test_a_job_not_yet_available_is_not_claimed(sessionmaker, factory):
+    location = await factory.location()
+    later = await factory.job(
+        await factory.recording(location, key="later.mp3"),
+        priority=9,
+        available_at=utcnow() + timedelta(seconds=60),
+    )
+    ready = await factory.job(await factory.recording(location, key="ready.mp3"))
+    follower, _ = await factory.follower()
+    now = utcnow()
+    assert (await claim(sessionmaker, follower, now=now)).id == ready.id
+    assert await claim(sessionmaker, follower, now=now) is None
+    assert (await claim(sessionmaker, follower, now=now + timedelta(seconds=61))).id == later.id
+
+
 async def test_concurrent_claims_never_share_a_job(sessionmaker, factory):
     location = await factory.location()
     for i in range(20):

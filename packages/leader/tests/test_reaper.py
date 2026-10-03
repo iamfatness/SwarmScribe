@@ -76,11 +76,11 @@ async def test_a_job_locked_by_another_transaction_is_skipped(sessionmaker, fact
 
 
 async def test_silent_followers_without_a_lease_are_marked_gone(sessionmaker, factory):
+    await factory.job()  # before `now`: a job is claimable from its creation time on
     now = utcnow()
     quiet, _ = await factory.follower(last_seen_at=now - timedelta(minutes=11))
     busy, _ = await factory.follower(last_seen_at=now - timedelta(minutes=11))
     recent, _ = await factory.follower(last_seen_at=now - timedelta(minutes=1))
-    await factory.job()
     await claim(sessionmaker, busy, now=now)
     result = await run_reaper(sessionmaker, now=now)
     assert result.gone == 1

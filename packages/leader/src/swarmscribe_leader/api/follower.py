@@ -1,5 +1,6 @@
 import logging
 import uuid
+from datetime import timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -23,11 +24,13 @@ from ..clock import utcnow
 from ..db.models import Follower, Job, Recording
 from ..errors import LeaderError, Unauthorized
 from ..jobs import store
-from ..jobs.claims import build_claim, outputs_present
+from ..jobs.claims import build_claim, device_of, outputs_present, profile_for
+from ..storage.base import StorageError
 from .deps import db_session, settings_of
 
 logger = logging.getLogger(__name__)
 MAX_CLAIM_ATTEMPTS = 5
+UNBUILDABLE_BACKOFF_SECONDS = 60
 
 router = APIRouter(prefix="/v1")
 
@@ -72,6 +75,12 @@ async def claim_job(
     if follower.state == "draining":
         await session.commit()
         return _no_work(request)
+    device = device_of(follower)
+    profile = await profile_for(session, device)
+    if profile is None:
+        logger.warning("no settings profile for device %r; follower gets no work", device)
+        await session.commit()
+        return _no_work(request)
     skipped: list[uuid.UUID] = []
     while len(skipped) < MAX_CLAIM_ATTEMPTS:
         # A savepoint, so an unbuildable job rolls back alone and the follower's
@@ -91,9 +100,14 @@ async def claim_job(
                 follower,
                 settings=settings,
                 backend_factory=request.app.state.backend_factory,
+                profile=profile,
             )
         except Exception as exc:
             await savepoint.rollback()
+            # Push it back so the next claims reach the healthy jobs queued behind it.
+            await store.push_back(
+                session, job_id, until=utcnow() + timedelta(seconds=UNBUILDABLE_BACKOFF_SECONDS)
+            )
             await _log_unbuildable(session, job_id, exc)
             skipped.append(job_id)
             continue
@@ -109,11 +123,13 @@ async def _log_unbuildable(session: AsyncSession, job_id: uuid.UUID, exc: Except
     job = await session.get(Job, job_id)
     recording = await session.get(Recording, job.recording_id) if job else None
     detail = exc.message if isinstance(exc, LeaderError) else type(exc).__name__
+    expected = isinstance(exc, LeaderError | StorageError)
     logger.warning(
         "job %s skipped, claim could not be built (location %s): %s",
         job_id,
         recording.location_id if recording else None,
         detail,
+        exc_info=None if expected else True,
     )
 
 

@@ -1,4 +1,5 @@
 import hashlib
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -469,7 +470,9 @@ def test_stereo_split_needs_exactly_two_channels(audio, channels, found):
     with pytest.raises(UndecodableAudioError, match=found) as excinfo:
         split_transcriber(model, channels=channels).transcribe(audio)
     assert "recording.mp3" in str(excinfo.value)
-    assert "stereo_split needs a two-channel (stereo) recording" in str(excinfo.value)
+    assert "stereo-split (stereo_split) needs a two-channel (stereo) recording" in str(
+        excinfo.value
+    )
     assert model.calls == []
 
 
@@ -480,7 +483,7 @@ def test_auto_splits_a_two_channel_file(audio):
     assert [(s.channel, s.text) for s in transcript.segments] == [(0, "Hello.")]
 
 
-@pytest.mark.parametrize("channels", [0, 1, 6])
+@pytest.mark.parametrize("channels", [1, 6])
 def test_auto_mixes_anything_but_two_channels_as_mono(audio, channels):
     model = ChannelModel({str(audio): [seg(0.0, 1.0, " Hello.")]})
     decoded = []
@@ -491,6 +494,13 @@ def test_auto_mixes_anything_but_two_channels_as_mono(audio, channels):
     assert [call[0] for call in model.calls] == [str(audio)]
     assert transcript.channel_labels is None
     assert transcript.segments[0].channel is None
+
+
+def test_auto_on_a_file_with_no_audio_stream_is_undecodable(audio):
+    model = ChannelModel({})
+    with pytest.raises(UndecodableAudioError, match="recording.mp3 has no audio stream"):
+        split_transcriber(model, channels=0, mode="auto").transcribe(audio)
+    assert model.calls == []
 
 
 def test_mono_never_looks_at_the_channels(audio):
@@ -512,8 +522,43 @@ def test_a_failing_stereo_decode_is_undecodable(audio):
     def broken(path):
         raise DecodeError("truncated")
 
+    model = ChannelModel({})
     with pytest.raises(UndecodableAudioError, match="recording.mp3"):
-        split_transcriber(ChannelModel({}), decode=broken).transcribe(audio)
+        split_transcriber(model, decode=broken).transcribe(audio)
+    assert model.calls == []
+
+
+class FailsOn(ChannelModel):
+    """Raises `error` when asked to transcribe `audio_id`; answers the other input normally."""
+
+    def __init__(self, audio_id, error, by_audio):
+        super().__init__(by_audio)
+        self.audio_id = audio_id
+        self.failure = error
+
+    def transcribe(self, audio, **kwargs):
+        if audio == self.audio_id:
+            self.calls.append((audio, kwargs))
+            raise self.failure
+        return super().transcribe(audio, **kwargs)
+
+
+def test_a_non_decode_failure_on_the_right_pass_propagates(audio):
+    model = FailsOn(RIGHT, RuntimeError("out of memory"), {LEFT: [seg(0.0, 1.0, " Hello.")]})
+    with pytest.raises(RuntimeError, match="out of memory"):
+        split_transcriber(model).transcribe(audio)
+    assert [call[0] for call in model.calls] == [LEFT, RIGHT]
+
+
+def test_a_decode_error_raised_while_iterating_segments_is_undecodable(audio):
+    def lazy_failure():
+        yield seg(0.0, 1.0, " Hello.")
+        raise DecodeError("truncated mid-stream")
+
+    model = ChannelModel({LEFT: lazy_failure()})
+    with pytest.raises(UndecodableAudioError, match="recording.mp3") as excinfo:
+        split_transcriber(model).transcribe(audio)
+    assert isinstance(excinfo.value.__cause__, DecodeError)
 
 
 def test_per_call_settings_choose_the_channel_handling(audio):
@@ -638,7 +683,9 @@ def test_a_real_corrupt_file_is_undecodable_in_split_mode(tmp_path):
         transcriber.transcribe(corrupt)
 
 
-def test_auto_on_a_real_mono_file_writes_exactly_what_mono_writes(make_wav, tmp_path):
+def test_auto_on_a_real_mono_file_writes_what_mono_writes_apart_from_the_requested_mode(
+    make_wav, tmp_path
+):
     path = make_wav("recording.wav", [440])
 
     def outputs(mode):
@@ -646,6 +693,14 @@ def test_auto_on_a_real_mono_file_writes_exactly_what_mono_writes(make_wav, tmp_
         transcriber, _ = real_split(mode=mode, model=model)
         files = write_outputs(transcriber.transcribe(path), tmp_path / mode)
         assert [call[0] for call in model.calls] == [str(path)]
-        return [p.read_bytes() for p in (files.txt, files.srt, files.segments_json)]
+        return files.txt.read_bytes(), files.srt.read_bytes(), json.loads(
+            files.segments_json.read_text("utf-8")
+        )
 
-    assert outputs("auto") == outputs("mono")
+    mono_txt, mono_srt, mono_json = outputs("mono")
+    auto_txt, auto_srt, auto_json = outputs("auto")
+    assert (auto_txt, auto_srt) == (mono_txt, mono_srt)
+    # settings echoes the request; nothing records a split, so nothing else differs.
+    assert auto_json["settings"].pop("channel_mode") == "auto"
+    assert auto_json["settings"].pop("channel_labels") == ["Left", "Right"]
+    assert auto_json == mono_json

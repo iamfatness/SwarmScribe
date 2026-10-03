@@ -1,7 +1,7 @@
 import unicodedata
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, Field, field_validator
+from pydantic import AfterValidator, Field, field_validator, model_validator
 
 from .base import Sha256, WireModel
 from .vocabulary import AppliedCorrection
@@ -89,6 +89,15 @@ class SegmentsDocument(WireModel):
     vocabulary_version: int = Field(ge=0)
     vocabulary_terms_used: list[str]
     corrections_applied: list[AppliedCorrection]
-    channel_labels: list[str] | None = None
+    channel_labels: ChannelLabels | None = None
     """The labels used when the transcript was split; None otherwise."""
     segments: list[Segment]
+
+    @model_validator(mode="after")
+    def _channels_and_labels_go_together(self) -> "SegmentsDocument":
+        if self.channel_labels is None:
+            if any(segment.channel is not None for segment in self.segments):
+                raise ValueError("segments have a channel but the document has no channel_labels")
+        elif any(segment.channel is None for segment in self.segments):
+            raise ValueError("every segment of a split document needs a channel of 0 or 1")
+        return self

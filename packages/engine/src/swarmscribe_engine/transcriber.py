@@ -93,7 +93,7 @@ def _not_stereo(name: str, channels: int) -> UndecodableAudioError:
     else:
         found = f"{channels} audio channel" + ("" if channels == 1 else "s")
     return UndecodableAudioError(
-        f"{name} has {found}; stereo_split needs a two-channel (stereo) recording"
+        f"{name} has {found}; stereo-split (stereo_split) needs a two-channel (stereo) recording"
     )
 
 
@@ -151,6 +151,8 @@ class Transcriber:
             return False
         channels = self._channel_count(path)
         if settings.channel_mode == "auto":
+            if channels == 0:
+                raise UndecodableAudioError(f"{path.name} has no audio stream")
             return channels == 2
         if channels != 2:
             raise _not_stereo(path.name, channels)

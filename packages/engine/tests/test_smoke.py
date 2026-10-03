@@ -91,7 +91,7 @@ def test_real_model_transcribes_a_stereo_file_in_split_mode(transcriber, tmp_pat
 
     files = write_outputs(transcript, tmp_path / "out")
     document = SegmentsDocument.model_validate_json(files.segments_json.read_text("utf-8"))
-    assert document.channel_labels == ["Agent", "Customer"]
+    assert document.channel_labels == ("Agent", "Customer")
     assert document.vocabulary_terms_used == ["Ashford"]
     assert all(segment.channel in (0, 1) for segment in document.segments)
     lines = files.txt.read_text("utf-8").splitlines()

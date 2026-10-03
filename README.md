@@ -42,11 +42,17 @@ Writes `out/recording.mp3.txt`, `out/recording.mp3.srt` and
   `stereo-split` transcribes the left and right channels separately (for
   recordings with one speaker per channel, such as calls) and merges them in
   time order; a file that is not two-channel is refused. `auto` splits a
-  two-channel file and mixes anything else. Splitting decodes both channels,
+  two-channel file and mixes anything else. `auto` assumes one speaker per
+  channel, so an ordinary stereo recording (music, a dual-mono export, a phone
+  app that writes mono into both channels) will be split too and the same
+  speech can appear on both channels; use `mono` for those. Splitting decodes both channels,
   so it needs about twice the memory of mono (roughly 460 MB held and 1.2 GB
   peak per hour of audio during decoding).
 - `--labels "Agent,Customer"` — names for the left and right channels
-  (default `Left,Right`), 1–40 characters each. In a split transcript every
+  (default `Left,Right`). Each label is 1–40 characters, with no leading or
+  trailing spaces and no control characters or line breaks; the two labels
+  must differ ignoring case; and a label cannot contain a comma, because the
+  comma separates the two. In a split transcript every
   txt line and srt cue starts with `<label>: `, and `segments.json` records
   each segment's `channel` (0 left, 1 right) and the labels. Only allowed
   with `stereo-split` or `auto`.

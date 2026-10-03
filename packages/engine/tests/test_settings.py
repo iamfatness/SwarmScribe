@@ -1,5 +1,8 @@
 import pytest
+from pydantic import ValidationError
 from swarmscribe_engine import DEFAULT_CHANNEL_LABELS, TranscribeSettings
+from swarmscribe_engine.types import check_channel_labels
+from swarmscribe_protocol import JobSettings
 
 
 def settings(**overrides):
@@ -49,3 +52,45 @@ def test_labels_given_as_a_list_become_a_hashable_tuple():
 def test_forty_character_labels_are_accepted():
     labels = ("x" * 40, "José")
     assert settings(channel_mode="stereo_split", channel_labels=labels).channel_labels == labels
+
+
+LABEL_CASES = [
+    (("Left", "Right"), True),
+    (("Agent", "Customer"), True),
+    (("x" * 40, "José Ashford"), True),
+    (("Two Words", "a"), True),
+    (("Left",), False),
+    (("Left", "Middle", "Right"), False),
+    (("", "Right"), False),
+    (("x" * 41, "Right"), False),
+    ((" Left", "Right"), False),
+    (("Left ", "Right"), False),
+    (("   ", "Right"), False),
+    (("Left\nSide", "Right"), False),
+    (("Left\nSide", "Right"), False),
+    (("Left\tSide", "Right"), False),
+    (("Left\u2028Side", "Right"), False),
+    (("Left\u2029Side", "Right"), False),
+    (("Left\u0085Side", "Right"), False),
+    (("Left\u200bSide", "Right"), False),
+    (("Same", "same"), False),
+    (("Straße", "STRASSE"), False),
+]
+
+
+@pytest.mark.parametrize(("labels", "good"), LABEL_CASES)
+def test_engine_and_protocol_label_rules_agree(labels, good):
+    def accepted(check):
+        try:
+            check()
+        except (ValueError, ValidationError):
+            return False
+        return True
+
+    engine = accepted(lambda: check_channel_labels(labels))
+    protocol = accepted(
+        lambda: JobSettings(
+            model="m", compute_type="c", channel_mode="stereo_split", channel_labels=labels
+        )
+    )
+    assert engine == protocol == good

@@ -65,20 +65,24 @@ def _segment_json(segment: Segment) -> dict:
 
 def render_segments_json(transcript: Transcript) -> str:
     settings = transcript.settings
-    # Channel settings are deliberately not written here: mono output stays exactly as it was,
-    # and channel_labels below records whether the transcript was split.
+    recorded = {
+        "model": settings.model,
+        "compute_type": settings.compute_type,
+        **FIXED_SETTINGS,
+        "temperatures": list(settings.temperatures),
+    }
+    # settings echoes what the job asked for; the top-level channel_labels below records whether
+    # the transcript was actually split. Mono asks for nothing, so mono output is unchanged.
+    if settings.channel_mode != "mono":
+        recorded["channel_mode"] = settings.channel_mode
+        recorded["channel_labels"] = list(settings.channel_labels)
     document = {
         "schema_version": SCHEMA_VERSION,
         "source_checksum": transcript.source_checksum,
         "duration": transcript.duration,
         "device": settings.device,
         "engine_version": ENGINE_VERSION,
-        "settings": {
-            "model": settings.model,
-            "compute_type": settings.compute_type,
-            **FIXED_SETTINGS,
-            "temperatures": list(settings.temperatures),
-        },
+        "settings": recorded,
         "vocabulary_version": transcript.vocabulary_version,
         "vocabulary_terms_used": list(transcript.vocabulary_terms_used),
         "corrections_applied": [

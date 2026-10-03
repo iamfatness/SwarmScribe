@@ -463,8 +463,8 @@ def test_a_mono_file_in_stereo_split_exits_2_and_writes_nothing(tmp_path, capsys
 
     def fake_transcribe(path, settings, vocabulary):
         raise UndecodableAudioError(
-            "recording.mp3 has 1 audio channel; stereo_split needs a two-channel (stereo) "
-            "recording"
+            "recording.mp3 has 1 audio channel; stereo-split (stereo_split) needs a "
+            "two-channel (stereo) recording"
         )
 
     code = run(

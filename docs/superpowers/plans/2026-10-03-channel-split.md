@@ -2200,6 +2200,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
+### Leader notes carried from the final review (Tasks 6-7)
+
+- Older protocol models silently ignore unknown fields. The leader decides whether a split happened from the presence of `document.channel_labels`, not from `settings.channel_mode`. `settings` echoes what the job asked for (`mono` writes no channel settings; `stereo_split` and `auto` write the requested mode and labels), and the top-level `channel_labels` records what happened: an `auto` file that was not split reads `settings.channel_mode == "auto"` with no `channel_labels`.
+
 ### Task 7: Leader admin — `locations add --channels --labels` (after Plan A2)
 
 **Precondition:** Task 6 is done and Plan A2's admin API and CLI are merged.

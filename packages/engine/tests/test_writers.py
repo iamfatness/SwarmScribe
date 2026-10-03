@@ -356,10 +356,10 @@ def test_split_segments_json_records_channels_and_labels(make_transcript, tmp_pa
     assert list(raw)[-2:] == ["channel_labels", "segments"]
     assert [segment["channel"] for segment in raw["segments"]] == [0, 1]
     assert list(raw["segments"][1]) == ["start", "end", "text", "words", "channel"]
-    assert "channel_mode" not in raw["settings"]
-    assert "channel_labels" not in raw["settings"]
+    assert raw["settings"]["channel_mode"] == "stereo_split"
+    assert raw["settings"]["channel_labels"] == ["Agent", "Customer"]
     document = SegmentsDocument.model_validate_json(files.segments_json.read_text("utf-8"))
-    assert document.channel_labels == ["Agent", "Customer"]
+    assert document.channel_labels == ("Agent", "Customer")
     assert [segment.channel for segment in document.segments] == [0, 1]
 
 
@@ -368,10 +368,7 @@ def test_split_segments_json_declares_every_field_it_writes(make_transcript, tmp
         "utf-8"
     )
     document = SegmentsDocument.model_validate_json(raw)
-    dumped = document.model_dump_json(
-        exclude_none=True, exclude={"settings": {"channel_mode", "channel_labels"}}
-    )
-    assert json.loads(raw) == json.loads(dumped)
+    assert json.loads(raw) == json.loads(document.model_dump_json(exclude_none=True))
 
 
 def test_a_split_recording_with_no_speech_keeps_its_labels(make_transcript, tmp_path):
@@ -379,7 +376,7 @@ def test_a_split_recording_with_no_speech_keeps_its_labels(make_transcript, tmp_
     assert files.txt.read_text("utf-8") == ""
     assert files.srt.read_text("utf-8") == ""
     document = SegmentsDocument.model_validate_json(files.segments_json.read_text("utf-8"))
-    assert (document.segments, document.channel_labels) == ([], ["Agent", "Customer"])
+    assert (document.segments, document.channel_labels) == ([], ("Agent", "Customer"))
 
 
 def test_mono_segments_json_writes_no_channel_fields(make_transcript, tmp_path):
@@ -388,15 +385,35 @@ def test_mono_segments_json_writes_no_channel_fields(make_transcript, tmp_path):
     assert all("channel" not in segment for segment in raw["segments"])
 
 
-def test_split_segments_json_round_trips_without_exclude_unset(make_transcript, tmp_path):
+def test_a_split_document_re_read_and_re_serialised_keeps_its_mode_and_labels(
+    make_transcript, tmp_path
+):
     raw = write_outputs(split_transcript(make_transcript), tmp_path).segments_json.read_text(
         "utf-8"
     )
-    parsed = json.loads(raw)
-    assert parsed["channel_labels"] == ["Agent", "Customer"]
-    assert all("channel" in segment for segment in parsed["segments"])
     document = SegmentsDocument.model_validate_json(raw)
-    dumped = document.model_dump_json(
-        exclude_none=True, exclude={"settings": {"channel_mode", "channel_labels"}}
+    assert document.settings.channel_mode == "stereo_split"
+    assert document.settings.channel_labels == ("Agent", "Customer")
+    again = json.loads(document.model_dump_json(exclude_none=True))
+    assert again["settings"]["channel_mode"] == "stereo_split"
+    assert again["settings"]["channel_labels"] == ["Agent", "Customer"]
+    assert again["channel_labels"] == ["Agent", "Customer"]
+    assert again == json.loads(raw)
+
+
+def test_an_unsplit_auto_document_asks_for_auto_and_records_no_split(make_transcript, tmp_path):
+    settings = TranscribeSettings(
+        model="large-v3", compute_type="float16", device="cuda", channel_mode="auto"
     )
-    assert parsed == json.loads(dumped)
+    raw = write_outputs(make_transcript(settings=settings), tmp_path).segments_json.read_text(
+        "utf-8"
+    )
+    parsed = json.loads(raw)
+    assert parsed["settings"]["channel_mode"] == "auto"
+    assert parsed["settings"]["channel_labels"] == ["Left", "Right"]
+    assert "channel_labels" not in parsed
+    document = SegmentsDocument.model_validate_json(raw)
+    assert document.channel_labels is None
+    assert document.settings.channel_mode == "auto"
+    assert json.loads(document.model_dump_json(exclude_none=True)) == parsed
+

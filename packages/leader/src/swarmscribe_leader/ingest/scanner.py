@@ -249,7 +249,8 @@ async def scan_due_locations(
     now: datetime,
     max_attempts: int,
 ) -> dict[str, ScanSummary | str]:
-    """Scan every enabled location that is due or has a scan requested.
+    """Scan every enabled location that is due or has a scan requested (one disabled while
+    its storage is read is skipped).
 
     A request is cleared only if it is unchanged since this scan began: one made while the
     scan ran (after storage was read) is kept and causes another scan on the next tick.
@@ -267,6 +268,8 @@ async def scan_due_locations(
             snapshot = await take_snapshot(backend_factory(loc), loc.input_prefix)
             async with sessionmaker() as session:
                 location = await session.get(StorageLocation, loc.id, with_for_update=True)
+                if location is None or not location.enabled:
+                    continue  # disabled (or gone) while storage was read: not scanned
                 if (location.backend, location.config, location.input_prefix) != (
                     loc.backend,
                     loc.config,

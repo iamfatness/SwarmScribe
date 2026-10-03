@@ -344,3 +344,19 @@ async def test_reaper_transitions_are_audited(sessionmaker, factory):
     assert expired.detail == {"follower": str(holder.id), "attempt": 1, "state": "queued"}
     (gone,) = [e for e in entries if e.action == "follower.gone"]
     assert (gone.subject_type, gone.subject_id) == ("follower", str(silent.id))
+
+
+async def test_a_lease_that_expires_on_its_last_attempt_is_audited_as_failed(
+    sessionmaker, factory
+):
+    job = await factory.job(max_attempts=1)
+    holder, _ = await factory.follower()
+    start = utcnow()
+    await claim(sessionmaker, holder, now=start)
+    await run_reaper(sessionmaker, now=start + timedelta(seconds=121))
+    async with sessionmaker() as session:
+        (entry,) = (
+            await session.scalars(select(AuditEntry).where(AuditEntry.action == "job.expire"))
+        ).all()
+    assert (entry.actor, entry.subject_type, entry.subject_id) == ("system", "job", str(job.id))
+    assert entry.detail == {"follower": str(holder.id), "attempt": 1, "state": "failed"}

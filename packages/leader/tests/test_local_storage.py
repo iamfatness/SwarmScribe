@@ -177,9 +177,25 @@ async def test_list_survives_a_file_vanishing_before_stat(tmp_path, monkeypatch)
 @pytest.mark.skipif(os.name == "nt", reason="backslash is not legal in Windows filenames")
 async def test_list_skips_keys_path_for_would_refuse(tmp_path):
     write(tmp_path, "good.mp3")
-    write(tmp_path, "bad\name.mp3")
+    write(tmp_path, "bad\\name.mp3")
     keys = [i.key for i in await collect(backend(tmp_path).list())]
     assert keys == ["good.mp3"]
+
+
+async def test_list_skips_a_name_containing_a_newline(tmp_path):
+    write(tmp_path, "good.mp3")
+    try:
+        write(tmp_path, "bad\nname.mp3")
+    except OSError:
+        pytest.skip("this filesystem refuses newlines in names")
+    keys = [i.key for i in await collect(backend(tmp_path).list())]
+    assert keys == ["good.mp3"]
+
+
+@pytest.mark.parametrize("ch", ["\n", "\r", "\t", "\x00", "\x1f", "\x7f"])
+async def test_control_characters_in_a_key_are_a_storage_error(tmp_path, ch):
+    with pytest.raises(StorageError):
+        backend(tmp_path).path_for(f"talks/a{ch}b.mp3")
 
 
 async def test_nul_in_a_key_is_a_storage_error(tmp_path):

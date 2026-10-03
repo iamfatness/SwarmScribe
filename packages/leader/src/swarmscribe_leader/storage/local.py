@@ -49,7 +49,9 @@ class LocalBackend:
             ) from exc
 
     def path_for(self, key: str) -> Path:
-        if not key or "\x00" in key or key.startswith("/") or "\\" in key or ":" in key:
+        if not key or key.startswith("/") or "\\" in key or ":" in key:
+            raise StorageError(f"invalid storage key {key!r}")
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in key):
             raise StorageError(f"invalid storage key {key!r}")
         if key != PurePosixPath(key).as_posix():
             raise StorageError(f"invalid storage key {key!r}")

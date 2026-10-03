@@ -1,9 +1,13 @@
 """Request and response bodies of the /v1/admin API."""
 
 from datetime import datetime
+from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from ..storage.base import StorageError
+from ..storage.local import validate_key
 
 JobState = Literal["queued", "leased", "completed", "failed", "cancelled"]
 FollowerState = Literal["active", "draining", "revoked", "gone"]
@@ -133,3 +137,65 @@ class ConsentReport(BaseModel):
     locations: list[ConsentCounts]
     flagged: list[FlaggedOutputs]
     truncated: bool
+
+
+class LocationIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=NAME_PATTERN)
+    root: str = Field(min_length=1, max_length=1000)
+    input_prefix: str = Field(default="", max_length=1000)
+    output_prefix: str = Field(default="transcripts/", max_length=1000)
+    pool: str = Field(default="default", pattern=NAME_PATTERN)
+    required_device: RequiredDevice = "any"
+    scan_interval_s: int = Field(default=900, ge=30, le=7 * 86400)
+
+    @field_validator("root")
+    @classmethod
+    def _absolute_folder(cls, value: str) -> str:
+        if any(ord(ch) < 0x20 for ch in value) or not Path(value).is_absolute():
+            raise ValueError("root must be an absolute folder path")
+        return value
+
+    @field_validator("input_prefix", "output_prefix")
+    @classmethod
+    def _relative_prefix(cls, value: str) -> str:
+        if value:
+            try:
+                validate_key(value.rstrip("/"))
+            except StorageError:
+                raise ValueError("must be a relative folder such as incoming/") from None
+        return value
+
+
+class PriorityIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    priority: int = Field(ge=-1000, le=1000, strict=True)
+
+
+class TokenIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pool: str = Field(default="default", pattern=NAME_PATTERN)
+    expires_in_seconds: int = Field(default=7 * 86400, ge=60, le=90 * 86400)
+    max_uses: int = Field(default=1, ge=1, le=10_000)
+
+
+class TokenCreated(BaseModel):
+    id: str
+    token: str
+    pool: str
+    expires_at: datetime
+    max_uses: int
+
+
+class ScanRequested(BaseModel):
+    name: str
+    requested_at: datetime
+
+
+class FollowerRevoked(BaseModel):
+    id: str
+    state: str
+    released: int

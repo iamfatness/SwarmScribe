@@ -20,6 +20,20 @@ def version_of(stat_result: os.stat_result) -> str:
     return f"{stat_result.st_size}-{stat_result.st_mtime_ns}-{stat_result.st_ino}"
 
 
+def validate_key(key: str) -> None:
+    """Refuse a key that is empty, absolute, non-canonical, holds control characters, or
+    has a part that could escape its folder or misbehave on Windows."""
+    if not key or key.startswith("/") or "\\" in key or ":" in key:
+        raise StorageError(f"invalid storage key {key!r}")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in key):
+        raise StorageError(f"invalid storage key {key!r}")
+    if key != PurePosixPath(key).as_posix():
+        raise StorageError(f"invalid storage key {key!r}")
+    for segment in key.split("/"):
+        if segment in ("", ".", "..") or segment.endswith((".", " ")):
+            raise StorageError(f"invalid storage key {key!r}")
+
+
 class LocalBackend:
     """A folder on a filesystem every leader replica can see. The leader serves its links."""
 
@@ -50,15 +64,7 @@ class LocalBackend:
             ) from exc
 
     def path_for(self, key: str) -> Path:
-        if not key or key.startswith("/") or "\\" in key or ":" in key:
-            raise StorageError(f"invalid storage key {key!r}")
-        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in key):
-            raise StorageError(f"invalid storage key {key!r}")
-        if key != PurePosixPath(key).as_posix():
-            raise StorageError(f"invalid storage key {key!r}")
-        for segment in key.split("/"):
-            if segment in ("", ".", "..") or segment.endswith((".", " ")):
-                raise StorageError(f"invalid storage key {key!r}")
+        validate_key(key)
         path = (self.root / key).resolve()
         if not path.is_relative_to(self.root):
             raise StorageError(f"invalid storage key {key!r}")

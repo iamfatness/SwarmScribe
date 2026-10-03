@@ -1,3 +1,5 @@
+import asyncio
+import re
 import uuid
 from datetime import timedelta
 
@@ -5,7 +7,9 @@ import pytest
 from sqlalchemy import select
 from swarmscribe_leader.auth.followers import create_join_token
 from swarmscribe_leader.clock import utcnow
-from swarmscribe_leader.db.models import AuditEntry, JobAttempt
+from swarmscribe_leader.db.models import AuditEntry, Follower, Job, JobAttempt, JoinToken
+from swarmscribe_leader.ingest.scanner import scan_due_locations
+from swarmscribe_leader.jobs import store
 
 CAPABILITIES = {
     "device": "cpu",
@@ -264,3 +268,480 @@ async def test_no_read_exposes_secrets_or_credentials(admin_client, idp, factory
     for forbidden in ("token_hash", "credential_hash", "sdes", "link", "http://", "https://"):
         assert forbidden not in text.lower()
     assert str(credential) not in text
+
+
+async def post(client, idp, path, role, body=None):
+    return await client.post(path, headers=idp.bearer(role), json=body)
+
+
+def actor(idp, role):
+    return f"{role}@example.org ({idp.ENTRA_ISSUER} entra-{role})"
+
+
+# --- locations ------------------------------------------------------------------
+
+
+async def test_add_a_location_then_list_it(admin_client, idp, sessionmaker, tmp_path):
+    response = await post(
+        admin_client,
+        idp,
+        "/v1/admin/locations",
+        "admin",
+        {"name": "archive-1", "root": str(tmp_path), "input_prefix": "incoming/"},
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert (
+        body["name"],
+        body["backend"],
+        body["root"],
+        body["input_prefix"],
+        body["output_prefix"],
+        body["scan_interval_s"],
+        body["enabled"],
+    ) == ("archive-1", "local", str(tmp_path), "incoming/", "transcripts/", 900, True)
+    listed = await get(admin_client, idp, "/v1/admin/locations")
+    assert [row["name"] for row in listed] == ["archive-1"]
+    (entry,) = await audit_rows(sessionmaker, "location.add")
+    assert entry.actor == actor(idp, "admin")
+
+
+async def test_a_duplicate_location_name_is_409(admin_client, idp, tmp_path):
+    body = {"name": "archive-1", "root": str(tmp_path)}
+    assert (await post(admin_client, idp, "/v1/admin/locations", "admin", body)).status_code == 201
+    again = await post(admin_client, idp, "/v1/admin/locations", "admin", body)
+    assert (again.status_code, again.json()["code"]) == (409, "exists")
+
+
+@pytest.mark.parametrize(
+    "change, field",
+    [
+        ({"name": "a/b"}, "name"),
+        ({"name": "has space"}, "name"),
+        ({"root": "relative/folder"}, "root"),
+        ({"input_prefix": "../escape/"}, "input_prefix"),
+        ({"input_prefix": "/absolute/"}, "input_prefix"),
+        ({"output_prefix": "a\\b/"}, "output_prefix"),
+        ({"backend": "azure"}, "backend"),
+        ({"scan_interval_s": 5}, "scan_interval_s"),
+        ({"required_device": "tpu"}, "required_device"),
+    ],
+)
+async def test_invalid_locations_are_refused(admin_client, idp, tmp_path, change, field):
+    body = {"name": "archive-1", "root": str(tmp_path), **change}
+    response = await post(admin_client, idp, "/v1/admin/locations", "admin", body)
+    assert (response.status_code, response.json()["code"]) == (422, "invalid_request")
+    assert field in response.json()["message"]
+
+
+async def test_a_root_this_leader_cannot_see_is_refused(admin_client, idp, tmp_path):
+    body = {"name": "archive-1", "root": str(tmp_path / "not-mounted")}
+    response = await post(admin_client, idp, "/v1/admin/locations", "admin", body)
+    assert (response.status_code, response.json()["code"]) == (400, "root_unavailable")
+
+
+async def test_disable_stops_scanning_and_enable_resumes_it(
+    admin_app, admin_client, idp, factory, sessionmaker
+):
+    await factory.location(name="here")
+    disabled = await post(admin_client, idp, "/v1/admin/locations/here/disable", "admin")
+    assert disabled.json()["enabled"] is False
+
+    async def scanned() -> set[str]:
+        backends = admin_app.state.backend_factory
+        return set(await scan_due_locations(sessionmaker, backends, now=utcnow(), max_attempts=3))
+
+    assert "here" not in await scanned()
+    enabled = await post(admin_client, idp, "/v1/admin/locations/here/enable", "admin")
+    assert enabled.json()["enabled"] is True
+    assert "here" in await scanned()
+    actions = [e.action for e in await audit_rows(sessionmaker, "location.disable")]
+    assert actions == ["location.disable"]
+
+
+async def test_ingest_requests_a_scan_that_the_scanner_then_runs(
+    admin_app, admin_client, idp, factory, sessionmaker, tmp_path
+):
+    write(tmp_path, "consent.txt", b"**/*.mp3\n")
+    write(tmp_path, "talks/one.mp3")
+    now = utcnow()
+    await factory.location(name="here", last_scan_at=now)  # not due for 15 minutes
+    response = await post(admin_client, idp, "/v1/admin/locations/here/ingest", "operator")
+    assert (response.status_code, response.json()["name"]) == (202, "here")
+    results = await scan_due_locations(
+        sessionmaker, admin_app.state.backend_factory, now=now, max_attempts=3
+    )
+    assert results["here"].jobs_created == 1
+
+
+async def test_ingest_of_a_disabled_or_unknown_location(admin_client, idp, factory):
+    await factory.location(name="off", enabled=False)
+    off = await post(admin_client, idp, "/v1/admin/locations/off/ingest", "operator")
+    assert (off.status_code, off.json()["code"]) == (409, "disabled")
+    unknown = await post(admin_client, idp, "/v1/admin/locations/nowhere/ingest", "operator")
+    assert unknown.status_code == 404
+
+
+# --- jobs -----------------------------------------------------------------------
+
+
+async def test_retry_queues_a_new_job_for_a_failed_one(admin_client, idp, factory, sessionmaker):
+    failed = await factory.job(state="failed", failure_reason="engine_error: x", priority=4)
+    response = await post(admin_client, idp, f"/v1/admin/jobs/{failed.id}/retry", "operator")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["state"], body["attempts"], body["priority"]) == ("queued", 0, 4)
+    assert body["id"] != str(failed.id)
+    (entry,) = await audit_rows(sessionmaker, "job.retry")
+    assert (entry.subject_id, entry.detail) == (body["id"], {"retry_of": str(failed.id)})
+
+
+async def test_retrying_a_cancelled_job_is_claimable_and_not_cancelled(
+    admin_client, idp, factory, sessionmaker
+):
+    job = await factory.job()
+    cancelled = await post(admin_client, idp, f"/v1/admin/jobs/{job.id}/cancel", "operator")
+    assert cancelled.json()["cancelled_by"] == actor(idp, "operator")
+    response = await post(admin_client, idp, f"/v1/admin/jobs/{job.id}/retry", "operator")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["state"], body["cancelled_by"], body["failure_reason"]) == ("queued", None, None)
+    follower, _ = await factory.follower()
+    async with sessionmaker() as session:
+        claimed = await store.claim(session, follower, now=utcnow(), lease_seconds=120)
+        await session.commit()
+    assert str(claimed.id) == body["id"]
+    # the retry is now open, so a second retry of the old job is refused
+    again = await post(admin_client, idp, f"/v1/admin/jobs/{job.id}/retry", "operator")
+    assert (again.status_code, again.json()["code"]) == (409, "already_open")
+
+
+@pytest.mark.parametrize(
+    "recording_values, code",
+    [
+        ({"consent": "withdrawn"}, "not_consented"),
+        ({"consent": "not_consented"}, "not_consented"),
+        ({"missing": True}, "not_consented"),
+        ({"source_version": "99-9"}, "recording_changed"),
+    ],
+)
+async def test_retry_never_queues_a_recording_that_may_not_be_processed(
+    admin_client, idp, factory, sessionmaker, recording_values, code
+):
+    recording = await factory.recording(**recording_values)
+    failed = await factory.job(recording, state="failed", source_version="10-1")
+    response = await post(admin_client, idp, f"/v1/admin/jobs/{failed.id}/retry", "operator")
+    assert (response.status_code, response.json()["code"]) == (409, code)
+    async with sessionmaker() as session:
+        assert len((await session.scalars(select(Job))).all()) == 1
+
+
+async def test_retry_of_an_unfinished_job_is_409(admin_client, idp, factory):
+    queued = await factory.job()
+    response = await post(admin_client, idp, f"/v1/admin/jobs/{queued.id}/retry", "operator")
+    assert (response.status_code, response.json()["code"]) == (409, "not_retryable")
+
+
+async def test_two_retries_at_once_queue_the_job_once(admin_client, idp, factory, sessionmaker):
+    failed = await factory.job(state="failed")
+    headers = idp.bearer("operator")
+    responses = await asyncio.gather(
+        *(admin_client.post(f"/v1/admin/jobs/{failed.id}/retry", headers=headers) for _ in range(2))
+    )
+    assert sorted(r.status_code for r in responses) == [200, 409]
+    async with sessionmaker() as session:
+        queued = (await session.scalars(select(Job).where(Job.state == "queued"))).all()
+    assert len(queued) == 1
+
+
+async def test_cancel_tells_the_holder_and_is_not_undone_by_scanning(
+    admin_client, idp, factory, sessionmaker
+):
+    follower, credential = await factory.follower()
+    lease = uuid.uuid4()
+    job = await factory.job(state="leased", lease_id=lease, leased_by=follower.id, attempts=1)
+    response = await post(admin_client, idp, f"/v1/admin/jobs/{job.id}/cancel", "operator")
+    assert (response.status_code, response.json()["state"], response.json()["cancelled_by"]) == (
+        200,
+        "cancelled",
+        actor(idp, "operator"),
+    )
+    heartbeat = await admin_client.post(
+        f"/v1/jobs/{job.id}/heartbeat",
+        headers={"Authorization": f"Bearer {credential}"},
+        json={"lease_id": str(lease)},
+    )
+    assert heartbeat.json() == {"directive": "cancel"}
+    again = await post(admin_client, idp, f"/v1/admin/jobs/{job.id}/cancel", "operator")
+    assert again.status_code == 200
+
+
+@pytest.mark.parametrize("state", ["completed", "failed"])
+async def test_a_finished_job_cannot_be_cancelled_or_reprioritised(
+    admin_client, idp, factory, state
+):
+    job = await factory.job(state=state)
+    cancel = await post(admin_client, idp, f"/v1/admin/jobs/{job.id}/cancel", "operator")
+    priority = await post(
+        admin_client, idp, f"/v1/admin/jobs/{job.id}/priority", "operator", {"priority": 5}
+    )
+    assert [(r.status_code, r.json()["code"]) for r in (cancel, priority)] == [
+        (409, "not_open"),
+        (409, "not_open"),
+    ]
+
+
+async def test_priority_changes_the_claim_order(admin_client, idp, factory, sessionmaker):
+    location = await factory.location()
+    await factory.job(await factory.recording(location, key="talks/a.mp3"))
+    later = await factory.job(await factory.recording(location, key="talks/b.mp3"))
+    response = await post(
+        admin_client, idp, f"/v1/admin/jobs/{later.id}/priority", "operator", {"priority": 10}
+    )
+    assert response.json()["priority"] == 10
+    follower, _ = await factory.follower()
+    async with sessionmaker() as session:
+        claimed = await store.claim(session, follower, now=utcnow(), lease_seconds=120)
+        await session.commit()
+    assert claimed.id == later.id
+    (entry,) = await audit_rows(sessionmaker, "job.priority")
+    assert entry.detail == {"from": 0, "to": 10}
+
+
+@pytest.mark.parametrize("priority", [1001, -1001, "high"])
+async def test_priority_is_bounded(admin_client, idp, factory, priority):
+    job = await factory.job()
+    response = await post(
+        admin_client, idp, f"/v1/admin/jobs/{job.id}/priority", "operator", {"priority": priority}
+    )
+    assert response.status_code == 422
+
+
+async def test_an_unknown_job_is_404(admin_client, idp):
+    response = await post(admin_client, idp, f"/v1/admin/jobs/{uuid.uuid4()}/cancel", "operator")
+    assert response.status_code == 404
+
+
+# --- followers ------------------------------------------------------------------
+
+
+async def test_drain_lets_the_follower_finish_and_take_no_more(
+    admin_client, idp, factory, sessionmaker
+):
+    follower, credential = await factory.follower()
+    await factory.job()
+    response = await post(admin_client, idp, f"/v1/admin/followers/{follower.id}/drain", "operator")
+    assert response.json()["state"] == "draining"
+    claim = await admin_client.post(
+        "/v1/jobs/claim", headers={"Authorization": f"Bearer {credential}"}
+    )
+    assert claim.status_code == 204
+    (entry,) = await audit_rows(sessionmaker, "follower.drain")
+    assert entry.actor == actor(idp, "operator")
+
+
+async def test_revoke_releases_leases_at_once_and_shuts_the_follower_out(
+    admin_app, admin_client, idp, factory, sessionmaker, tmp_path
+):
+    follower, credential = await factory.follower()
+    location = await factory.location()
+    lease = uuid.uuid4()
+    job = await factory.job(
+        await factory.recording(location),
+        state="leased",
+        lease_id=lease,
+        leased_by=follower.id,
+        attempts=1,
+    )
+    upload = admin_app.state.backend_factory(location).upload_link(
+        "transcripts/talks/one.mp3.txt",
+        timedelta(minutes=5),
+        job_id=str(job.id),
+        lease_id=str(lease),
+    )
+    response = await post(admin_client, idp, f"/v1/admin/followers/{follower.id}/revoke", "admin")
+    assert response.json() == {"id": str(follower.id), "state": "revoked", "released": 1}
+    async with sessionmaker() as session:
+        stored = await session.get(Job, job.id)
+    assert (stored.state, stored.lease_id, stored.attempts) == ("queued", None, 0)
+    late = await admin_client.put(upload.url, content=b"late output")
+    assert (late.status_code, late.json()["code"]) == (409, "stale_lease")
+    assert not (tmp_path / "transcripts" / "talks" / "one.mp3.txt").exists()
+    claim = await admin_client.post(
+        "/v1/jobs/claim", headers={"Authorization": f"Bearer {credential}"}
+    )
+    assert claim.status_code == 403
+    (entry,) = await audit_rows(sessionmaker, "follower.revoke")
+    assert entry.detail == {"released": 1}
+    assert entry.actor == actor(idp, "admin")
+
+
+async def test_a_revoked_follower_cannot_be_drained(admin_client, idp, factory, sessionmaker):
+    follower, _ = await factory.follower(state="revoked")
+    response = await post(admin_client, idp, f"/v1/admin/followers/{follower.id}/drain", "operator")
+    assert (response.status_code, response.json()["code"]) == (409, "revoked")
+    assert await audit_rows(sessionmaker, "follower.drain") == []
+
+
+async def test_a_drain_racing_a_revoke_never_undoes_the_revoke(
+    admin_client, idp, factory, sessionmaker
+):
+    follower, _ = await factory.follower()
+    await factory.job(state="leased", lease_id=uuid.uuid4(), leased_by=follower.id, attempts=1)
+    drain, revoke = await asyncio.gather(
+        post(admin_client, idp, f"/v1/admin/followers/{follower.id}/drain", "operator"),
+        post(admin_client, idp, f"/v1/admin/followers/{follower.id}/revoke", "admin"),
+    )
+    assert revoke.status_code == 200
+    assert drain.status_code in (200, 409)
+    async with sessionmaker() as session:
+        assert (await session.get(Follower, follower.id)).state == "revoked"
+
+
+async def test_an_unknown_follower_or_token_is_404(admin_client, idp):
+    for path in (
+        f"/v1/admin/followers/{uuid.uuid4()}/drain",
+        f"/v1/admin/followers/{uuid.uuid4()}/revoke",
+        f"/v1/admin/tokens/{uuid.uuid4()}/revoke",
+    ):
+        response = await post(admin_client, idp, path, "admin")
+        assert response.status_code == 404, path
+
+
+# --- join tokens ----------------------------------------------------------------
+
+
+async def test_a_created_token_registers_a_follower_once_and_is_never_logged(
+    admin_client, idp, sessionmaker, caplog
+):
+    with caplog.at_level("DEBUG"):
+        response = await post(
+            admin_client,
+            idp,
+            "/v1/admin/tokens",
+            "admin",
+            {"pool": "gpu", "expires_in_seconds": 3600, "max_uses": 1},
+        )
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["token"] not in caplog.text
+    register = {"join_token": created["token"], "protocol_version": 1, "capabilities": CAPABILITIES}
+    first = await admin_client.post("/v1/followers/register", json=register)
+    second = await admin_client.post("/v1/followers/register", json=register)
+    assert (first.status_code, second.status_code) == (200, 401)
+    async with sessionmaker() as session:
+        row = await session.get(JoinToken, uuid.UUID(created["id"]))
+    assert (row.pool, row.created_by) == ("gpu", actor(idp, "admin"))
+    (entry,) = await audit_rows(sessionmaker, "token.create")
+    assert created["token"] not in f"{entry.actor} {entry.detail}"
+    assert entry.actor == actor(idp, "admin")
+    listed = await get(admin_client, idp, "/v1/admin/tokens", role="admin")
+    assert created["token"] not in str(listed)
+
+
+async def test_a_revoked_token_registers_nothing(admin_client, idp, sessionmaker):
+    token_id, plaintext = await join_token(sessionmaker, max_uses=5)
+    response = await post(admin_client, idp, f"/v1/admin/tokens/{token_id}/revoke", "admin")
+    assert response.json()["revoked"] is True
+    register = await admin_client.post(
+        "/v1/followers/register",
+        json={"join_token": plaintext, "protocol_version": 1, "capabilities": CAPABILITIES},
+    )
+    assert register.status_code == 401
+    (entry,) = await audit_rows(sessionmaker, "token.revoke")
+    assert entry.actor == actor(idp, "admin")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"expires_in_seconds": 59},
+        {"expires_in_seconds": 90 * 86400 + 1},
+        {"max_uses": 0},
+        {"pool": "bad pool"},
+    ],
+)
+async def test_invalid_tokens_are_refused(admin_client, idp, body):
+    response = await post(admin_client, idp, "/v1/admin/tokens", "admin", body)
+    assert response.status_code == 422
+
+
+# --- every route's role boundary ------------------------------------------------
+
+ROUTES = [
+    ("GET", "/v1/admin/whoami", None, "viewer"),
+    ("GET", "/v1/admin/status", None, "viewer"),
+    ("GET", "/v1/admin/locations", None, "viewer"),
+    ("GET", "/v1/admin/jobs", None, "viewer"),
+    ("GET", "/v1/admin/followers", None, "viewer"),
+    ("GET", "/v1/admin/consent/report", None, "viewer"),
+    ("POST", "/v1/admin/locations/{name}/ingest", None, "operator"),
+    ("POST", "/v1/admin/jobs/{failed_job}/retry", None, "operator"),
+    ("POST", "/v1/admin/jobs/{open_job}/cancel", None, "operator"),
+    ("POST", "/v1/admin/jobs/{open_job}/priority", {"priority": 5}, "operator"),
+    ("POST", "/v1/admin/followers/{follower}/drain", None, "operator"),
+    ("POST", "/v1/admin/locations", {"name": "added", "root": "{root}"}, "admin"),
+    ("POST", "/v1/admin/locations/{name}/disable", None, "admin"),
+    ("POST", "/v1/admin/locations/{name}/enable", None, "admin"),
+    ("GET", "/v1/admin/tokens", None, "admin"),
+    ("POST", "/v1/admin/tokens", {"pool": "default"}, "admin"),
+    ("POST", "/v1/admin/tokens/{token}/revoke", None, "admin"),
+    ("POST", "/v1/admin/followers/{follower}/revoke", None, "admin"),
+]
+BELOW = {"viewer": None, "operator": "viewer", "admin": "operator"}
+
+
+@pytest.fixture
+async def world(factory, sessionmaker, tmp_path):
+    location = await factory.location(name="here")
+    failed = await factory.job(await factory.recording(location, key="talks/a.mp3"), state="failed")
+    open_job = await factory.job(await factory.recording(location, key="talks/b.mp3"))
+    follower, _ = await factory.follower()
+    token_id, _ = await join_token(sessionmaker)
+    return {
+        "name": "here",
+        "failed_job": failed.id,
+        "open_job": open_job.id,
+        "follower": follower.id,
+        "token": token_id,
+        "root": str(tmp_path),
+    }
+
+
+@pytest.mark.parametrize(
+    "method, path, body, role", ROUTES, ids=[f"{m} {p}" for m, p, _, _ in ROUTES]
+)
+async def test_each_admin_route_is_refused_for_the_role_below_it(
+    admin_client, idp, world, sessionmaker, method, path, body, role
+):
+    path = path.format(**world)
+    if body is not None:
+        body = {k: v.format(**world) if isinstance(v, str) else v for k, v in body.items()}
+    refused = await admin_client.request(method, path, headers=idp.bearer(BELOW[role]), json=body)
+    assert (refused.status_code, refused.json()["code"]) == (403, "forbidden")
+    async with sessionmaker() as session:
+        changes = (
+            await session.scalars(
+                select(AuditEntry).where(
+                    AuditEntry.action != "admin.refused", AuditEntry.actor != "test"
+                )
+            )
+        ).all()
+    assert changes == []  # the refused call changed and recorded nothing else
+    allowed = await admin_client.request(method, path, headers=idp.bearer(role), json=body)
+    assert allowed.status_code < 400, allowed.text
+
+
+async def test_every_admin_route_is_in_the_role_table(admin_app):
+    def shape(path: str) -> str:
+        return re.sub(r"\{[^}]+\}", "{}", path)
+
+    # The OpenAPI document lists every served route, however the router nests them.
+    served = {
+        (method.upper(), shape(path))
+        for path, operations in admin_app.openapi()["paths"].items()
+        if path.startswith("/v1/admin/")
+        for method in operations
+    }
+    table = {(method, shape(path)) for method, path, _, _ in ROUTES}
+    assert served - {("GET", "/v1/admin/login-config")} == table

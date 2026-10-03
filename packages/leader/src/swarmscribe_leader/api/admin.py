@@ -5,23 +5,36 @@ function, writes an audit entry and commits. Changes are audited by the service 
 with the change; reads are audited here.
 """
 
+import uuid
+from datetime import timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import audit, reports
+from ..auth import followers
+from ..auth.followers import create_join_token
 from ..auth.oidc import login_providers
+from ..clock import utcnow
+from ..ingest import locations
+from ..jobs import admin as job_admin
 from .admin_auth import Admin, require
 from .admin_models import (
     ConsentReport,
     FollowerOut,
+    FollowerRevoked,
     FollowerState,
     JobOut,
     JobState,
+    LocationIn,
     LocationOut,
     LoginConfig,
+    PriorityIn,
+    ScanRequested,
     Status,
+    TokenCreated,
+    TokenIn,
     TokenOut,
     WhoAmI,
 )
@@ -114,3 +127,115 @@ async def consent_report(
     report = await reports.consent_report(session, location=location, limit=limit)
     await _viewed(session, admin, "consent.view", {"location": location})
     return ConsentReport.model_validate(report)
+
+
+@router.post("/locations", response_model=LocationOut, status_code=201)
+async def add_location(body: LocationIn, admin: Administrator, session: Session) -> LocationOut:
+    location = await locations.add_location(session, **body.model_dump(), actor=admin.actor)
+    view = reports.location_view(location)
+    await session.commit()
+    return LocationOut.model_validate(view)
+
+
+async def _set_enabled(
+    session: AsyncSession, name: str, enabled: bool, admin: Admin
+) -> LocationOut:
+    location = await locations.set_enabled(session, name, enabled, actor=admin.actor)
+    view = reports.location_view(location)
+    await session.commit()
+    return LocationOut.model_validate(view)
+
+
+@router.post("/locations/{name}/disable", response_model=LocationOut)
+async def disable_location(name: str, admin: Administrator, session: Session) -> LocationOut:
+    return await _set_enabled(session, name, False, admin)
+
+
+@router.post("/locations/{name}/enable", response_model=LocationOut)
+async def enable_location(name: str, admin: Administrator, session: Session) -> LocationOut:
+    return await _set_enabled(session, name, True, admin)
+
+
+@router.post("/locations/{name}/ingest", response_model=ScanRequested, status_code=202)
+async def ingest_location(name: str, admin: Operator, session: Session) -> ScanRequested:
+    location = await locations.request_scan(session, name, now=utcnow(), actor=admin.actor)
+    answer = ScanRequested(name=location.name, requested_at=location.scan_requested_at)
+    await session.commit()
+    return answer
+
+
+@router.post("/jobs/{job_id}/retry", response_model=JobOut)
+async def retry_job(
+    job_id: uuid.UUID, request: Request, admin: Operator, session: Session
+) -> JobOut:
+    job = await job_admin.retry_job(
+        session, job_id, actor=admin.actor, max_attempts=settings_of(request).max_attempts
+    )
+    view = await reports.describe_job(session, job)
+    await session.commit()
+    return JobOut.model_validate(view)
+
+
+@router.post("/jobs/{job_id}/cancel", response_model=JobOut)
+async def cancel_job(job_id: uuid.UUID, admin: Operator, session: Session) -> JobOut:
+    job = await job_admin.cancel_job(session, job_id, now=utcnow(), actor=admin.actor)
+    view = await reports.describe_job(session, job)
+    await session.commit()
+    return JobOut.model_validate(view)
+
+
+@router.post("/jobs/{job_id}/priority", response_model=JobOut)
+async def set_priority(
+    job_id: uuid.UUID, body: PriorityIn, admin: Operator, session: Session
+) -> JobOut:
+    job = await job_admin.set_priority(session, job_id, body.priority, actor=admin.actor)
+    view = await reports.describe_job(session, job)
+    await session.commit()
+    return JobOut.model_validate(view)
+
+
+@router.post("/followers/{follower_id}/drain", response_model=FollowerOut)
+async def drain_follower(follower_id: uuid.UUID, admin: Operator, session: Session) -> FollowerOut:
+    follower = await followers.drain(session, follower_id, actor=admin.actor)
+    view = await reports.describe_follower(session, follower)
+    await session.commit()
+    return FollowerOut.model_validate(view)
+
+
+@router.post("/followers/{follower_id}/revoke", response_model=FollowerRevoked)
+async def revoke_follower(
+    follower_id: uuid.UUID, admin: Administrator, session: Session
+) -> FollowerRevoked:
+    follower, released = await followers.revoke_follower(
+        session, follower_id, now=utcnow(), actor=admin.actor
+    )
+    await session.commit()
+    return FollowerRevoked(id=str(follower.id), state=follower.state, released=released)
+
+
+@router.post("/tokens", response_model=TokenCreated, status_code=201)
+async def create_token(body: TokenIn, admin: Administrator, session: Session) -> TokenCreated:
+    """The only response that carries a join token. Nothing logs response bodies."""
+    token, plaintext = await create_join_token(
+        session,
+        pool=body.pool,
+        expires_at=utcnow() + timedelta(seconds=body.expires_in_seconds),
+        max_uses=body.max_uses,
+        created_by=admin.actor,
+    )
+    await session.commit()
+    return TokenCreated(
+        id=str(token.id),
+        token=plaintext,
+        pool=token.pool,
+        expires_at=token.expires_at,
+        max_uses=token.max_uses,
+    )
+
+
+@router.post("/tokens/{token_id}/revoke", response_model=TokenOut)
+async def revoke_token(token_id: uuid.UUID, admin: Administrator, session: Session) -> TokenOut:
+    token = await followers.revoke_token(session, token_id, actor=admin.actor)
+    view = reports.token_view(token)
+    await session.commit()
+    return TokenOut.model_validate(view)

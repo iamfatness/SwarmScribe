@@ -1,14 +1,22 @@
 import asyncio
+import json
 import os
+import time
 import uuid
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
+import httpx
+import jwt as pyjwt
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from jwt.algorithms import RSAAlgorithm
 from sqlalchemy import text
 from swarmscribe_leader.auth.secrets import hash_secret, new_secret
 from swarmscribe_leader.clock import utcnow
+from swarmscribe_leader.config import ROLES, Settings
 from swarmscribe_leader.db.migrate import upgrade
 from swarmscribe_leader.db.models import Base, Follower, Job, Recording, StorageLocation
 from swarmscribe_leader.db.session import make_engine, make_sessionmaker
@@ -151,3 +159,178 @@ class Factory:
 @pytest.fixture
 def factory(sessionmaker, tmp_path):
     return Factory(sessionmaker, tmp_path)
+
+
+@pytest.fixture(scope="session")
+def signing_keys():
+    return {
+        name: rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        for name in ("entra", "google", "rogue", "service")
+    }
+
+
+class FakeIdentityProviders:
+    """Entra ID and Google as the leader sees them: discovery documents and JWKS served
+    through an injected fetcher, and ID tokens signed with locally generated keys."""
+
+    ENTRA_TENANT = "0f0e0d0c-0b0a-4908-8706-050403020100"
+    ENTRA_CLIENT = "6d3a6b52-1c2e-4a8f-9d61-2f6a4c0b7e11"
+    GOOGLE_CLIENT = "google-client-1.apps.googleusercontent.com"
+    ENTRA_ISSUER = f"https://login.microsoftonline.com/{ENTRA_TENANT}/v2.0"
+    GOOGLE_ISSUER = "https://accounts.google.com"
+    ENTRA_GROUPS = {
+        "viewer": "a1a1a1a1-0000-4000-8000-000000000001",
+        "operator": "a1a1a1a1-0000-4000-8000-000000000002",
+        "admin": "a1a1a1a1-0000-4000-8000-000000000003",
+    }
+    GOOGLE_GROUPS = {
+        "viewer": "viewers@example.org",
+        "operator": "operators@example.org",
+        "admin": "admins@example.org",
+    }
+
+    def __init__(self, keys):
+        self.keys = keys
+        self.signing = {"entra": "entra", "google": "google"}
+        self.kids = {"entra": "entra-key-1", "google": "google-key-1"}
+        self.published = {
+            "entra": [("entra", "entra-key-1")],
+            "google": [("google", "google-key-1")],
+        }
+        self.down = False
+        self.fetched: list[str] = []
+
+    def _jwks(self, provider: str) -> dict:
+        keys = []
+        for key_name, kid in self.published[provider]:
+            jwk = json.loads(RSAAlgorithm.to_jwk(self.keys[key_name].public_key()))
+            jwk.update(kid=kid, use="sig", alg="RS256")
+            keys.append(jwk)
+        return {"keys": keys}
+
+    def _documents(self) -> dict[str, dict]:
+        entra_jwks = f"https://login.microsoftonline.com/{self.ENTRA_TENANT}/discovery/v2.0/keys"
+        google_jwks = "https://www.googleapis.com/oauth2/v3/certs"
+        return {
+            f"{self.ENTRA_ISSUER}/.well-known/openid-configuration": {
+                "issuer": self.ENTRA_ISSUER,
+                "jwks_uri": entra_jwks,
+            },
+            entra_jwks: self._jwks("entra"),
+            "https://accounts.google.com/.well-known/openid-configuration": {
+                "issuer": self.GOOGLE_ISSUER,
+                "jwks_uri": google_jwks,
+            },
+            google_jwks: self._jwks("google"),
+        }
+
+    async def fetch(self, url: str) -> dict:
+        self.fetched.append(url)
+        if self.down:
+            raise httpx.ConnectError("identity provider unreachable")
+        return self._documents()[url]
+
+    def rotate(self, provider: str, key_name: str, kid: str) -> None:
+        """Publish another signing key and sign new tokens with it."""
+        self.published[provider].append((key_name, kid))
+        self.signing[provider] = key_name
+        self.kids[provider] = kid
+
+    def _defaults(self, provider: str) -> dict:
+        if provider == "entra":
+            return {
+                "iss": self.ENTRA_ISSUER,
+                "aud": self.ENTRA_CLIENT,
+                "tid": self.ENTRA_TENANT,
+                "sub": "entra-person-1",
+                "oid": "00000000-0000-4000-8000-0000000000a1",
+                "email": "person@example.org",
+                "preferred_username": "person@example.org",
+                "groups": [],
+            }
+        return {
+            "iss": self.GOOGLE_ISSUER,
+            "aud": self.GOOGLE_CLIENT,
+            "sub": "google-person-1",
+            "email": "person@example.org",
+            "email_verified": True,
+        }
+
+    def token(self, provider, *, signed_with=None, kid=None, lifetime=3600, **claims) -> str:
+        now = int(time.time())
+        payload = {"iat": now, "nbf": now, "exp": now + lifetime}
+        payload.update(self._defaults(provider))
+        payload.update(claims)
+        payload = {name: value for name, value in payload.items() if value is not None}
+        key = self.keys[signed_with or self.signing[provider]]
+        return pyjwt.encode(
+            payload, key, algorithm="RS256", headers={"kid": kid or self.kids[provider]}
+        )
+
+    def entra(self, **claims) -> str:
+        return self.token("entra", **claims)
+
+    def google(self, **claims) -> str:
+        return self.token("google", **claims)
+
+    def bearer(self, role: str | None, *, provider: str = "entra") -> dict[str, str]:
+        """Headers for a person holding `role` (None: no role at all)."""
+        name = role or "nobody"
+        email = f"{name}@example.org"
+        if provider == "entra":
+            groups = [self.ENTRA_GROUPS[role]] if role else []
+            token = self.entra(groups=groups, sub=f"entra-{name}", email=email)
+        else:
+            token = self.google(email=email, sub=f"google-{name}")
+        return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def idp(signing_keys):
+    return FakeIdentityProviders(signing_keys)
+
+
+@pytest.fixture
+def sign_in_settings(signing_keys):
+    """Settings with both providers and every role mapping configured. Database-free by
+    default; pass database_url=… for tests that need one."""
+    private_key = (
+        signing_keys["service"]
+        .private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        .decode()
+    )
+    service_account = json.dumps(
+        {
+            "type": "service_account",
+            "client_email": "group-reader@project-1.iam.gserviceaccount.com",
+            "private_key": private_key,
+            "private_key_id": "service-key-1",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    )
+    fake = FakeIdentityProviders
+
+    def make(**overrides) -> Settings:
+        values = {
+            "database_url": "postgresql://u:p@127.0.0.1:1/none",
+            "public_url": "http://leader",
+            "link_key": "k" * 32,
+            "entra_tenant_id": fake.ENTRA_TENANT,
+            "entra_client_id": fake.ENTRA_CLIENT,
+            "entra_client_secret": "entra-app-secret-value",
+            "google_client_id": fake.GOOGLE_CLIENT,
+            "google_client_secret": "google-device-secret-value",
+            "google_service_account": service_account,
+        }
+        for role in ROLES:
+            values[f"role_{role}_entra_groups"] = (fake.ENTRA_GROUPS[role],)
+            values[f"role_{role}_google_groups"] = (fake.GOOGLE_GROUPS[role],)
+            values[f"role_{role}_emails"] = (f"{role}@example.org",)
+        values.update(overrides)
+        return Settings(**values)
+
+    return make

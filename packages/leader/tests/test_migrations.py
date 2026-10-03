@@ -11,7 +11,7 @@ from alembic.migration import MigrationContext
 from sqlalchemy import delete, select, text
 from sqlalchemy.exc import IntegrityError
 from swarmscribe_leader.db.migrate import current_revision, head_revision
-from swarmscribe_leader.db.models import Base, SettingsProfile
+from swarmscribe_leader.db.models import Base, SettingsProfile, StorageLocation
 
 
 async def test_migrations_produce_exactly_the_models(engine):
@@ -23,8 +23,8 @@ async def test_migrations_produce_exactly_the_models(engine):
 
 
 async def test_database_is_at_the_head_revision(engine):
-    assert head_revision() == "0003"
-    assert await current_revision(engine) == "0003"
+    assert head_revision() == "0004"
+    assert await current_revision(engine) == "0004"
 
 
 async def test_the_claim_index_serves_priority_descending(engine):
@@ -122,3 +122,21 @@ async def test_default_settings_profiles_are_seeded(sessionmaker):
         "cuda": ("cuda", "large-v3", "float16", [0.0, 0.2, 0.4]),
         "cpu": ("cpu", "distil-large-v3", "int8", [0.0, 0.2, 0.4]),
     }
+
+
+async def test_locations_created_without_channel_settings_are_mono(sessionmaker):
+    # As rows created before migration 0004, or seeded by SQL that predates it, are.
+    async with sessionmaker() as session:
+        await session.execute(
+            text(
+                "insert into storage_locations (id, name, backend, config, input_prefix,"
+                " output_prefix, pool, required_device, scan_interval_s, enabled,"
+                " vocabulary_version) values (gen_random_uuid(), 'older', 'local',"
+                " '{}'::jsonb, '', 'transcripts/', 'default', 'any', 900, true, 0)"
+            )
+        )
+        await session.commit()
+        location = await session.scalar(
+            select(StorageLocation).where(StorageLocation.name == "older")
+        )
+    assert (location.channel_mode, location.channel_labels) == ("mono", ["Left", "Right"])

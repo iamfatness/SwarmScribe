@@ -836,3 +836,50 @@ async def test_a_transcript_with_a_zero_segment_document_is_a_normal_result(
     async with sessionmaker() as session:
         result = (await session.scalars(select(JobResult))).one()
     assert result.no_speech is False
+
+
+async def test_a_claim_carries_its_locations_channel_settings(
+    client, sessionmaker, factory, tmp_path
+):
+    location = await queue_one(sessionmaker, factory, tmp_path)
+    async with sessionmaker() as session:
+        row = await session.get(StorageLocation, location.id)
+        row.channel_mode = "stereo_split"
+        row.channel_labels = ["Agent", "Customer"]
+        await session.commit()
+    headers = await register(client, sessionmaker)
+    claimed = await claim(client, headers)
+    assert (claimed.settings.channel_mode, claimed.settings.channel_labels) == (
+        "stereo_split",
+        ("Agent", "Customer"),
+    )
+
+
+async def test_a_claim_from_a_location_left_at_the_defaults_is_mono(
+    client, sessionmaker, factory, tmp_path
+):
+    await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(client, sessionmaker)
+    claimed = await claim(client, headers)
+    assert (claimed.settings.channel_mode, claimed.settings.channel_labels) == (
+        "mono",
+        ("Left", "Right"),
+    )
+
+
+async def test_the_channel_settings_come_from_the_recordings_location_not_the_output(
+    client, sessionmaker, factory, tmp_path
+):
+    location = await queue_one(sessionmaker, factory, tmp_path)
+    output = await factory.location(channel_mode="auto", channel_labels=["Host", "Guest"])
+    async with sessionmaker() as session:
+        row = await session.get(StorageLocation, location.id)
+        row.output_location_id = output.id
+        row.channel_mode = "stereo_split"
+        await session.commit()
+    headers = await register(client, sessionmaker)
+    claimed = await claim(client, headers)
+    assert (claimed.settings.channel_mode, claimed.settings.channel_labels) == (
+        "stereo_split",
+        ("Left", "Right"),
+    )

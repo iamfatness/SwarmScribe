@@ -12,9 +12,11 @@ from sqlalchemy import (
     UniqueConstraint,
     false,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from swarmscribe_protocol import DEFAULT_CHANNEL_LABELS
 
 
 class Base(DeclarativeBase):
@@ -52,6 +54,12 @@ class StorageLocation(_Row, Base):
     last_scan_error: Mapped[str | None] = mapped_column(Text)
     # Set by `ingest`; the scanner clears it once a scan that began after it has finished.
     scan_requested_at: Mapped[datetime | None]
+    # How stereo recordings here are transcribed: protocol JobSettings.channel_mode/_labels.
+    channel_mode: Mapped[str] = mapped_column(String(16), default="mono", server_default="mono")
+    channel_labels: Mapped[list[Any]] = mapped_column(
+        default=lambda: list(DEFAULT_CHANNEL_LABELS),
+        server_default=text("""'["Left", "Right"]'::jsonb"""),
+    )
 
 
 class Recording(_Row, Base):

@@ -89,6 +89,9 @@ async def build_claim(
             model=profile.model,
             compute_type=profile.compute_type,
             temperatures=tuple(profile.temperatures),
+            # The recording's own location decides how it is transcribed.
+            channel_mode=source.channel_mode,
+            channel_labels=tuple(source.channel_labels),
         ),
         vocabulary=Vocabulary(version=0),
         source_version=job.source_version,

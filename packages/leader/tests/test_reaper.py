@@ -2,8 +2,9 @@ import asyncio
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
-from swarmscribe_leader.background import run_exclusive, run_periodically
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
+from swarmscribe_leader.background import LOCK_KEYS, run_exclusive, run_periodically
 from swarmscribe_leader.clock import utcnow
 from swarmscribe_leader.db.models import Follower, Job, JobAttempt
 from swarmscribe_leader.jobs import store
@@ -214,6 +215,102 @@ async def test_only_one_process_runs_exclusive_work_at_a_time(engine):
     assert await first is True
     assert await run_exclusive(engine, "reaper", quick) is True
     assert runs == ["slow", "quick"]
+
+
+async def lock_holder_state(engine, name):
+    async with engine.connect() as conn:
+        return await conn.scalar(
+            text(
+                "select a.state from pg_locks l join pg_stat_activity a using (pid)"
+                " where l.locktype = 'advisory' and l.granted and l.objid::bigint = :key"
+            ),
+            {"key": LOCK_KEYS[name]},
+        )
+
+
+async def acquires_soon(engine, name) -> bool:
+    """Another process (a separate engine: session advisory locks are re-entrant, so a
+    pooled connection that leaked the lock would 'acquire' it again) gets the lock. The lock
+    of a dropped connection is freed when the server notices; allow a moment."""
+
+    async def nothing():
+        return None
+
+    other = create_async_engine(engine.url)
+    try:
+        for _ in range(50):
+            if await run_exclusive(other, name, nothing):
+                return True
+            await asyncio.sleep(0.1)
+        return False
+    finally:
+        await other.dispose()
+
+
+async def test_the_lock_connection_is_not_idle_in_a_transaction_while_work_runs(engine):
+    seen = []
+
+    async def work():
+        seen.append(await lock_holder_state(engine, "reaper"))
+
+    assert await run_exclusive(engine, "reaper", work) is True
+    assert seen == ["idle"]
+
+
+async def test_cancelling_exclusive_work_does_not_leak_the_lock(engine):
+    started = asyncio.Event()
+
+    async def forever():
+        started.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(run_exclusive(engine, "scanner", forever))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await acquires_soon(engine, "scanner")
+
+
+async def test_an_unlock_that_does_not_complete_drops_the_connection_and_its_lock(engine):
+    started = asyncio.Event()
+
+    async def cancelled_again_on_the_way_out():
+        try:
+            started.set()
+            await asyncio.Event().wait()
+        finally:
+            # A second cancellation arrives while run_exclusive is unlocking.
+            asyncio.current_task().cancel()
+
+    task = asyncio.create_task(run_exclusive(engine, "scanner", cancelled_again_on_the_way_out))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await acquires_soon(engine, "scanner")
+    assert await lock_holder_state(engine, "scanner") is None
+
+
+async def test_a_failed_unlock_drops_the_connection_instead_of_pooling_the_lock(
+    engine, monkeypatch
+):
+    real_execute = AsyncConnection.execute
+
+    async def unlock_fails(self, statement, *args, **kwargs):
+        if "pg_advisory_unlock" in str(statement):
+            raise RuntimeError("unlock interrupted")
+        return await real_execute(self, statement, *args, **kwargs)
+
+    async def nothing():
+        return None
+
+    monkeypatch.setattr(AsyncConnection, "execute", unlock_fails)
+    with pytest.raises(RuntimeError):
+        await run_exclusive(engine, "reaper", nothing)
+    monkeypatch.undo()
+    assert await acquires_soon(engine, "reaper")
+    assert await lock_holder_state(engine, "reaper") is None
 
 
 async def test_run_periodically_survives_errors_and_stops_when_told():

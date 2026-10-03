@@ -4,11 +4,20 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import select, text
 from swarmscribe_leader.auth.consoles import (
+    MAX_EMAIL_CHARS,
+    MAX_ISSUER_CHARS,
+    MAX_SUBJECT_CHARS,
+    POLLER_ACTOR,
+    DelegatedActor,
+    InvalidActor,
+    InvalidActorRole,
     InvalidConsoleCredential,
     InvalidConsoleName,
     RevokedConsoleCredential,
     authenticate_console,
     create_console,
+    effective_role,
+    parse_delegation,
     revoke_console,
 )
 from swarmscribe_leader.auth.secrets import hash_secret
@@ -280,3 +289,144 @@ async def test_an_insert_that_gets_past_the_check_becomes_a_conflict(sessionmake
 async def test_revoking_a_malformed_name_is_not_found(sessionmaker):
     with pytest.raises(NotFound):
         await revoke(sessionmaker, "fle et" + chr(10))
+
+
+# --- delegation headers ---------------------------------------------------------------
+
+ISSUER = "https://login.microsoftonline.com/0f0e0d0c-0b0a-4908-8706-050403020100/v2.0"
+PERSON = f"{ISSUER} entra-person-1 person@example.org"
+
+
+def delegation(actor=PERSON, role="operator"):
+    return parse_delegation([] if actor is None else [actor], [] if role is None else [role])
+
+
+def test_a_person_is_parsed_from_issuer_subject_and_email():
+    actor, role = delegation()
+    assert actor == DelegatedActor(
+        issuer=ISSUER, subject="entra-person-1", email="person@example.org"
+    )
+    assert role == "operator"
+    assert actor.name == f"person@example.org ({ISSUER} entra-person-1)"
+    assert actor.is_poller is False
+
+
+def test_the_email_is_lowercased_like_a_signed_in_persons():
+    actor, _ = delegation(f"{ISSUER} entra-person-1 Person@Example.ORG")
+    assert actor.email == "person@example.org"
+
+
+def test_a_person_without_an_email_is_sent_as_a_dash_and_named_unknown():
+    actor, _ = delegation(f"{ISSUER} entra-person-1 -")
+    assert actor.email is None
+    assert actor.name == f"unknown ({ISSUER} entra-person-1)"
+
+
+def test_the_poller_is_one_word_and_a_viewer():
+    actor, role = delegation(POLLER_ACTOR, "viewer")
+    assert (actor.is_poller, actor.name, actor.issuer, role) == (
+        True,
+        "system:poller",
+        None,
+        "viewer",
+    )
+
+
+@pytest.mark.parametrize("role", ["operator", "admin"])
+def test_the_poller_may_not_assert_more_than_viewer(role):
+    with pytest.raises(InvalidActorRole):
+        delegation(POLLER_ACTOR, role)
+
+
+def test_parts_at_their_length_limits_are_accepted():
+    issuer = "https://" + "a" * (MAX_ISSUER_CHARS - len("https://"))
+    subject = "s" * MAX_SUBJECT_CHARS
+    email = "a" * (MAX_EMAIL_CHARS - len("@example.org")) + "@example.org"
+    actor, _ = delegation(f"{issuer} {subject} {email}")
+    assert (len(actor.issuer), len(actor.subject), len(actor.email)) == (255, 255, 254)
+
+
+BAD_ACTORS = [
+    pytest.param(None, id="missing"),
+    pytest.param("", id="empty"),
+    pytest.param(ISSUER, id="one-part"),
+    pytest.param(f"{ISSUER} entra-person-1", id="two-parts"),
+    pytest.param(f"{PERSON} extra", id="four-parts"),
+    pytest.param(f"{ISSUER}  entra-person-1 person@example.org", id="double-space"),
+    pytest.param(f" {PERSON}", id="leading-space"),
+    pytest.param(f"{PERSON} ", id="trailing-space"),
+    pytest.param(f"{ISSUER}\tentra-person-1\tperson@example.org", id="tabs"),
+    pytest.param(f"{PERSON}\r\nX-Injected: 1", id="crlf"),
+    pytest.param(f"{ISSUER} entra\nperson person@example.org", id="newline-in-subject"),
+    pytest.param(f"{PERSON}\x1b[2J", id="escape"),
+    pytest.param(f"{ISSUER} entra\x00 person@example.org", id="nul"),
+    pytest.param(f"{ISSUER} entra\x7f person@example.org", id="delete"),
+    pytest.param(f"{PERSON}\u2028", id="line-separator"),
+    pytest.param(f"{ISSUER} entra-person-1 p\u00e9rson@example.org", id="non-ascii-email"),
+    pytest.param(f"{ISSUER} entra-person-1 person@ex\u00e4mple.org", id="non-ascii-domain"),
+    pytest.param(f"https://{'a' * 248} s person@example.org", id="issuer-256"),
+    pytest.param(f"{ISSUER} {'s' * 256} person@example.org", id="subject-256"),
+    pytest.param(f"{ISSUER} s {'a' * 243}@example.org", id="email-255"),
+    pytest.param("http://issuer.example.org s person@example.org", id="http-issuer"),
+    pytest.param("accounts.google.com s person@example.org", id="schemeless-issuer"),
+    pytest.param("https:// s person@example.org", id="bare-scheme"),
+    pytest.param(f"{ISSUER} s not-an-email", id="no-at"),
+    pytest.param(f"{ISSUER} s a@b@example.org", id="two-ats"),
+    pytest.param(f"{ISSUER} s @example.org", id="empty-local"),
+    pytest.param(f"{ISSUER} s person@", id="empty-domain"),
+    pytest.param("system:poller extra words", id="poller-with-parts"),
+    pytest.param("system:reaper", id="other-system-actor"),
+    pytest.param("System:Poller", id="poller-wrong-case"),
+]
+
+
+@pytest.mark.parametrize("actor", BAD_ACTORS)
+def test_a_malformed_actor_is_refused_without_echoing_it(actor):
+    with pytest.raises(InvalidActor) as raised:
+        delegation(actor)
+    assert (raised.value.status, raised.value.code) == (400, "invalid_actor")
+    if actor:
+        assert actor not in raised.value.message
+
+
+@pytest.mark.parametrize(
+    "role",
+    [None, "", "superadmin", "Admin", "ADMIN", " admin", "admin ", "admin,viewer", "admin\x00",
+     "operat\u00f6r"],
+)
+def test_a_missing_or_unknown_role_is_refused(role):
+    with pytest.raises(InvalidActorRole) as raised:
+        delegation(role=role)
+    assert (raised.value.status, raised.value.code) == (400, "invalid_actor_role")
+
+
+def test_either_header_sent_twice_is_refused():
+    with pytest.raises(InvalidActor):
+        parse_delegation([PERSON, PERSON], ["viewer"])
+    with pytest.raises(InvalidActorRole):
+        parse_delegation([PERSON], ["viewer", "admin"])
+
+
+@pytest.mark.parametrize(
+    ("asserted", "cap", "effective"),
+    [
+        ("admin", "operator", "operator"),
+        ("admin", "viewer", "viewer"),
+        ("operator", "viewer", "viewer"),
+        ("viewer", "admin", "viewer"),
+        ("operator", "admin", "operator"),
+        ("operator", "operator", "operator"),
+        ("admin", "admin", "admin"),
+    ],
+)
+def test_the_effective_role_is_the_lower_of_asserted_and_cap(asserted, cap, effective):
+    assert effective_role(asserted, cap) == effective
+
+
+def test_the_audit_name_of_a_console_request_is_pinned():
+    person, _ = delegation()
+    assert person.audit_name("fleet") == (
+        f"person@example.org ({ISSUER} entra-person-1) via console fleet"
+    )
+    poller, _ = delegation(POLLER_ACTOR, "viewer")
+    assert poller.audit_name("fleet") == "system:poller via console fleet"

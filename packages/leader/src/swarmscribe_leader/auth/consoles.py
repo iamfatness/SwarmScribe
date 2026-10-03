@@ -11,6 +11,7 @@ change is audited; the caller commits.
 
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import func, select, text
@@ -20,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import audit
 from ..db.models import ConsoleCredential
 from ..errors import Conflict, InvalidToken, LeaderError, NotFound
-from .roles import Role
+from .roles import RANK, Role
 from .secrets import hash_secret, new_secret
 
 # Serialises console creation, so that two at once cannot both pass the name check.
@@ -148,3 +149,106 @@ async def authenticate_console(session: AsyncSession, credential: str) -> Consol
     if console.revoked_at is not None:
         raise RevokedConsoleCredential(console.name)
     return console
+
+
+# --- who a console acts for -------------------------------------------------------------
+
+ACTOR_HEADER = "x-swarmscribe-actor"
+ROLE_HEADER = "x-swarmscribe-actor-role"
+POLLER_ACTOR = "system:poller"
+MAX_ISSUER_CHARS = 255  # OIDC limits sub to 255 ASCII characters; issuers are kept as short
+MAX_SUBJECT_CHARS = 255
+MAX_EMAIL_CHARS = 254  # RFC 5321
+_VISIBLE_ASCII = re.compile(r"[\x21-\x7e]+")
+_EMAIL = re.compile(r"[^@]+@[^@]+")
+
+
+class InvalidActor(LeaderError):
+    status = 400
+    code = "invalid_actor"
+
+
+class InvalidActorRole(LeaderError):
+    status = 400
+    code = "invalid_actor_role"
+
+
+@dataclass(frozen=True)
+class DelegatedActor:
+    """The person a console acts for, or (issuer None) the console's own poller."""
+
+    issuer: str | None
+    subject: str | None
+    email: str | None
+
+    @property
+    def is_poller(self) -> bool:
+        return self.issuer is None
+
+    @property
+    def name(self) -> str:
+        """As the audit log names a signed-in person (Identity.actor), or system:poller."""
+        if self.issuer is None:
+            return POLLER_ACTOR
+        return f"{self.email or 'unknown'} ({self.issuer} {self.subject})"
+
+    def audit_name(self, console: str) -> str:
+        """The one place the audit actor of a console request is built."""
+        return f"{self.name} via console {console}"
+
+
+POLLER = DelegatedActor(issuer=None, subject=None, email=None)
+
+
+def _single(values: list[str], header: str, error: type[LeaderError]) -> str:
+    if not values:
+        raise error(f"{header} is required on a console request")
+    if len(values) > 1:
+        raise error(f"send {header} once")
+    return values[0]
+
+
+def parse_delegation(
+    actor_values: list[str], role_values: list[str]
+) -> tuple[DelegatedActor, Role]:
+    """Who a console says it acts for, and the role it asserts for them, from every value
+    of X-SwarmScribe-Actor and X-SwarmScribe-Actor-Role. Only visible ASCII passes, so
+    nothing that reaches the audit log can carry a line break or a control character.
+    Messages are fixed text: header values are never echoed, logged or audited."""
+    role = _single(role_values, "X-SwarmScribe-Actor-Role", InvalidActorRole)
+    if role not in RANK:
+        raise InvalidActorRole("X-SwarmScribe-Actor-Role must be viewer, operator or admin")
+    value = _single(actor_values, "X-SwarmScribe-Actor", InvalidActor)
+    if value == POLLER_ACTOR:
+        if role != "viewer":
+            raise InvalidActorRole("the console's poller acts as viewer only")
+        return POLLER, "viewer"
+    parts = value.split(" ")
+    if len(parts) != 3 or not all(_VISIBLE_ASCII.fullmatch(part) for part in parts):
+        raise InvalidActor(
+            "X-SwarmScribe-Actor must be `<issuer> <subject> <email>` in printable ASCII, "
+            "separated by single spaces (email - when unknown), or system:poller"
+        )
+    issuer, subject, email = parts
+    if (
+        len(issuer) > MAX_ISSUER_CHARS
+        or len(subject) > MAX_SUBJECT_CHARS
+        or len(email) > MAX_EMAIL_CHARS
+    ):
+        raise InvalidActor(
+            f"X-SwarmScribe-Actor is too long: the issuer and subject may have at most "
+            f"{MAX_ISSUER_CHARS} characters each and the email {MAX_EMAIL_CHARS}"
+        )
+    if not issuer.startswith("https://") or issuer == "https://":
+        raise InvalidActor("the actor's issuer must be an https:// URL")
+    if email != "-" and not _EMAIL.fullmatch(email):
+        raise InvalidActor("the actor's email must be one address, or - when unknown")
+    person = DelegatedActor(
+        issuer=issuer, subject=subject, email=None if email == "-" else email.lower()
+    )
+    return person, role
+
+
+def effective_role(asserted: Role, cap: str) -> Role:
+    """The lower of the role a console asserts and the role its credential is capped at."""
+    return asserted if RANK[asserted] <= RANK[cap] else cap

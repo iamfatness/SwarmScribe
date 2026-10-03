@@ -23,8 +23,8 @@ async def test_migrations_produce_exactly_the_models(engine):
 
 
 async def test_database_is_at_the_head_revision(engine):
-    assert head_revision() == "0002"
-    assert await current_revision(engine) == "0002"
+    assert head_revision() == "0003"
+    assert await current_revision(engine) == "0003"
 
 
 async def test_the_claim_index_serves_priority_descending(engine):

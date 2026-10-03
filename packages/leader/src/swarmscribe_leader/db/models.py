@@ -10,6 +10,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -49,6 +50,8 @@ class StorageLocation(_Row, Base):
     vocabulary_hash: Mapped[str | None] = mapped_column(String(64))
     last_scan_at: Mapped[datetime | None]
     last_scan_error: Mapped[str | None] = mapped_column(Text)
+    # Set by `ingest`; the scanner clears it once a scan that began after it has finished.
+    scan_requested_at: Mapped[datetime | None]
 
 
 class Recording(_Row, Base):
@@ -119,6 +122,9 @@ class Job(_Row, Base):
         ForeignKey("settings_profiles.id")
     )
     failure_reason: Mapped[str | None] = mapped_column(Text)
+    # The administrator who cancelled the job; None when the system cancelled it. Scanning
+    # never recreates a job an administrator cancelled.
+    cancelled_by: Mapped[str | None] = mapped_column(Text)
     completed_at: Mapped[datetime | None]
     outputs_flagged_for_deletion: Mapped[bool] = mapped_column(default=False)
     # Not before: a job whose claim could not be built is pushed back so others are reached.
@@ -155,6 +161,8 @@ class JobResult(_Row, Base):
     vocabulary_terms_used: Mapped[list[Any]] = mapped_column(default=list)
     corrections_applied: Mapped[list[Any]] = mapped_column(default=list)
     low_confidence_words: Mapped[list[Any]] = mapped_column(default=list)
+    # The recording has no speech: empty .txt and .srt, a segments.json without segments.
+    no_speech: Mapped[bool] = mapped_column(default=False, server_default=false())
 
 
 class VocabularyVersion(_Row, Base):

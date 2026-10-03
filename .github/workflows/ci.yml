@@ -28,3 +28,27 @@ jobs:
       - run: uv sync
       - run: uv run ruff check .
       - run: uv run pytest
+
+  compose-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      - name: Build the leader image
+        run: docker build -t swarmscribe-leader:e2e -f e2e/compose/Dockerfile .
+      - name: Start Postgres, two leader replicas and the proxy
+        run: |
+          mkdir -p e2e/compose/work/data
+          docker compose -f e2e/compose/docker-compose.yml up -d
+      - name: Run the scenario (kills leader-1 mid-run)
+        run: uv run python e2e/compose/run_e2e.py --replicas 2
+      - name: Show every service's logs
+        if: failure()
+        run: >-
+          docker compose -f e2e/compose/docker-compose.yml logs --no-color
+          postgres migrate leader-1 leader-2 proxy
+      - name: Tear down
+        if: always()
+        run: docker compose -f e2e/compose/docker-compose.yml down -v

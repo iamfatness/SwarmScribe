@@ -11,10 +11,13 @@ dependencies = [
     "asyncpg>=0.29,<1",
     "alembic>=1.13,<2",
     "pydantic-settings>=2.4,<3",
+    "pyjwt[crypto]>=2.10,<3",
+    "httpx>=0.27,<1",
 ]
 
 [project.scripts]
 swarmscribe-leader = "swarmscribe_leader.main:run"
+swarmscribe-admin = "swarmscribe_leader.admin_cli.main:run"
 
 [tool.uv.sources]
 swarmscribe-protocol = { workspace = true }

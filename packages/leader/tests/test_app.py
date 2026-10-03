@@ -1,4 +1,5 @@
 import asyncio
+import itertools
 import os
 import time
 import uuid
@@ -11,6 +12,7 @@ from swarmscribe_leader.app import create_app
 from swarmscribe_leader.config import Settings
 from swarmscribe_leader.db.models import Job
 from swarmscribe_leader.storage.links import LinkClaims
+from swarmscribe_leader.storage.local import LocalBackend
 
 LINK_KEY = "k" * 32
 
@@ -544,3 +546,67 @@ async def test_a_declared_oversize_body_is_refused_before_reading(
     response = await client.put(link.url, content=b"x", headers={"content-length": "11"})
     assert (response.status_code, response.json()["code"]) == (413, "too_large")
     assert list(tmp_path.iterdir()) == []
+
+
+async def test_a_slow_disk_does_not_block_the_event_loop_during_a_download(
+    app, client, factory, tmp_path, monkeypatch
+):
+    write(tmp_path, "talks/one.mp3", b"the audio")
+    location = await factory.location()
+    backend = app.state.backend_factory(location)
+    info = await backend.stat("talks/one.mp3")
+    link = backend.download_link("talks/one.mp3", info.version, timedelta(minutes=5))
+    real_require_root = LocalBackend._require_root
+
+    def slow_require_root(self):
+        time.sleep(0.5)
+        real_require_root(self)
+
+    monkeypatch.setattr(LocalBackend, "_require_root", slow_require_root)
+    ticks: list[float] = []
+    stop = asyncio.Event()
+
+    async def ticker():
+        while not stop.is_set():
+            ticks.append(time.monotonic())
+            await asyncio.sleep(0)
+
+    task = asyncio.create_task(ticker())
+    try:
+        response = await client.get(link.url)
+    finally:
+        stop.set()
+        await task
+    assert (response.status_code, response.content) == (200, b"the audio")
+    assert max(b - a for a, b in itertools.pairwise(ticks)) < 0.25
+
+
+async def test_a_slow_disk_does_not_block_the_event_loop_during_an_upload(
+    app, client, factory, tmp_path, monkeypatch
+):
+    location = await factory.location()
+    link = await upload_link(app, factory, location, "transcripts/one.txt")
+    real_require_root = LocalBackend._require_root
+
+    def slow_require_root(self):
+        time.sleep(0.5)
+        real_require_root(self)
+
+    monkeypatch.setattr(LocalBackend, "_require_root", slow_require_root)
+    ticks: list[float] = []
+    stop = asyncio.Event()
+
+    async def ticker():
+        while not stop.is_set():
+            ticks.append(time.monotonic())
+            await asyncio.sleep(0)
+
+    task = asyncio.create_task(ticker())
+    try:
+        response = await client.put(link.url, content=b"text")
+    finally:
+        stop.set()
+        await task
+    assert response.status_code == 201
+    assert (tmp_path / "transcripts" / "one.txt").read_bytes() == b"text"
+    assert max(b - a for a, b in itertools.pairwise(ticks)) < 0.25

@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .. import audit
@@ -196,7 +196,9 @@ async def scan_location(
                             Recording.consent == "consented", Recording.missing.is_(False)
                         )
                     ),
-                    Job.state != "cancelled",
+                    # A version the system cancelled (missing, withdrawn, changed) is queued
+                    # again once the cause is gone; one an administrator cancelled is not.
+                    or_(Job.state != "cancelled", Job.cancelled_by.is_not(None)),
                 )
             )
         ).all()
@@ -232,6 +234,14 @@ async def scan_location(
     return summary
 
 
+def _is_due(location: StorageLocation, now: datetime) -> bool:
+    return (
+        location.scan_requested_at is not None
+        or location.last_scan_at is None
+        or location.last_scan_at + timedelta(seconds=location.scan_interval_s) <= now
+    )
+
+
 async def scan_due_locations(
     sessionmaker: async_sessionmaker[AsyncSession],
     backend_factory: Callable[[StorageLocation], StorageBackend],
@@ -239,24 +249,27 @@ async def scan_due_locations(
     now: datetime,
     max_attempts: int,
 ) -> dict[str, ScanSummary | str]:
+    """Scan every enabled location that is due or has a scan requested (one disabled while
+    its storage is read is skipped).
+
+    A request is cleared only if it is unchanged since this scan began: one made while the
+    scan ran (after storage was read) is kept and causes another scan on the next tick.
+    """
     async with sessionmaker() as session:
         locations = (
             await session.scalars(select(StorageLocation).where(StorageLocation.enabled.is_(True)))
         ).all()
-    due = [
-        loc
-        for loc in locations
-        if loc.last_scan_at is None
-        or loc.last_scan_at + timedelta(seconds=loc.scan_interval_s) <= now
-    ]
     results: dict[str, ScanSummary | str] = {}
-    for loc in due:
+    for loc in [loc for loc in locations if _is_due(loc, now)]:
+        requested = loc.scan_requested_at
         try:
             # Read storage first, outside any transaction: a slow listing must not hold a
             # database connection idle in a transaction or the location row lock.
             snapshot = await take_snapshot(backend_factory(loc), loc.input_prefix)
             async with sessionmaker() as session:
                 location = await session.get(StorageLocation, loc.id, with_for_update=True)
+                if location is None or not location.enabled:
+                    continue  # disabled (or gone) while storage was read: not scanned
                 if (location.backend, location.config, location.input_prefix) != (
                     loc.backend,
                     loc.config,
@@ -271,6 +284,8 @@ async def scan_due_locations(
                     max_attempts=max_attempts,
                     snapshot=snapshot,
                 )
+                if requested is not None and location.scan_requested_at == requested:
+                    location.scan_requested_at = None
                 await session.commit()
         except Exception as exc:
             logger.exception("scanning location %s failed", loc.name)
@@ -281,5 +296,14 @@ async def scan_due_locations(
                     .where(StorageLocation.id == loc.id)
                     .values(last_scan_at=now, last_scan_error=str(exc)[:2000])
                 )
+                if requested is not None:
+                    await session.execute(
+                        update(StorageLocation)
+                        .where(
+                            StorageLocation.id == loc.id,
+                            StorageLocation.scan_requested_at == requested,
+                        )
+                        .values(scan_requested_at=None)
+                    )
                 await session.commit()
     return results

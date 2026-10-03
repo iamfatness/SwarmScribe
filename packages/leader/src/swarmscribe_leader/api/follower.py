@@ -1,6 +1,5 @@
 import logging
 import uuid
-from datetime import timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -25,7 +24,7 @@ from ..clock import utcnow
 from ..db.models import Follower, Job, Recording
 from ..errors import LeaderError, Unauthorized
 from ..jobs import store
-from ..jobs.claims import build_claim, device_of, outputs_verified, profile_for
+from ..jobs.claims import build_claim, device_of, outputs_unchanged, outputs_verified, profile_for
 from ..storage.base import StorageError
 from .deps import db_session, settings_of
 
@@ -106,9 +105,7 @@ async def claim_job(
         except Exception as exc:
             await savepoint.rollback()
             # Push it back so the next claims reach the healthy jobs queued behind it.
-            await store.push_back(
-                session, job_id, until=utcnow() + timedelta(seconds=UNBUILDABLE_BACKOFF_SECONDS)
-            )
+            await store.push_back(session, job_id, delay_seconds=UNBUILDABLE_BACKOFF_SECONDS)
             await _log_unbuildable(session, job_id, exc)
             skipped.append(job_id)
             continue
@@ -162,12 +159,26 @@ async def submit(
     session: Annotated[AsyncSession, Depends(db_session)],
     follower: Annotated[Follower, Depends(current_follower)],
 ) -> SubmitResponse:
-    async def verified(job: Job, checksums: OutputChecksums) -> str | None:
-        return await outputs_verified(
-            session, job, checksums, backend_factory=request.app.state.backend_factory
-        )
+    # Authentication locked the follower's row. Commit it now, so hashing the outputs never
+    # holds that lock (the follower's heartbeats for its other jobs would wait on it).
+    await session.commit()
+    backend_factory = request.app.state.backend_factory
 
-    await store.submit(session, job_id, body, follower, now=utcnow(), outputs_verified=verified)
+    async def verified(job: Job, checksums: OutputChecksums) -> store.OutputsCheck:
+        return await outputs_verified(session, job, checksums, backend_factory=backend_factory)
+
+    async def unchanged(job: Job, check: store.OutputsCheck) -> bool:
+        return await outputs_unchanged(session, job, check, backend_factory=backend_factory)
+
+    await store.submit(
+        session,
+        job_id,
+        body,
+        follower,
+        now=utcnow(),
+        outputs_verified=verified,
+        outputs_unchanged=unchanged,
+    )
     await session.commit()
     return SubmitResponse(accepted=True)
 

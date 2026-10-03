@@ -321,3 +321,47 @@ async def test_registry_refuses_a_local_location_without_a_root(factory):
     location = await factory.location(config={})
     with pytest.raises(StorageError, match="root"):
         backend_for(location, signer=SIGNER, public_url="https://l")
+
+
+async def test_list_walks_only_the_folder_of_the_prefix(tmp_path, monkeypatch):
+    write(tmp_path, "incoming/one.mp3")
+    write(tmp_path, "elsewhere/two.mp3")
+    real_walk = os.walk
+    walked = []
+
+    def walk(top, *args, **kwargs):
+        walked.append(Path(top))
+        yield from real_walk(top, *args, **kwargs)
+
+    monkeypatch.setattr(os, "walk", walk)
+    keys = [i.key for i in await collect(backend(tmp_path).list("incoming/"))]
+    assert keys == ["incoming/one.mp3"]
+    assert walked == [(tmp_path / "incoming").resolve()]
+
+
+async def test_a_prefix_inside_a_folder_walks_that_folder(tmp_path):
+    write(tmp_path, "incoming/2024-one.mp3")
+    write(tmp_path, "incoming/2023-two.mp3")
+    keys = [i.key for i in await collect(backend(tmp_path).list("incoming/2024-"))]
+    assert keys == ["incoming/2024-one.mp3"]
+
+
+async def test_a_missing_input_folder_fails_the_listing(tmp_path):
+    write(tmp_path, "elsewhere/one.mp3")
+    with pytest.raises(StorageUnavailable, match="input folder 'incoming' is not available"):
+        await collect(backend(tmp_path).list("incoming/"))
+
+
+async def test_a_replacement_with_the_same_size_and_mtime_has_another_version(tmp_path):
+    path = write(tmp_path, "talks/one.txt", b"aaaa")
+    before = os.stat(path)
+    first = (await backend(tmp_path).stat("talks/one.txt")).version
+    replacement = tmp_path / "talks" / "replacement.tmp"
+    replacement.write_bytes(b"bbbb")
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    os.replace(replacement, path)
+    second = (await backend(tmp_path).stat("talks/one.txt")).version
+    assert os.stat(path).st_size == before.st_size
+    assert os.stat(path).st_mtime_ns == before.st_mtime_ns
+    assert second != first
+

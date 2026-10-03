@@ -5,8 +5,9 @@ from functools import partial
 
 from fastapi import FastAPI
 
+from .api import admin, files, follower, health
 from .api import errors as api_errors
-from .api import files, follower, health
+from .api.admin_auth import AdminAuth
 from .api.body_limit import BodyLimit
 from .background import run_exclusive, run_periodically
 from .clock import utcnow
@@ -21,7 +22,9 @@ from .storage.registry import backend_for
 SHUTDOWN_GRACE_SECONDS = 10
 
 
-def create_app(settings: Settings, *, background: bool = True) -> FastAPI:
+def create_app(
+    settings: Settings, *, background: bool = True, admin_auth: AdminAuth | None = None
+) -> FastAPI:
     engine = make_engine(settings.database_url.get_secret_value())
     sessionmaker = make_sessionmaker(engine)
     signer = LinkSigner(settings.link_key.get_secret_value().encode("utf-8"))
@@ -89,9 +92,11 @@ def create_app(settings: Settings, *, background: bool = True) -> FastAPI:
     app.state.signer = signer
     app.state.head_revision = head_revision()
     app.state.backend_factory = backend_factory
+    app.state.admin_auth = admin_auth or AdminAuth.from_settings(settings)
     api_errors.install(app)
     app.add_middleware(BodyLimit)
     app.include_router(health.router)
     app.include_router(files.router)
     app.include_router(follower.router)
+    app.include_router(admin.router)
     return app

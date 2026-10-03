@@ -3,10 +3,10 @@ import uuid
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from swarmscribe_leader.clock import utcnow
-from swarmscribe_leader.db.models import Job, JobAttempt, JobResult
-from swarmscribe_leader.errors import Conflict, NotFound, StaleLease
+from swarmscribe_leader.db.models import Follower, Job, JobAttempt, JobResult
+from swarmscribe_leader.errors import Conflict, Forbidden, NotFound, StaleLease
 from swarmscribe_leader.jobs import store
 from swarmscribe_protocol import FailRequest, OutputChecksums, SubmitRequest
 
@@ -14,15 +14,15 @@ H = "a" * 64
 
 
 async def present(_job, _checksums):
-    return None
+    return store.OutputsCheck()
 
 
 async def absent(_job, _checksums):
-    return "outputs_missing"
+    return store.OutputsCheck(problem="outputs_missing")
 
 
 async def mismatched(_job, _checksums):
-    return "checksum_mismatch"
+    return store.OutputsCheck(problem="checksum_mismatch")
 
 
 def submission(lease_id, checksum=H) -> SubmitRequest:
@@ -120,10 +120,34 @@ async def test_a_job_not_yet_available_is_not_claimed(sessionmaker, factory):
     )
     ready = await factory.job(await factory.recording(location, key="ready.mp3"))
     follower, _ = await factory.follower()
-    now = utcnow()
-    assert (await claim(sessionmaker, follower, now=now)).id == ready.id
-    assert await claim(sessionmaker, follower, now=now) is None
-    assert (await claim(sessionmaker, follower, now=now + timedelta(seconds=61))).id == later.id
+    assert (await claim(sessionmaker, follower)).id == ready.id
+    assert await claim(sessionmaker, follower) is None
+    async with sessionmaker() as session:
+        await session.execute(
+            update(Job)
+            .where(Job.id == later.id)
+            .values(available_at=func.now() - timedelta(seconds=1))
+        )
+        await session.commit()
+    assert (await claim(sessionmaker, follower)).id == later.id
+
+
+async def test_availability_is_judged_by_the_database_clock(sessionmaker, factory):
+    # A replica whose clock runs an hour fast must not hand out a pushed-back job early.
+    await factory.job(available_at=utcnow() + timedelta(minutes=10))
+    follower, _ = await factory.follower()
+    assert await claim(sessionmaker, follower, now=utcnow() + timedelta(hours=1)) is None
+
+
+async def test_push_back_counts_from_the_database_clock(sessionmaker, factory):
+    job = await factory.job()
+    async with sessionmaker() as session:
+        await store.push_back(session, job.id, delay_seconds=60)
+        await session.commit()
+    async with sessionmaker() as session:
+        database_now = await session.scalar(select(func.now()))
+    stored = await load(sessionmaker, job.id)
+    assert timedelta(seconds=50) <= stored.available_at - database_now <= timedelta(seconds=60)
 
 
 async def test_concurrent_claims_never_share_a_job(sessionmaker, factory):
@@ -340,6 +364,136 @@ async def test_submit_whose_outputs_do_not_match_the_checksums_is_refused(sessio
     assert excinfo.value.code == "checksum_mismatch"
     assert seen == [(job.id, H)]
     assert (await load(sessionmaker, job.id)).state == "leased"
+
+
+async def test_outputs_are_hashed_before_the_job_row_is_locked(sessionmaker, factory):
+    job = await factory.job()
+    follower, _ = await factory.follower()
+    claimed = await claim(sessionmaker, follower)
+    locked_while_hashing = []
+
+    async def verifier(job_seen, _checksums):
+        async with sessionmaker() as other:
+            row = await other.scalar(
+                select(Job).where(Job.id == job_seen.id).with_for_update(skip_locked=True)
+            )
+            locked_while_hashing.append(row is None)
+            await other.rollback()
+        return store.OutputsCheck()
+
+    async with sessionmaker() as session:
+        await store.submit(
+            session,
+            job.id,
+            submission(claimed.lease_id),
+            follower,
+            now=utcnow(),
+            outputs_verified=verifier,
+        )
+        await session.commit()
+    assert locked_while_hashing == [False]
+    assert (await load(sessionmaker, job.id)).state == "completed"
+
+
+async def test_outputs_replaced_after_hashing_are_refused(sessionmaker, factory):
+    job = await factory.job()
+    follower, _ = await factory.follower()
+    claimed = await claim(sessionmaker, follower)
+
+    async def replaced(_job, _check):
+        return False
+
+    async with sessionmaker() as session:
+        with pytest.raises(Conflict) as excinfo:
+            await store.submit(
+                session,
+                job.id,
+                submission(claimed.lease_id),
+                follower,
+                now=utcnow(),
+                outputs_verified=present,
+                outputs_unchanged=replaced,
+            )
+    assert excinfo.value.code == "outputs_changed"
+    assert (await load(sessionmaker, job.id)).state == "leased"
+
+
+async def test_a_lease_lost_while_the_outputs_were_hashed_is_refused(sessionmaker, factory):
+    job = await factory.job()
+    follower, _ = await factory.follower()
+    claimed = await claim(sessionmaker, follower)
+
+    async def reaped_meanwhile(job_seen, _checksums):
+        async with sessionmaker() as other:
+            row = await other.get(Job, job_seen.id, with_for_update=True)
+            row.state = "queued"
+            store.clear_lease(row)
+            await other.commit()
+        return store.OutputsCheck()
+
+    async with sessionmaker() as session:
+        with pytest.raises(StaleLease):
+            await store.submit(
+                session,
+                job.id,
+                submission(claimed.lease_id),
+                follower,
+                now=utcnow(),
+                outputs_verified=reaped_meanwhile,
+            )
+    assert (await load(sessionmaker, job.id)).state == "queued"
+
+
+async def test_a_no_speech_result_is_recorded(sessionmaker, factory):
+    job = await factory.job()
+    follower, _ = await factory.follower()
+    claimed = await claim(sessionmaker, follower)
+
+    async def silent(_job, _checksums):
+        return store.OutputsCheck(no_speech=True)
+
+    async with sessionmaker() as session:
+        await store.submit(
+            session,
+            job.id,
+            submission(claimed.lease_id),
+            follower,
+            now=utcnow(),
+            outputs_verified=silent,
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        result = (await session.scalars(select(JobResult))).one()
+    assert result.no_speech is True
+
+
+async def test_a_follower_revoked_while_the_outputs_were_hashed_is_refused(sessionmaker, factory):
+    job = await factory.job()
+    follower, _ = await factory.follower()
+    claimed = await claim(sessionmaker, follower)
+
+    async def revoked_meanwhile(_job, _checksums):
+        async with sessionmaker() as other:
+            await other.execute(
+                update(Follower).where(Follower.id == follower.id).values(state="revoked")
+            )
+            await other.commit()
+        return store.OutputsCheck()
+
+    async with sessionmaker() as session:
+        with pytest.raises(Forbidden):
+            await store.submit(
+                session,
+                job.id,
+                submission(claimed.lease_id),
+                follower,
+                now=utcnow(),
+                outputs_verified=revoked_meanwhile,
+            )
+        await session.rollback()
+    assert (await load(sessionmaker, job.id)).state == "leased"
+    async with sessionmaker() as session:
+        assert (await session.scalars(select(JobResult))).all() == []
 
 
 # --- fail, release, release_all -------------------------------------------------

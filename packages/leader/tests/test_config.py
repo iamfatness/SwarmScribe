@@ -1,4 +1,6 @@
+import json
 import os
+import re
 
 import pytest
 from pydantic import ValidationError
@@ -89,3 +91,250 @@ def test_heartbeat_must_be_shorter_than_the_lease():
 )
 def test_to_async_url(given, expected):
     assert to_async_url(given) == expected
+
+
+TENANT = "0F0E0D0C-0B0A-4908-8706-050403020100"
+SERVICE_ACCOUNT = json.dumps(
+    {
+        "type": "service_account",
+        "client_email": "group-reader@project-1.iam.gserviceaccount.com",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----\n",
+    }
+)
+
+
+def test_no_sign_in_provider_is_configured_by_default():
+    settings = Settings(**BASE)
+    assert (settings.entra_client_id, settings.google_client_id) == (None, None)
+    assert settings.role_admin_emails == ()
+    assert settings.role_cache_seconds == 300
+
+
+def test_both_providers_and_role_lists_from_the_environment(monkeypatch):
+    for name, value in {
+        "SWARMSCRIBE_DATABASE_URL": "postgresql://x/y",
+        "SWARMSCRIBE_PUBLIC_URL": "https://l",
+        "SWARMSCRIBE_LINK_KEY": "z" * 40,
+        "SWARMSCRIBE_ENTRA_TENANT_ID": TENANT,
+        "SWARMSCRIBE_ENTRA_CLIENT_ID": "entra-client",
+        "SWARMSCRIBE_ENTRA_CLIENT_SECRET": "entra-secret",
+        "SWARMSCRIBE_GOOGLE_CLIENT_ID": "google-client",
+        "SWARMSCRIBE_GOOGLE_CLIENT_SECRET": "google-secret",
+        "SWARMSCRIBE_GOOGLE_HOSTED_DOMAIN": "Example.ORG",
+        "SWARMSCRIBE_ROLE_ADMIN_ENTRA_GROUPS": "A1A1A1A1-0000-4000-8000-000000000003, b2",
+        "SWARMSCRIBE_ROLE_VIEWER_EMAILS": "One@Example.org,two@example.org ,",
+        "SWARMSCRIBE_ROLE_OPERATOR_DOMAINS": "@Example.org",
+    }.items():
+        monkeypatch.setenv(name, value)
+    settings = Settings()
+    assert settings.entra_tenant_id == TENANT.lower()
+    assert settings.google_hosted_domain == "example.org"
+    assert settings.role_admin_entra_groups == ("a1a1a1a1-0000-4000-8000-000000000003", "b2")
+    assert settings.role_viewer_emails == ("one@example.org", "two@example.org")
+    assert settings.role_operator_domains == ("example.org",)
+    assert settings.entra_client_secret.get_secret_value() == "entra-secret"
+
+
+@pytest.mark.parametrize(
+    "values, problem",
+    [
+        ({"entra_client_id": "c"}, "entra_client_id and entra_tenant_id must be set together"),
+        ({"entra_tenant_id": TENANT}, "entra_client_id and entra_tenant_id must be set together"),
+        (
+            {"entra_client_id": "c", "entra_tenant_id": "contoso.example"},
+            "tenant's ID (a GUID)",
+        ),
+        ({"entra_client_secret": "s"}, "entra_client_secret needs entra_client_id"),
+        ({"google_client_id": "g"}, "google_client_secret is required"),
+        ({"google_hosted_domain": "example.org"}, "google_hosted_domain needs google_client_id"),
+        ({"role_admin_entra_groups": "g1"}, "role_admin_entra_groups needs Entra ID sign-in"),
+        (
+            {
+                "google_client_id": "g",
+                "google_client_secret": "s",
+                "role_viewer_google_groups": "x",
+            },
+            "role_viewer_google_groups needs google_service_account",
+        ),
+        ({"role_operator_emails": "a@example.org"}, "role_operator_emails applies to Google"),
+    ],
+)
+def test_half_configured_sign_in_is_refused(values, problem):
+    with pytest.raises(ValidationError, match=re.escape(problem)):
+        Settings(**BASE, **values)
+
+
+def test_the_service_account_key_can_be_json_or_a_file(tmp_path):
+    google = {"google_client_id": "g", "google_client_secret": "s"}
+    inline = Settings(**BASE, **google, google_service_account=SERVICE_ACCOUNT)
+    key = inline.google_service_account_key()
+    assert key["client_email"] == "group-reader@project-1.iam.gserviceaccount.com"
+    assert key["token_uri"] == "https://oauth2.googleapis.com/token"
+    path = tmp_path / "service-account.json"
+    path.write_text(SERVICE_ACCOUNT, encoding="utf-8")
+    from_file = Settings(**BASE, **google, google_service_account=str(path))
+    assert from_file.google_service_account_key() == key
+
+
+def test_an_unusable_service_account_is_refused_without_echoing_it():
+    secret_text = '{"client_email": "x", "private_key": ""} plus-secret-material'
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(
+            **BASE,
+            google_client_id="g",
+            google_client_secret="s",
+            google_service_account=secret_text,
+        )
+    rendered = str(excinfo.value.errors(include_input=False, include_url=False))
+    assert "google_service_account must be a service-account JSON key" in rendered
+    assert "plus-secret-material" not in rendered
+
+
+def test_sign_in_secrets_are_not_shown_in_the_settings_repr():
+    settings = Settings(
+        **BASE,
+        entra_tenant_id=TENANT,
+        entra_client_id="c",
+        entra_client_secret="entra-hidden",
+        google_client_id="g",
+        google_client_secret="google-hidden",
+        google_service_account=SERVICE_ACCOUNT,
+    )
+    shown = repr(settings)
+    assert "entra-hidden" not in shown
+    assert "google-hidden" not in shown
+    assert "not-a-real-key" not in shown
+
+
+GOOGLE = {"google_client_id": "g", "google_client_secret": "s"}
+
+
+def test_a_blank_google_secret_does_not_satisfy_google_sign_in():
+    with pytest.raises(ValidationError, match="google_client_secret is required"):
+        Settings(**BASE, google_client_id="g", google_client_secret="")
+
+
+def test_blank_secrets_count_as_unset():
+    assert Settings(**BASE, entra_client_secret="").entra_client_secret is None
+    settings = Settings(**BASE, **GOOGLE, google_service_account="  ")
+    assert settings.google_service_account is None
+    assert settings.google_service_account_key() is None
+
+
+@pytest.mark.parametrize(
+    "setting, entry",
+    [
+        ("role_admin_domains", "*.example.org"),
+        ("role_admin_domains", "a@b.org"),
+        ("role_admin_domains", "exa mple.org"),
+        ("role_admin_domains", "localhost"),
+        ("role_viewer_emails", "no-at-sign.example.org"),
+        ("role_viewer_emails", "a@b@example.org"),
+        ("role_viewer_emails", "@example.org"),
+        ("role_viewer_emails", "a@localhost"),
+        ("role_admin_domains", "straße.example"),
+        ("role_viewer_emails", "x@straße.example"),
+        ("role_viewer_emails", "é@example.org"),
+    ],
+)
+def test_malformed_role_entries_are_refused_naming_setting_and_position(setting, entry):
+    values = {setting: f"fine.example.org,{entry}"}
+    if setting.endswith("emails"):
+        values[setting] = f"ok@example.org,{entry}"
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(**BASE, **GOOGLE, **values)
+    message = str(excinfo.value.errors(include_input=False, include_url=False))
+    assert setting in message
+    assert "entry 2" in message
+
+
+def test_hosted_domain_loses_one_leading_at_sign():
+    settings = Settings(**BASE, **GOOGLE, google_hosted_domain="@Example.org")
+    assert settings.google_hosted_domain == "example.org"
+
+
+def test_the_orphaned_google_setting_is_named():
+    with pytest.raises(ValidationError, match="google_service_account needs google_client_id"):
+        Settings(**BASE, google_service_account=SERVICE_ACCOUNT)
+
+
+def test_empty_role_lists_are_empty(monkeypatch):
+    monkeypatch.setenv("SWARMSCRIBE_DATABASE_URL", "postgresql://x/y")
+    monkeypatch.setenv("SWARMSCRIBE_PUBLIC_URL", "https://l")
+    monkeypatch.setenv("SWARMSCRIBE_LINK_KEY", "z" * 40)
+    monkeypatch.setenv("SWARMSCRIBE_ROLE_ADMIN_EMAILS", "")
+    monkeypatch.setenv("SWARMSCRIBE_ROLE_VIEWER_DOMAINS", " , ")
+    settings = Settings()
+    assert settings.role_admin_emails == ()
+    assert settings.role_viewer_domains == ()
+    assert settings.role_operator_emails == ()
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        TENANT,
+        TENANT.replace("-", ""),
+        "{" + TENANT + "}",
+        "urn:uuid:" + TENANT,
+    ],
+)
+def test_tenant_guid_forms_are_normalised(form):
+    settings = Settings(**BASE, entra_client_id="c", entra_tenant_id=form)
+    assert settings.entra_tenant_id == TENANT.lower()
+
+
+def test_a_missing_service_account_file_is_refused_by_setting_name(tmp_path):
+    missing = tmp_path / "nope.json"
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(**BASE, **GOOGLE, google_service_account=str(missing))
+    message = str(excinfo.value.errors(include_input=False, include_url=False))
+    assert "google_service_account must be a service-account JSON key" in message
+
+
+def test_a_service_account_file_with_bad_contents_does_not_leak_them(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text("file-secret-material", encoding="utf-8")
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(**BASE, **GOOGLE, google_service_account=str(path))
+    message = str(excinfo.value.errors(include_input=False, include_url=False))
+    assert "google_service_account" in message
+    assert "file-secret-material" not in message
+
+
+def test_a_model_validation_error_never_echoes_the_settings():
+    secrets = {
+        "database_url": "postgresql://u:db-password-value@db:5432/swarm",
+        "link_key": "lk-" + "x" * 32,
+        "google_service_account": SERVICE_ACCOUNT,
+    }
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(
+            **secrets,
+            public_url="https://leader.example",
+            **GOOGLE,
+            heartbeat_seconds=500,  # longer than the lease: a model-level refusal
+        )
+    shown = str(excinfo.value)
+    assert "heartbeat_seconds must be shorter" in shown
+    assert "input_value" not in shown
+    for value in secrets.values():
+        # Not even the start or end of a value (pydantic truncates long inputs in the middle).
+        assert value[:8] not in shown
+        assert value[-8:] not in shown
+
+
+@pytest.mark.parametrize(
+    "setting, entry",
+    [
+        ("role_admin_domains", "Kiwi.example"),  # KELVIN SIGN lowercases to ASCII "k"
+        ("role_viewer_emails", "K@example.org"),
+        ("role_viewer_emails", "a@Kiwi.example"),
+    ],
+)
+def test_an_entry_that_only_lowercases_to_ascii_is_refused(setting, entry):
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(**BASE, **GOOGLE, **{setting: entry})
+    message = str(excinfo.value.errors(include_input=False, include_url=False))
+    assert setting in message
+    assert "entry 1" in message

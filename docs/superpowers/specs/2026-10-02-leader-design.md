@@ -38,7 +38,7 @@ non-English audio.
 
 | Topic | Decision |
 |---|---|
-| Admin authentication | OIDC single sign-on; CLI uses device-code login; roles from IdP groups |
+| Admin authentication | OIDC single sign-on with Entra ID and Google; device-code login; roles from Entra groups, Google Groups, or email/domain lists |
 | Follower authentication | Join token exchanged for a per-follower credential |
 | Ingest | Scheduled scan per location (default 15 min) plus on-demand |
 | Vocabulary scope | Global (stored in the leader) plus per-location (files in the location), merged |
@@ -280,12 +280,40 @@ A follower that receives `412` (or a size mismatch on local) reports
 
 ### Administrators
 
-- The leader validates `Authorization: Bearer <JWT>` access tokens from the
-  configured OIDC issuer: signature against the issuer's JWKS (cached,
-  refreshed on unknown `kid`), `iss`, `aud`, `exp`, `nbf`, 60 s clock skew.
-- Roles from a configurable claim (default `groups`) mapped by configuration:
-  `SWARMSCRIBE_ROLE_VIEWER`, `…_OPERATOR`, `…_ADMIN` each list group names or
-  IDs. Roles are cumulative: admin ⊃ operator ⊃ viewer.
+Two identity providers are supported from the first release, and both may be
+configured at once: **Microsoft Entra ID** and **Google**. Each is an OIDC
+issuer with its own client registration.
+
+- **Token.** `swarmscribe-admin` signs in with the provider's device-code flow
+  and sends the provider's **ID token** as `Authorization: Bearer <JWT>`.
+  (Google access tokens are opaque, so ID tokens are the one format both
+  providers share.) The CLI refreshes the ID token with the refresh token
+  before it expires.
+- **Validation.** The leader accepts a token only from a configured issuer:
+  signature against that issuer's JWKS (cached, refreshed on an unknown
+  `kid`), `iss`, `aud` equal to the configured client ID, `exp`, `nbf`, 60 s
+  clock skew. Entra tokens must also carry the configured tenant (`tid`);
+  Google tokens must carry `email_verified=true` and, if configured, an
+  allowed hosted domain (`hd`).
+- **Identity.** A person is identified by `(issuer, sub)`; the audit log also
+  records their email.
+- **Roles.** Cumulative: admin ⊃ operator ⊃ viewer. Resolved per provider:
+  - *Entra ID:* the token's `groups` claim (group object IDs), mapped by
+    configuration. Users in too many groups for the claim (Entra's
+    "overage") are resolved through Microsoft Graph `getMemberObjects` with
+    the leader's own app credentials.
+  - *Google, groups preferred:* when a Google service account with
+    group-read permission is configured, the leader reads the person's
+    Google Groups through the Cloud Identity Groups API and maps group
+    emails to roles.
+  - *Google, fallback:* when no service account is configured, or as an
+    addition, roles come from configured email-address and domain lists per
+    role. These lists need Google Workspace membership: a domain entry matches
+    only when the token's `hd` and the email's domain both equal it, and an
+    email entry only when `hd` equals the address's domain — except
+    `gmail.com`/`googlemail.com` addresses, which carry no `hd`.
+  - Role lookups are cached for 5 minutes per person. A person with no role
+    is refused with `403`.
 
 | Role | May |
 |---|---|
@@ -293,12 +321,12 @@ A follower that receives `412` (or a size mismatch on local) reports
 | operator | viewer + `ingest`, `jobs retry/cancel/priority`, `followers drain`, `vocabulary global set`, `vocabulary sync`, `vocabulary requeue` |
 | admin | operator + `locations add/edit/disable`, `tokens create/revoke`, `followers revoke`, `profiles edit`, `consent delete-flagged` |
 
-- `swarmscribe-admin login` uses the OAuth device-code flow against the
-  issuer (public client, PKCE where supported) and caches the tokens in
+- `swarmscribe-admin login [--provider entra|google]` uses that provider's
+  device-code flow (public client) and caches the tokens in
   `~/.config/swarmscribe/credentials.json` with owner-only permissions,
   refreshing silently.
-- Every admin endpoint writes an audit entry with the token's `sub` and
-  `email`.
+- Every admin endpoint writes an audit entry with the issuer, `sub` and
+  email.
 
 ## 11. Configuration
 
@@ -309,8 +337,9 @@ Environment variables (Kubernetes Secrets for the secret ones):
 | `SWARMSCRIBE_DATABASE_URL` | Postgres URL (secret) |
 | `SWARMSCRIBE_PUBLIC_URL` | external base URL, used in local links |
 | `SWARMSCRIBE_LINK_KEY` | HMAC key for local links (secret, ≥ 32 bytes) |
-| `SWARMSCRIBE_OIDC_ISSUER`, `…_OIDC_AUDIENCE`, `…_OIDC_CLIENT_ID` | admin SSO |
-| `SWARMSCRIBE_ROLE_CLAIM`, `SWARMSCRIBE_ROLE_VIEWER/OPERATOR/ADMIN` | role mapping |
+| `SWARMSCRIBE_ENTRA_TENANT_ID`, `…_ENTRA_CLIENT_ID`, `…_ENTRA_CLIENT_SECRET` (secret, for Graph overage) | Entra ID sign-in |
+| `SWARMSCRIBE_GOOGLE_CLIENT_ID`, `…_GOOGLE_CLIENT_SECRET` (secret), `…_GOOGLE_HOSTED_DOMAIN`, `…_GOOGLE_SERVICE_ACCOUNT` (secret, optional) | Google sign-in and group lookup |
+| `SWARMSCRIBE_ROLE_<VIEWER/OPERATOR/ADMIN>_ENTRA_GROUPS`, `…_GOOGLE_GROUPS`, `…_EMAILS`, `…_DOMAINS` | role mapping |
 | `SWARMSCRIBE_LEASE_SECONDS` (120), `…_HEARTBEAT_SECONDS` (30), `…_MAX_ATTEMPTS` (3) | job timing |
 | storage secrets | referenced by each location's `secret_ref`, read from env or mounted files |
 

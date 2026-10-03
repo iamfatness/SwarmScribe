@@ -7,8 +7,9 @@ from sqlalchemy.exc import DBAPIError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from swarmscribe_protocol import ErrorBody
 
-from ..errors import LeaderError
+from ..errors import LeaderError, Unauthorized
 from ..storage.base import StorageError, StorageUnavailable
+from .admin_auth import audit_refused_request
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +38,16 @@ def error_response(
 def install(app: FastAPI) -> None:
     # Nothing here logs the request URL or path: signed-link tokens live in paths.
     @app.exception_handler(LeaderError)
-    async def leader_error(_request: Request, exc: LeaderError) -> JSONResponse:
-        return error_response(exc.code, exc.message, exc.status)
+    async def leader_error(request: Request, exc: LeaderError) -> JSONResponse:
+        if exc.status in (400, 404, 409, 422):
+            await audit_refused_request(request, exc.code)
+        headers: dict[str, str] = {}
+        if exc.retry_after:
+            headers["Retry-After"] = str(exc.retry_after)
+        if isinstance(exc, Unauthorized):  # RFC 6750: say how to authenticate
+            error = exc.bearer_error
+            headers["WWW-Authenticate"] = f'Bearer error="{error}"' if error else "Bearer"
+        return error_response(exc.code, exc.message, exc.status, headers=headers or None)
 
     @app.exception_handler(StorageError)
     async def storage_error(_request: Request, exc: StorageError) -> JSONResponse:
@@ -73,7 +82,8 @@ def install(app: FastAPI) -> None:
         return error_response(code, str(exc.detail), exc.status_code, headers=exc.headers)
 
     @app.exception_handler(RequestValidationError)
-    async def validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        await audit_refused_request(request, "invalid_request")
         summary = "; ".join(
             f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}" for err in exc.errors()
         )

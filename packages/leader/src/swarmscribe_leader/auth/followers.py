@@ -1,13 +1,14 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from swarmscribe_protocol import PROTOCOL_VERSION, RegisterRequest
 
 from .. import audit
 from ..db.models import Follower, JoinToken
-from ..errors import Conflict, Forbidden, Unauthorized
+from ..errors import Conflict, Forbidden, InvalidToken, NotFound
+from ..jobs.store import release_all
 from .secrets import hash_secret, new_secret
 
 
@@ -52,7 +53,7 @@ async def register(
         .with_for_update()
     )
     if token is None or token.revoked or token.expires_at <= now or token.uses >= token.max_uses:
-        raise Unauthorized("the join token is not valid")
+        raise InvalidToken("the join token is not valid")
     token.uses += 1
     credential = new_secret()
     follower = Follower(
@@ -84,10 +85,82 @@ async def authenticate(session: AsyncSession, credential: str, *, now: datetime)
         .execution_options(populate_existing=True)
     )
     if follower is None:
-        raise Unauthorized("unknown follower credential")
+        raise InvalidToken("unknown follower credential")
     if follower.state == "revoked":
         raise Forbidden("this follower has been revoked")
     if follower.state == "gone":
         follower.state = "active"
     follower.last_seen_at = now
     return follower
+
+
+async def _locked_follower(session: AsyncSession, follower_id: uuid.UUID) -> Follower:
+    """The follower row first, then its jobs by id: the order every path that locks both
+    (deregister, submit, heartbeat, the reaper, the scanner) uses."""
+    follower = await session.get(
+        Follower, follower_id, with_for_update=True, populate_existing=True
+    )
+    if follower is None:
+        raise NotFound("no such follower")
+    return follower
+
+
+async def drain(session: AsyncSession, follower_id: uuid.UUID, *, actor: str) -> Follower:
+    """The follower finishes what it holds and takes nothing new."""
+    follower = await _locked_follower(session, follower_id)
+    moved = await session.execute(
+        update(Follower)
+        .where(Follower.id == follower.id, Follower.state != "revoked")
+        .values(state="draining")
+    )
+    if moved.rowcount == 0:
+        raise Conflict("a revoked follower cannot be drained", code="revoked")
+    await session.refresh(follower)
+    audit.record(
+        session,
+        actor=actor,
+        action="follower.drain",
+        subject_type="follower",
+        subject_id=follower.id,
+    )
+    return follower
+
+
+async def revoke_follower(
+    session: AsyncSession, follower_id: uuid.UUID, *, now: datetime, actor: str
+) -> tuple[Follower, int]:
+    """Every further call from the follower is refused, and its leases are released at once
+    (so its upload links stop working; the attempts are not counted). Returns the follower
+    and the number of leases released."""
+    follower = await _locked_follower(session, follower_id)
+    released = await release_all(session, follower, now=now)
+    await session.execute(
+        update(Follower)
+        .where(Follower.id == follower.id, Follower.state != "revoked")
+        .values(state="revoked")
+    )
+    await session.refresh(follower)
+    audit.record(
+        session,
+        actor=actor,
+        action="follower.revoke",
+        subject_type="follower",
+        subject_id=follower.id,
+        detail={"released": released},
+    )
+    return follower, released
+
+
+async def revoke_token(session: AsyncSession, token_id: uuid.UUID, *, actor: str) -> JoinToken:
+    token = await session.get(JoinToken, token_id, with_for_update=True, populate_existing=True)
+    if token is None:
+        raise NotFound("no such join token")
+    token.revoked = True
+    audit.record(
+        session,
+        actor=actor,
+        action="token.revoke",
+        subject_type="join_token",
+        subject_id=token.id,
+    )
+    return token

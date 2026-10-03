@@ -89,6 +89,34 @@ def test_an_invalid_link_key_is_named_but_never_echoed(monkeypatch, capsys, comm
         assert secret not in captured.err + captured.out
 
 
+@pytest.mark.parametrize("command", ["serve", "migrate"])
+def test_a_bad_sign_in_setting_is_named_but_no_secret_is_echoed(monkeypatch, capsys, command):
+    monkeypatch.setenv("SWARMSCRIBE_DATABASE_URL", "postgresql://user:hunter2-db@db/none")
+    monkeypatch.setenv("SWARMSCRIBE_PUBLIC_URL", "http://leader")
+    monkeypatch.setenv("SWARMSCRIBE_LINK_KEY", "k" * 32)
+    monkeypatch.setenv("SWARMSCRIBE_GOOGLE_CLIENT_ID", "g")
+    monkeypatch.setenv("SWARMSCRIBE_GOOGLE_CLIENT_SECRET", "google-secret-value")
+    monkeypatch.setenv("SWARMSCRIBE_GOOGLE_SERVICE_ACCOUNT", "{not json} service-account-secret")
+    assert entry.main([command]) == 2
+    captured = capsys.readouterr()
+    assert "google_service_account" in captured.err
+    shown = captured.err + captured.out
+    for secret in ("google-secret-value", "service-account-secret"):
+        assert secret not in shown
+
+
+@pytest.mark.parametrize("command", ["serve", "migrate"])
+def test_an_orphaned_entra_secret_is_named_but_not_echoed(monkeypatch, capsys, command):
+    monkeypatch.setenv("SWARMSCRIBE_DATABASE_URL", "postgresql://user:hunter2-db@db/none")
+    monkeypatch.setenv("SWARMSCRIBE_PUBLIC_URL", "http://leader")
+    monkeypatch.setenv("SWARMSCRIBE_LINK_KEY", "k" * 32)
+    monkeypatch.setenv("SWARMSCRIBE_ENTRA_CLIENT_SECRET", "entra-secret-value")
+    assert entry.main([command]) == 2
+    captured = capsys.readouterr()
+    assert "entra_client_secret" in captured.err
+    assert "entra-secret-value" not in captured.err + captured.out
+
+
 def test_migrate_upgrades_and_reports_the_revision(monkeypatch, capsys, migrated_database_url):
     monkeypatch.setenv("SWARMSCRIBE_DATABASE_URL", migrated_database_url)
     monkeypatch.setenv("SWARMSCRIBE_PUBLIC_URL", "http://leader")

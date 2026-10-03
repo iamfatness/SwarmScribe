@@ -16,7 +16,22 @@ HASH_CHUNK_BYTES = 1024 * 1024
 
 
 def version_of(stat_result: os.stat_result) -> str:
-    return f"{stat_result.st_size}-{stat_result.st_mtime_ns}"
+    # The inode too: a replacement with the same size and mtime is still another file.
+    return f"{stat_result.st_size}-{stat_result.st_mtime_ns}-{stat_result.st_ino}"
+
+
+def validate_key(key: str) -> None:
+    """Refuse a key that is empty, absolute, non-canonical, holds control characters, or
+    has a part that could escape its folder or misbehave on Windows."""
+    if not key or key.startswith("/") or "\\" in key or ":" in key:
+        raise StorageError(f"invalid storage key {key!r}")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in key):
+        raise StorageError(f"invalid storage key {key!r}")
+    if key != PurePosixPath(key).as_posix():
+        raise StorageError(f"invalid storage key {key!r}")
+    for segment in key.split("/"):
+        if segment in ("", ".", "..") or segment.endswith((".", " ")):
+            raise StorageError(f"invalid storage key {key!r}")
 
 
 class LocalBackend:
@@ -49,15 +64,7 @@ class LocalBackend:
             ) from exc
 
     def path_for(self, key: str) -> Path:
-        if not key or key.startswith("/") or "\\" in key or ":" in key:
-            raise StorageError(f"invalid storage key {key!r}")
-        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in key):
-            raise StorageError(f"invalid storage key {key!r}")
-        if key != PurePosixPath(key).as_posix():
-            raise StorageError(f"invalid storage key {key!r}")
-        for segment in key.split("/"):
-            if segment in ("", ".", "..") or segment.endswith((".", " ")):
-                raise StorageError(f"invalid storage key {key!r}")
+        validate_key(key)
         path = (self.root / key).resolve()
         if not path.is_relative_to(self.root):
             raise StorageError(f"invalid storage key {key!r}")
@@ -83,17 +90,30 @@ class LocalBackend:
         for info in await asyncio.to_thread(self._list_sync, prefix):
             yield info
 
+    def _walk_start(self, prefix: str) -> Path:
+        """The folder holding every key that starts with `prefix`. The walk begins there, so
+        folders outside the input folder (a drive root's system folders, the outputs) are
+        never read."""
+        folder = prefix.rpartition("/")[0]
+        if not folder:
+            return self.root
+        start = self.file_path(folder)
+        if not start.is_dir():
+            raise StorageUnavailable(f"input folder {folder!r} is not available")
+        return start
+
     def _list_sync(self, prefix: str) -> Sequence[ObjectInfo]:
-        """Everything under the root, or an error: a directory that cannot be read makes
+        """Everything under `prefix`, or an error: a directory that cannot be read makes
         the listing fail rather than come back partial (a partial listing would mark the
         unseen recordings missing and cancel their jobs)."""
         self._require_root()
+        start = self._walk_start(prefix)
 
         def unreadable(exc: OSError) -> None:
             raise StorageUnavailable(f"a directory cannot be listed: {exc.strerror}") from exc
 
         found: list[ObjectInfo] = []
-        for dirpath, dirnames, filenames in os.walk(self.root, onerror=unreadable):
+        for dirpath, dirnames, filenames in os.walk(start, onerror=unreadable):
             dirnames[:] = sorted(d for d in dirnames if not self._is_link(Path(dirpath) / d))
             for name in sorted(filenames):
                 full = Path(dirpath) / name

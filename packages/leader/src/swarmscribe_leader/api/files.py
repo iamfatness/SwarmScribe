@@ -2,8 +2,10 @@ import contextlib
 import os
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from functools import partial
 from pathlib import Path
+from typing import Any
 
 import anyio.to_thread
 from fastapi import APIRouter, Request, Response
@@ -20,6 +22,11 @@ router = APIRouter(prefix="/v1/files")
 
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 CHUNK_BYTES = 256 * 1024
+
+
+async def _in_thread(function: Callable[..., Any], *args: Any) -> Any:
+    """Filesystem calls can block for seconds on a slow or network disk: never on the loop."""
+    return await anyio.to_thread.run_sync(function, *args)
 
 
 def _claims(request: Request, token: str, method: str) -> LinkClaims:
@@ -75,7 +82,7 @@ def _is_file(path: Path) -> bool:
 
 async def _stream(handle) -> AsyncIterator[bytes]:
     try:
-        while chunk := await anyio.to_thread.run_sync(handle.read, CHUNK_BYTES):
+        while chunk := await _in_thread(handle.read, CHUNK_BYTES):
             yield chunk
     finally:
         handle.close()
@@ -85,8 +92,8 @@ async def _stream(handle) -> AsyncIterator[bytes]:
 async def download(token: str, request: Request) -> StreamingResponse:
     claims = _claims(request, token, "GET")
     backend = await _backend(request, claims)
-    path = backend.file_path(claims.key)
-    handle, size = _open_current(path, claims.version)
+    path = await _in_thread(backend.file_path, claims.key)
+    handle, size = await _in_thread(_open_current, path, claims.version)
     return StreamingResponse(
         _stream(handle),
         media_type="application/octet-stream",
@@ -94,17 +101,42 @@ async def download(token: str, request: Request) -> StreamingResponse:
     )
 
 
-async def _require_current_lease(request: Request, claims: LinkClaims) -> None:
-    """The upload belongs to a lease; once that lease has ended (expired and re-leased,
-    cancelled, completed), its links must not write anything."""
+def _lease_ids(claims: LinkClaims) -> tuple[uuid.UUID, uuid.UUID]:
     try:
-        job_id, lease_id = uuid.UUID(claims.job_id), uuid.UUID(claims.lease_id)
+        return uuid.UUID(claims.job_id), uuid.UUID(claims.lease_id)
     except ValueError as exc:
         raise StaleLease("this upload link's lease is no longer current") from exc
+
+
+def _lease_is_current(job: Job | None, lease_id: uuid.UUID) -> bool:
+    return job is not None and job.state == "leased" and job.lease_id == lease_id
+
+
+async def _require_current_lease(request: Request, claims: LinkClaims) -> None:
+    """The upload belongs to a lease; once that lease has ended (expired and re-leased,
+    cancelled, completed), its links must not write anything. A cheap check, made before
+    the body is read; `_replace_if_lease_current` makes the one that counts."""
+    job_id, lease_id = _lease_ids(claims)
     async with request.app.state.sessionmaker() as session:
         job = await session.get(Job, job_id)
-    if job is None or job.state != "leased" or job.lease_id != lease_id:
+    if not _lease_is_current(job, lease_id):
         raise StaleLease("this upload link's lease is no longer current")
+
+
+async def _replace_if_lease_current(
+    request: Request, claims: LinkClaims, temp: Path, path: Path
+) -> None:
+    """Check the lease and replace the target while holding a shared lock on the job row.
+    Submit takes the row FOR UPDATE, so it waits for this replace, or this check sees the
+    job completed: an output can never change after submit has verified it."""
+    job_id, lease_id = _lease_ids(claims)
+    async with request.app.state.sessionmaker() as session, session.begin():
+        job = await session.get(
+            Job, job_id, with_for_update={"read": True}, populate_existing=True
+        )
+        if not _lease_is_current(job, lease_id):
+            raise StaleLease("this upload link's lease is no longer current")
+        await _in_thread(os.replace, temp, path)
 
 
 @router.put("/{token}", status_code=201)
@@ -117,22 +149,24 @@ async def upload(token: str, request: Request) -> Response:
         raise PayloadTooLarge("upload is larger than 512 MiB")
     await _require_current_lease(request, claims)
     backend = await _backend(request, claims)
-    path = backend.file_path(claims.key)
-    if path.is_dir():
+    path = await _in_thread(backend.file_path, claims.key)
+    if await _in_thread(path.is_dir):
         raise StorageError(f"{claims.key!r} is a directory, not an object")
     temp = path.with_name(f".upload-{uuid.uuid4().hex}")
     size = 0
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with temp.open("wb") as out:
+        await _in_thread(partial(path.parent.mkdir, parents=True, exist_ok=True))
+        out = await _in_thread(temp.open, "wb")
+        try:
             async for chunk in request.stream():
                 size += len(chunk)
                 if size > MAX_UPLOAD_BYTES:
                     raise PayloadTooLarge("upload is larger than 512 MiB")
-                out.write(chunk)
-        # Again, right before the target changes: the lease may have ended meanwhile.
-        await _require_current_lease(request, claims)
-        os.replace(temp, path)
+                await _in_thread(out.write, chunk)
+        finally:
+            await _in_thread(out.close)
+        # Right before the target changes: the lease may have ended meanwhile.
+        await _replace_if_lease_current(request, claims, temp, path)
     except (NotADirectoryError, FileExistsError) as exc:
         raise StorageError(f"invalid storage key {claims.key!r}") from exc
     except PermissionError:
@@ -143,5 +177,5 @@ async def upload(token: str, request: Request) -> Response:
         raise StorageUnavailable("the upload could not be stored") from exc
     finally:
         with contextlib.suppress(OSError):
-            temp.unlink(missing_ok=True)
+            await _in_thread(partial(temp.unlink, missing_ok=True))
     return Response(status_code=201)

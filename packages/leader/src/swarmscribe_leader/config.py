@@ -1,13 +1,36 @@
+import json
+import uuid
+from pathlib import Path
+from typing import Annotated, Any
 from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+ROLES = ("viewer", "operator", "admin")
+_ROLE_KINDS = ("entra_groups", "google_groups", "emails", "domains")
+_ROLE_LISTS = tuple(f"role_{role}_{kind}" for role in ROLES for kind in _ROLE_KINDS)
+GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token"
+_BAD_SERVICE_ACCOUNT = (
+    "google_service_account must be a service-account JSON key or the path of a file holding one"
+)
+
+NameList = Annotated[tuple[str, ...], NoDecode]
+"""Comma-separated in the environment, e.g. `a@example.org, b@example.org`."""
+
+
+def _is_domain(name: str) -> bool:
+    return "." in name and not any(c in name for c in "*@") and not any(c.isspace() for c in name)
 
 
 class Settings(BaseSettings):
     """Leader configuration, read from SWARMSCRIBE_* environment variables."""
 
-    model_config = SettingsConfigDict(env_prefix="SWARMSCRIBE_", extra="ignore")
+    # hide_input_in_errors: a model-level ValidationError would otherwise echo (a truncated
+    # repr of) every setting, secrets included.
+    model_config = SettingsConfigDict(
+        env_prefix="SWARMSCRIBE_", extra="ignore", hide_input_in_errors=True
+    )
 
     # Secrets: never shown in repr, logs or validation errors; use .get_secret_value().
     database_url: SecretStr
@@ -24,6 +47,29 @@ class Settings(BaseSettings):
     download_link_ttl_seconds: int = Field(default=1800, gt=0)
     upload_link_ttl_seconds: int = Field(default=7200, gt=0)
 
+    # Administrators' sign-in. Either provider, or both, may be configured.
+    entra_tenant_id: str | None = None
+    entra_client_id: str | None = None
+    entra_client_secret: SecretStr | None = None  # only for Microsoft Graph on group overage
+    google_client_id: str | None = None
+    google_client_secret: SecretStr | None = None
+    google_hosted_domain: str | None = None
+    google_service_account: SecretStr | None = None  # JSON key, or the path of a file with it
+    role_cache_seconds: int = Field(default=300, gt=0)
+
+    role_viewer_entra_groups: NameList = ()
+    role_viewer_google_groups: NameList = ()
+    role_viewer_emails: NameList = ()
+    role_viewer_domains: NameList = ()
+    role_operator_entra_groups: NameList = ()
+    role_operator_google_groups: NameList = ()
+    role_operator_emails: NameList = ()
+    role_operator_domains: NameList = ()
+    role_admin_entra_groups: NameList = ()
+    role_admin_google_groups: NameList = ()
+    role_admin_emails: NameList = ()
+    role_admin_domains: NameList = ()
+
     @field_validator("public_url")
     @classmethod
     def _absolute_http_url(cls, value: str) -> str:
@@ -39,6 +85,78 @@ class Settings(BaseSettings):
             raise ValueError("link_key must be at least 32 characters")
         return value
 
+    @field_validator(*_ROLE_LISTS, mode="before")
+    @classmethod
+    def _name_list(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            value = value.split(",")
+        if isinstance(value, list | tuple):
+            # Lowercase ASCII entries only: a non-ASCII entry is kept as written so the
+            # ASCII check refuses it (KELVIN SIGN, U+212A, would otherwise lowercase to "k").
+            stripped = (str(item).strip() for item in value)
+            names = (
+                (name.lower() if name.isascii() else name).removeprefix("@") for name in stripped
+            )
+            return tuple(name for name in names if name)
+        return value
+
+    @field_validator(*_ROLE_LISTS)
+    @classmethod
+    def _entries_are_well_formed(cls, names: tuple[str, ...], info: ValidationInfo) -> Any:
+        kind = (info.field_name or "").rsplit("_", 1)[-1]
+        for position, name in enumerate(names, start=1):
+            if kind in ("domains", "emails") and not name.isascii():
+                ok = False  # Unicode lookalikes of an ASCII domain must never match
+            elif kind == "domains":
+                ok = _is_domain(name)
+            elif kind == "emails":
+                local, at, domain = name.partition("@")
+                ok = bool(local) and at == "@" and _is_domain(domain)
+            else:
+                ok = True
+            if not ok:
+                raise ValueError(
+                    f"{info.field_name} entry {position} ({name!r}) is not a valid "
+                    f"{'domain' if kind == 'domains' else 'email address'} (ASCII only)"
+                )
+        return names
+
+    @field_validator(
+        "entra_client_secret", "google_client_secret", "google_service_account", mode="before"
+    )
+    @classmethod
+    def _blank_secret_is_unset(cls, value: Any) -> Any:
+        # Compose/Kubernetes pass an unset variable as an empty string.
+        if isinstance(value, str) and not value.strip():
+            return None
+        if isinstance(value, SecretStr) and not value.get_secret_value().strip():
+            return None
+        return value
+
+    @field_validator("entra_tenant_id")
+    @classmethod
+    def _tenant_is_an_id(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        try:
+            return str(uuid.UUID(value.strip()))
+        except ValueError as exc:
+            raise ValueError(
+                "entra_tenant_id must be the tenant's ID (a GUID), not its domain name"
+            ) from exc
+
+    @field_validator("entra_client_id", "google_client_id", "google_hosted_domain")
+    @classmethod
+    def _blank_is_unset(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        return value.strip()
+
+    @field_validator("google_hosted_domain")
+    @classmethod
+    def _domain_lowercase(cls, value: str | None) -> str | None:
+        return value.removeprefix("@").lower() if value else value
+
     @model_validator(mode="after")
     def _heartbeat_inside_lease(self) -> "Settings":
         if self.heartbeat_seconds >= self.lease_seconds:
@@ -50,3 +168,54 @@ class Settings(BaseSettings):
         if self.follower_gone_after_seconds <= self.lease_seconds:
             raise ValueError("follower_gone_after_seconds must be longer than lease_seconds")
         return self
+
+    @model_validator(mode="after")
+    def _sign_in_is_complete(self) -> "Settings":
+        if bool(self.entra_client_id) != bool(self.entra_tenant_id):
+            raise ValueError("entra_client_id and entra_tenant_id must be set together")
+        if self.entra_client_secret is not None and not self.entra_client_id:
+            raise ValueError("entra_client_secret needs entra_client_id")
+        if self.google_client_id and self.google_client_secret is None:
+            raise ValueError(
+                "google_client_secret is required with google_client_id "
+                "(the admin CLI's device sign-in sends it)"
+            )
+        if not self.google_client_id:
+            for name in ("google_client_secret", "google_hosted_domain", "google_service_account"):
+                if getattr(self, name) is not None:
+                    raise ValueError(f"{name} needs google_client_id")
+        for role in ROLES:
+            if getattr(self, f"role_{role}_entra_groups") and not self.entra_client_id:
+                raise ValueError(f"role_{role}_entra_groups needs Entra ID sign-in")
+            if getattr(self, f"role_{role}_google_groups") and self.google_service_account is None:
+                raise ValueError(
+                    f"role_{role}_google_groups needs google_service_account to read Google Groups"
+                )
+            for kind in ("emails", "domains"):
+                if getattr(self, f"role_{role}_{kind}") and not self.google_client_id:
+                    raise ValueError(
+                        f"role_{role}_{kind} applies to Google sign-in; set google_client_id"
+                    )
+        if self.google_service_account is not None:
+            self.google_service_account_key()
+        return self
+
+    def google_service_account_key(self) -> dict[str, str] | None:
+        """The service account's JSON key: the setting holds the JSON itself, or the path of
+        a mounted file containing it. Error messages never include the key."""
+        if self.google_service_account is None:
+            return None
+        raw = self.google_service_account.get_secret_value().strip()
+        try:
+            if not raw.startswith("{"):
+                raw = Path(raw).read_text(encoding="utf-8")
+            key = json.loads(raw)
+        except (OSError, ValueError):
+            raise ValueError(_BAD_SERVICE_ACCOUNT) from None
+        if not isinstance(key, dict) or not all(
+            isinstance(key.get(field), str) and key.get(field)
+            for field in ("client_email", "private_key")
+        ):
+            raise ValueError(_BAD_SERVICE_ACCOUNT)
+        key.setdefault("token_uri", GOOGLE_TOKEN_URI)
+        return key

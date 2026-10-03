@@ -1,0 +1,157 @@
+"""Who is calling /v1/admin, and may they? Refusals for a role are audited; tokens are never
+logged or stored."""
+
+import logging
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+
+from fastapi import Request
+
+from .. import audit
+from ..auth.oidc import (
+    Fetch,
+    Identity,
+    MetadataUnavailable,
+    TokenVerifier,
+    http_fetch,
+    providers_from,
+)
+from ..auth.roles import (
+    GoogleCloudIdentity,
+    GoogleGroupsClient,
+    GraphClient,
+    MicrosoftGraph,
+    Role,
+    RoleLookupFailed,
+    RoleMapping,
+    RoleResolver,
+    at_least,
+)
+from ..config import Settings
+from ..errors import Forbidden, ServiceUnavailable, Unauthorized
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Admin:
+    identity: Identity
+    role: Role
+
+    @property
+    def actor(self) -> str:
+        return self.identity.actor
+
+
+class AdminAuth:
+    def __init__(self, verifier: TokenVerifier, resolver: RoleResolver):
+        self.verifier = verifier
+        self.resolver = resolver
+
+    @classmethod
+    def from_settings(
+        cls,
+        settings: Settings,
+        *,
+        fetch: Fetch | None = None,
+        graph: GraphClient | None = None,
+        google_groups: GoogleGroupsClient | None = None,
+        clock: Callable[[], float] = time.time,
+    ) -> "AdminAuth":
+        """Real directory clients are built only when configured and not given."""
+        if graph is None and settings.entra_client_id and settings.entra_client_secret:
+            graph = MicrosoftGraph(
+                settings.entra_tenant_id, settings.entra_client_id, settings.entra_client_secret
+            )
+        service_account = settings.google_service_account_key()
+        if google_groups is None and service_account is not None:
+            google_groups = GoogleCloudIdentity(service_account)
+        verifier = TokenVerifier(providers_from(settings), fetch=fetch or http_fetch, clock=clock)
+        resolver = RoleResolver(
+            RoleMapping.from_settings(settings),
+            graph=graph,
+            google_groups=google_groups,
+            cache_seconds=settings.role_cache_seconds,
+        )
+        return cls(verifier, resolver)
+
+    async def authenticate(self, token: str) -> tuple[Identity, Role | None]:
+        try:
+            identity = await self.verifier.verify(token)
+            return identity, await self.resolver.role_for(identity)
+        except (MetadataUnavailable, RoleLookupFailed) as exc:
+            logger.warning("an administrator's sign-in could not be checked: %s", exc)
+            raise ServiceUnavailable("sign-in cannot be checked right now; retry shortly") from exc
+
+
+def _bearer(request: Request) -> str:
+    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        raise Unauthorized(
+            "sign in with `swarmscribe-admin login` and send the ID token as a Bearer token"
+        )
+    return token.strip()
+
+
+async def _audit_refusal(
+    request: Request, identity: Identity, granted: Role | None, required: Role
+) -> None:
+    route = request.scope.get("route")
+    async with request.app.state.sessionmaker() as session:
+        audit.record(
+            session,
+            actor=identity.actor,
+            action="admin.refused",
+            subject_type="endpoint",
+            subject_id=f"{request.method} {getattr(route, 'path', '?')}",
+            detail={"role": granted, "required": required},
+        )
+        await session.commit()
+
+
+_READS = ("GET", "HEAD", "OPTIONS")
+
+
+async def audit_refused_request(request: Request, code: str) -> None:
+    """Record that a signed-in administrator's request (past the role check) was refused:
+    a change for a business reason (admin.change_refused) or a read that failed
+    (admin.read_refused), so every admin call leaves an entry. Own session: the request's
+    transaction is rolled back. Only the route template and the error code are recorded,
+    never request values."""
+    admin = getattr(request.state, "admin", None)
+    if admin is None:
+        return
+    action = "admin.read_refused" if request.method in _READS else "admin.change_refused"
+    route = request.scope.get("route")
+    try:
+        async with request.app.state.sessionmaker() as session:
+            audit.record(
+                session,
+                actor=admin.actor,
+                action=action,
+                subject_type="endpoint",
+                subject_id=f"{request.method} {getattr(route, 'path', '?')}",
+                detail={"code": code},
+            )
+            await session.commit()
+    except Exception:
+        logger.exception("a refused admin request could not be audited")
+
+
+def require(role: Role) -> Callable[[Request], Awaitable[Admin]]:
+    """A dependency admitting people whose role is `role` or higher."""
+
+    async def dependency(request: Request) -> Admin:
+        auth: AdminAuth = request.app.state.admin_auth
+        identity, granted = await auth.authenticate(_bearer(request))
+        if not at_least(granted, role):
+            await _audit_refusal(request, identity, granted, role)
+            if granted is None:
+                raise Forbidden("you have no SwarmScribe role; ask an administrator for one")
+            raise Forbidden(f"this needs the {role} role; you have {granted}")
+        admin = Admin(identity=identity, role=granted)
+        request.state.admin = admin
+        return admin
+
+    return dependency

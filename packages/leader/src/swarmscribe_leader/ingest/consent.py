@@ -24,7 +24,12 @@ def parse_consent(text: str | None) -> tuple[str, ...]:
 
 
 class ConsentFileError(ValueError):
-    """consent.txt holds a pattern that cannot be used."""
+    """consent.txt holds a pattern that cannot be used, or is too large to read."""
+
+
+CONSENT_FILE = "consent.txt"
+MAX_CONSENT_BYTES = 1024 * 1024
+CONSENT_TOO_LARGE = "consent.txt is larger than 1 MiB"
 
 
 def _class_end(pattern: str, start: int) -> int:

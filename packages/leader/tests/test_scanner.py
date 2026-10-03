@@ -1,8 +1,12 @@
+import asyncio
+import itertools
 import os
 import shutil
+import time
+import uuid
 from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, insert, select
 from swarmscribe_leader.clock import utcnow
 from swarmscribe_leader.db.models import AuditEntry, Job, Recording, StorageLocation
 from swarmscribe_leader.ingest.scanner import scan_due_locations, scan_location
@@ -299,6 +303,9 @@ class OverListingBackend:
     async def read_text(self, key):
         return await self.inner.read_text(key)
 
+    async def stat(self, key):
+        return await self.inner.stat(key)
+
 
 async def test_keys_outside_the_input_prefix_are_ignored(sessionmaker, factory, tmp_path):
     write(tmp_path, "consent.txt", b"**\n")
@@ -380,6 +387,111 @@ async def test_a_recording_that_reappears_is_queued_again(sessionmaker, factory,
     (recording,) = await rows(sessionmaker, Recording)
     assert recording.missing is False
     assert sorted(j.state for j in await rows(sessionmaker, Job)) == ["cancelled", "queued"]
+
+
+async def test_a_location_with_40000_recordings_scans(sessionmaker, factory, tmp_path):
+    # Every recording is in the catalogue but gone from storage, so each query of the scan
+    # covers all 40 000 rows. Binding them as a Python list would exceed asyncpg's limit of
+    # 32 767 parameters per statement.
+    write(tmp_path, "consent.txt", b"")
+    location = await factory.location()
+    now = utcnow()
+    rows_to_insert = [
+        {
+            "id": uuid.uuid4(),
+            "location_id": location.id,
+            "key": f"talks/{i:05d}.mp3",
+            "size": 1,
+            "source_version": "1-1",
+            "consent": "consented",
+            "first_seen_at": now,
+            "last_seen_at": now,
+            "missing": False,
+        }
+        for i in range(40_000)
+    ]
+    async with sessionmaker() as session:
+        for start in range(0, len(rows_to_insert), 5_000):
+            await session.execute(insert(Recording), rows_to_insert[start : start + 5_000])
+        await session.commit()
+    summary = await scan(sessionmaker, location)
+    assert (summary.missing, summary.listed) == (40_000, 0)
+    async with sessionmaker() as session:
+        withdrawn = await session.scalar(
+            select(func.count()).select_from(Recording).where(Recording.consent == "withdrawn")
+        )
+    assert withdrawn == 40_000
+
+
+def walk_with_an_unreadable_directory(real_walk):
+    def walk(top, topdown=True, onerror=None, followlinks=False):
+        yield from real_walk(top, topdown=topdown, onerror=onerror, followlinks=followlinks)
+        if onerror is not None:
+            onerror(PermissionError(13, "Access is denied", os.path.join(top, "talks")))
+
+    return walk
+
+
+async def test_a_partial_listing_fails_the_scan_and_changes_nothing(
+    sessionmaker, factory, tmp_path, monkeypatch
+):
+    write(tmp_path, "consent.txt", b"**/*.mp3\n")
+    write(tmp_path, "talks/one.mp3")
+    location = await factory.location()
+    await scan(sessionmaker, location)
+    (tmp_path / "talks" / "one.mp3").unlink()  # unseen: but only because the listing was partial
+    monkeypatch.setattr(os, "walk", walk_with_an_unreadable_directory(os.walk))
+    results = await scan_due_locations(
+        sessionmaker, backends, now=utcnow() + timedelta(hours=1), max_attempts=3
+    )
+    assert isinstance(results[location.name], str)
+    (recording,) = await rows(sessionmaker, Recording)
+    (job,) = await rows(sessionmaker, Job)
+    assert recording.missing is False
+    assert job.state == "queued"
+    async with sessionmaker() as session:
+        assert (await session.get(StorageLocation, location.id)).last_scan_error
+
+
+async def test_the_event_loop_keeps_running_during_a_slow_listing(
+    sessionmaker, factory, tmp_path, monkeypatch
+):
+    write(tmp_path, "consent.txt", b"**/*.mp3\n")
+    write(tmp_path, "talks/one.mp3")
+    location = await factory.location()
+    real_walk = os.walk
+
+    def slow_walk(*args, **kwargs):
+        time.sleep(0.5)
+        yield from real_walk(*args, **kwargs)
+
+    monkeypatch.setattr(os, "walk", slow_walk)
+    ticks: list[float] = []
+    stop = asyncio.Event()
+
+    async def ticker():
+        while not stop.is_set():
+            ticks.append(time.monotonic())
+            await asyncio.sleep(0)
+
+    task = asyncio.create_task(ticker())
+    try:
+        await scan(sessionmaker, location)
+    finally:
+        stop.set()
+        await task
+    gaps = [b - a for a, b in itertools.pairwise(ticks)]
+    assert max(gaps) < 0.25
+
+
+async def test_a_consent_file_over_1_mib_fails_the_scan(sessionmaker, factory, tmp_path):
+    write(tmp_path, "consent.txt", b"**/*.mp3\n" + b"#" * (1024 * 1024))
+    write(tmp_path, "talks/one.mp3")
+    location = await factory.location()
+    results = await scan_due_locations(sessionmaker, backends, now=utcnow(), max_attempts=3)
+    assert results[location.name] == "consent.txt is larger than 1 MiB"
+    assert await rows(sessionmaker, Recording) == []
+    assert await rows(sessionmaker, Job) == []
 
 
 async def test_a_consent_file_that_is_not_utf8_fails_the_scan(sessionmaker, factory, tmp_path):

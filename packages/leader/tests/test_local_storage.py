@@ -246,6 +246,36 @@ async def test_io_errors_become_storage_unavailable_not_absent(tmp_path, monkeyp
         await call(store)
 
 
+async def test_an_unreadable_root_is_unavailable(tmp_path, monkeypatch):
+    real_scandir = os.scandir
+    root = tmp_path.resolve()
+
+    def denied(path="."):
+        if Path(path) == root:
+            raise PermissionError(13, "Access is denied", str(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", denied)
+    with pytest.raises(StorageUnavailable):
+        await backend(tmp_path).stat("a.mp3")
+    with pytest.raises(StorageUnavailable):
+        await collect(backend(tmp_path).list())
+
+
+async def test_a_directory_that_cannot_be_listed_fails_the_listing(tmp_path, monkeypatch):
+    write(tmp_path, "talks/one.mp3")
+    real_walk = os.walk
+
+    def walk(top, topdown=True, onerror=None, followlinks=False):
+        yield from real_walk(top, topdown=topdown, onerror=onerror, followlinks=followlinks)
+        if onerror is not None:
+            onerror(PermissionError(13, "Access is denied", str(tmp_path / "talks")))
+
+    monkeypatch.setattr(os, "walk", walk)
+    with pytest.raises(StorageUnavailable):
+        await collect(backend(tmp_path).list())
+
+
 async def test_registry_refuses_a_local_location_without_a_root(factory):
     location = await factory.location(config={})
     with pytest.raises(StorageError, match="root"):

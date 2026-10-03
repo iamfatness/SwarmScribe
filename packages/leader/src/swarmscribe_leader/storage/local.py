@@ -1,7 +1,8 @@
+import asyncio
 import os
 import stat
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
 
@@ -36,6 +37,13 @@ class LocalBackend:
     def _require_root(self) -> None:
         if not self.root.is_dir():
             raise StorageUnavailable(f"storage root {str(self.root)!r} is not available")
+        try:
+            with os.scandir(self.root):
+                pass
+        except OSError as exc:
+            raise StorageUnavailable(
+                f"storage root {str(self.root)!r} cannot be listed: {exc.strerror}"
+            ) from exc
 
     def path_for(self, key: str) -> Path:
         if not key or "\x00" in key or key.startswith("/") or "\\" in key or ":" in key:
@@ -66,8 +74,21 @@ class LocalBackend:
         return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
 
     async def list(self, prefix: str = "") -> AsyncIterator[ObjectInfo]:
+        # The walk runs in a worker thread so a slow or large folder never blocks the loop.
+        for info in await asyncio.to_thread(self._list_sync, prefix):
+            yield info
+
+    def _list_sync(self, prefix: str) -> Sequence[ObjectInfo]:
+        """Everything under the root, or an error: a directory that cannot be read makes
+        the listing fail rather than come back partial (a partial listing would mark the
+        unseen recordings missing and cancel their jobs)."""
         self._require_root()
-        for dirpath, dirnames, filenames in os.walk(self.root):
+
+        def unreadable(exc: OSError) -> None:
+            raise StorageUnavailable(f"a directory cannot be listed: {exc.strerror}") from exc
+
+        found: list[ObjectInfo] = []
+        for dirpath, dirnames, filenames in os.walk(self.root, onerror=unreadable):
             dirnames[:] = sorted(d for d in dirnames if not self._is_link(Path(dirpath) / d))
             for name in sorted(filenames):
                 full = Path(dirpath) / name
@@ -82,8 +103,11 @@ class LocalBackend:
                 except StorageError:
                     continue
                 except FileNotFoundError:
-                    continue
-                yield ObjectInfo(key=key, size=st.st_size, version=version_of(st))
+                    continue  # removed while we listed: genuinely gone
+                except OSError as exc:
+                    raise StorageUnavailable(f"a file cannot be read: {exc.strerror}") from exc
+                found.append(ObjectInfo(key=key, size=st.st_size, version=version_of(st)))
+        return found
 
     @staticmethod
     def _stat_file(path: Path, key: str) -> os.stat_result | None:
@@ -98,6 +122,9 @@ class LocalBackend:
         return st if stat.S_ISREG(st.st_mode) else None
 
     async def read_text(self, key: str) -> str | None:
+        return await asyncio.to_thread(self._read_text_sync, key)
+
+    def _read_text_sync(self, key: str) -> str | None:
         self._require_root()
         path = self.path_for(key)
         if self._stat_file(path, key) is None:
@@ -113,6 +140,9 @@ class LocalBackend:
             raise StorageUnavailable(f"cannot read {key!r}: {exc.strerror}") from exc
 
     async def stat(self, key: str) -> ObjectInfo | None:
+        return await asyncio.to_thread(self._stat_sync, key)
+
+    def _stat_sync(self, key: str) -> ObjectInfo | None:
         self._require_root()
         path = self.path_for(key)
         st = self._stat_file(path, key)

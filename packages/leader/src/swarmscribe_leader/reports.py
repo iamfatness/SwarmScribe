@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db.models import (
+    ConsoleCredential,
     Follower,
     Job,
     JobAttempt,
@@ -239,6 +240,29 @@ async def list_tokens(session: AsyncSession) -> list[dict[str, Any]]:
         await session.scalars(select(JoinToken).order_by(JoinToken.created_at, JoinToken.id))
     ).all()
     return [token_view(token) for token in tokens]
+
+
+def console_view(console: ConsoleCredential) -> dict[str, Any]:
+    """A console credential as administrators see it: never the credential or its hash."""
+    return {
+        "id": str(console.id),
+        "name": console.name,
+        "max_role": console.max_role,
+        "revoked": console.revoked_at is not None,
+        "revoked_at": console.revoked_at,
+        "revoked_by": console.revoked_by,
+        "created_by": console.created_by,
+        "created_at": console.created_at,
+    }
+
+
+async def list_consoles(session: AsyncSession) -> list[dict[str, Any]]:
+    consoles = (
+        await session.scalars(
+            select(ConsoleCredential).order_by(ConsoleCredential.created_at, ConsoleCredential.id)
+        )
+    ).all()
+    return [console_view(console) for console in consoles]
 
 
 async def consent_report(

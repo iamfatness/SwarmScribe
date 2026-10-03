@@ -113,6 +113,24 @@ class Follower(_Row, Base):
     join_token_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("join_tokens.id"))
 
 
+class ConsoleCredential(_Row, Base):
+    """A fleet console's credential, stored as its SHA-256 and capped at a role."""
+
+    __tablename__ = "console_credentials"
+    __table_args__ = (
+        CheckConstraint(
+            "max_role IN ('viewer','operator','admin')", name="ck_console_credentials_max_role"
+        ),
+    )
+
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    credential_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    max_role: Mapped[str] = mapped_column(String(16))
+    created_by: Mapped[str] = mapped_column(Text)
+    revoked_at: Mapped[datetime | None]
+    revoked_by: Mapped[str | None] = mapped_column(Text)
+
+
 class SettingsProfile(_Row, Base):
     __tablename__ = "settings_profiles"
 

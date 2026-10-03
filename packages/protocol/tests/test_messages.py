@@ -65,7 +65,8 @@ def _claim():
         SubmitRequest(
             lease_id="lease-1",
             checksums=OutputChecksums(
-                source="d" * 64, txt="a" * 64, srt="b" * 64, segments_json="c" * 64),
+                source="d" * 64, txt="a" * 64, srt="b" * 64, segments_json="c" * 64
+            ),
         ),
         SubmitResponse(accepted=True),
         FailRequest(
@@ -154,3 +155,9 @@ def test_fail_request_code_must_be_known():
 def test_error_body_round_trips():
     body = ErrorBody(code="stale_lease", message="this job is not leased to you")
     assert ErrorBody.model_validate_json(body.model_dump_json()) == body
+
+
+def test_fail_request_reason_is_bounded():
+    FailRequest(lease_id="lease-1", code="other", reason="x" * 2000, retryable=True)
+    with pytest.raises(ValidationError):
+        FailRequest(lease_id="lease-1", code="other", reason="x" * 2001, retryable=True)

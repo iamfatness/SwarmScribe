@@ -78,7 +78,10 @@ async def register(
 
 async def authenticate(session: AsyncSession, credential: str, *, now: datetime) -> Follower:
     follower = await session.scalar(
-        select(Follower).where(Follower.credential_hash == hash_secret(credential))
+        select(Follower)
+        .where(Follower.credential_hash == hash_secret(credential))
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if follower is None:
         raise Unauthorized("unknown follower credential")

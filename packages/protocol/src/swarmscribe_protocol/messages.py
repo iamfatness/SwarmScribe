@@ -84,7 +84,7 @@ class SubmitResponse(WireModel):
 class FailRequest(WireModel):
     lease_id: str
     code: FailureCode
-    reason: str
+    reason: str = Field(max_length=2000)
     retryable: bool
 
 

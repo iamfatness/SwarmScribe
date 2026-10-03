@@ -338,6 +338,7 @@
         "type": "string"
       },
       "reason": {
+        "maxLength": 2000,
         "title": "Reason",
         "type": "string"
       },

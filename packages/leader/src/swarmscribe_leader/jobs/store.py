@@ -1,7 +1,7 @@
 """Job state machine. Every function leaves committing to the caller."""
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from datetime import datetime, timedelta
 
 from sqlalchemy import select, update
@@ -61,7 +61,12 @@ async def close_attempt(
 
 
 async def claim(
-    session: AsyncSession, follower: Follower, *, now: datetime, lease_seconds: int
+    session: AsyncSession,
+    follower: Follower,
+    *,
+    now: datetime,
+    lease_seconds: int,
+    exclude: Collection[uuid.UUID] = (),
 ) -> Job | None:
     device = follower.capabilities.get("device", "cpu")
     job = await session.scalar(
@@ -70,6 +75,7 @@ async def claim(
             Job.state == "queued",
             Job.pool == follower.pool,
             Job.required_device.in_(("any", device)),
+            Job.id.not_in(exclude),
         )
         .order_by(Job.priority.desc(), Job.created_at, Job.id)
         .limit(1)

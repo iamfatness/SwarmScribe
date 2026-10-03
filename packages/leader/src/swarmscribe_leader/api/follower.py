@@ -1,7 +1,9 @@
+import logging
 import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, Response
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from swarmscribe_protocol import (
     ClaimResponse,
@@ -18,11 +20,14 @@ from swarmscribe_protocol import (
 from .. import audit
 from ..auth.followers import authenticate, register
 from ..clock import utcnow
-from ..db.models import Follower, Job
-from ..errors import Unauthorized
+from ..db.models import Follower, Job, Recording
+from ..errors import LeaderError, Unauthorized
 from ..jobs import store
 from ..jobs.claims import build_claim, outputs_present
 from .deps import db_session, settings_of
+
+logger = logging.getLogger(__name__)
+MAX_CLAIM_ATTEMPTS = 5
 
 router = APIRouter(prefix="/v1")
 
@@ -62,20 +67,54 @@ async def claim_job(
     request: Request,
     session: Annotated[AsyncSession, Depends(db_session)],
     follower: Annotated[Follower, Depends(current_follower)],
-):
+) -> ClaimResponse | Response:
     settings = settings_of(request)
     if follower.state == "draining":
         await session.commit()
         return _no_work(request)
-    job = await store.claim(session, follower, now=utcnow(), lease_seconds=settings.lease_seconds)
-    if job is None:
+    skipped: list[uuid.UUID] = []
+    while len(skipped) < MAX_CLAIM_ATTEMPTS:
+        # A savepoint, so an unbuildable job rolls back alone and the follower's
+        # authentication (last_seen_at, gone -> active) is kept.
+        savepoint = await session.begin_nested()
+        job = await store.claim(
+            session, follower, now=utcnow(), lease_seconds=settings.lease_seconds, exclude=skipped
+        )
+        if job is None:
+            await savepoint.rollback()
+            break
+        job_id = job.id
+        try:
+            claim = await build_claim(
+                session,
+                job,
+                follower,
+                settings=settings,
+                backend_factory=request.app.state.backend_factory,
+            )
+        except Exception as exc:
+            await savepoint.rollback()
+            await _log_unbuildable(session, job_id, exc)
+            skipped.append(job_id)
+            continue
+        await savepoint.commit()
         await session.commit()
-        return _no_work(request)
-    claim = await build_claim(
-        session, job, follower, settings=settings, backend_factory=request.app.state.backend_factory
-    )
+        return claim
     await session.commit()
-    return claim
+    return _no_work(request)
+
+
+async def _log_unbuildable(session: AsyncSession, job_id: uuid.UUID, exc: Exception) -> None:
+    # Ids only: links and storage keys must never reach the log.
+    job = await session.get(Job, job_id)
+    recording = await session.get(Recording, job.recording_id) if job else None
+    detail = exc.message if isinstance(exc, LeaderError) else type(exc).__name__
+    logger.warning(
+        "job %s skipped, claim could not be built (location %s): %s",
+        job_id,
+        recording.location_id if recording else None,
+        detail,
+    )
 
 
 @router.post("/jobs/{job_id}/heartbeat", response_model=HeartbeatResponse)
@@ -146,7 +185,11 @@ async def deregister(
     follower: Annotated[Follower, Depends(current_follower)],
 ) -> Response:
     released = await store.release_all(session, follower, now=utcnow())
-    follower.state = "gone"
+    await session.execute(
+        update(Follower)
+        .where(Follower.id == follower.id, Follower.state == "active")
+        .values(state="gone")
+    )
     audit.record(
         session,
         actor=f"follower:{follower.id}",

@@ -7,6 +7,7 @@ from swarmscribe_protocol import ClaimResponse, JobSettings, UploadUrls, Vocabul
 
 from ..config import Settings
 from ..db.models import Follower, Job, Recording, SettingsProfile, StorageLocation
+from ..errors import LeaderError
 from ..storage.base import StorageBackend
 
 BackendFactory = Callable[[StorageLocation], StorageBackend]
@@ -50,6 +51,8 @@ async def build_claim(
     )
     device = follower.capabilities.get("device", "cpu")
     profile = await session.scalar(select(SettingsProfile).where(SettingsProfile.device == device))
+    if profile is None:
+        raise LeaderError(f"no settings profile for device {device!r}", code="no_settings_profile")
     job.settings_profile_id = profile.id
     job.vocabulary_version = 0
     return ClaimResponse(

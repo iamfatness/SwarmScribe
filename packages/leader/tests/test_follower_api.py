@@ -3,13 +3,21 @@ from datetime import timedelta
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from swarmscribe_leader.app import create_app
 from swarmscribe_leader.auth.followers import create_join_token
 from swarmscribe_leader.clock import utcnow
 from swarmscribe_leader.config import Settings
-from swarmscribe_leader.db.models import Follower, Job, StorageLocation
+from swarmscribe_leader.db.models import (
+    Follower,
+    Job,
+    JobAttempt,
+    Recording,
+    SettingsProfile,
+    StorageLocation,
+)
 from swarmscribe_leader.ingest.scanner import scan_location
+from swarmscribe_leader.storage.base import StorageUnavailable
 from swarmscribe_leader.storage.links import LinkSigner
 from swarmscribe_leader.storage.registry import backend_for
 from swarmscribe_protocol import ClaimResponse
@@ -273,3 +281,159 @@ async def test_an_invalid_job_id_is_422(client, sessionmaker):
         "/v1/jobs/not-a-uuid/heartbeat", headers=headers, json={"lease_id": "x"}
     )
     assert (response.status_code, response.json()["code"]) == (422, "invalid_request")
+
+
+async def follower_state(sessionmaker) -> str:
+    async with sessionmaker() as session:
+        return (await session.scalars(select(Follower))).one().state
+
+
+async def test_deregister_leaves_a_draining_follower_draining(
+    client, sessionmaker, factory, tmp_path
+):
+    await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(client, sessionmaker)
+    async with sessionmaker() as session:
+        (await session.scalars(select(Follower))).one().state = "draining"
+        await session.commit()
+    assert (await client.post("/v1/jobs/claim", headers=headers)).status_code == 204
+    assert (await client.post("/v1/followers/deregister", headers=headers)).status_code == 204
+    assert (await client.post("/v1/jobs/claim", headers=headers)).status_code == 204
+    assert await follower_state(sessionmaker) == "draining"
+
+
+async def test_a_gone_follower_is_reactivated_by_its_next_call(
+    client, sessionmaker, factory, tmp_path
+):
+    await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(client, sessionmaker)
+    assert (await client.post("/v1/followers/deregister", headers=headers)).status_code == 204
+    assert await follower_state(sessionmaker) == "gone"
+    assert (await client.post("/v1/jobs/claim", headers=headers)).status_code == 200
+    assert await follower_state(sessionmaker) == "active"
+
+
+async def test_deregister_twice_is_safe(client, sessionmaker):
+    headers = await register(client, sessionmaker)
+    for _ in range(2):
+        assert (await client.post("/v1/followers/deregister", headers=headers)).status_code == 204
+    assert await follower_state(sessionmaker) == "gone"
+
+
+class Broken:
+    def __init__(self, real, broken_location_id):
+        self.real, self.broken_location_id = real, broken_location_id
+
+    def __call__(self, location):
+        if location.id == self.broken_location_id:
+            raise StorageUnavailable("secret-key-material")
+        return self.real(location)
+
+
+async def two_locations(sessionmaker, factory, tmp_path):
+    """A broken location whose job is older, and a healthy one."""
+    write(tmp_path, "consent.txt", b"**/*.mp3\n")
+    broken = await factory.location()
+    recording = await factory.recording(broken, key="talks/broken.mp3")
+    await factory.job(recording)
+    healthy_root = tmp_path / "healthy"
+    healthy = await factory.location(config={"root": str(healthy_root)})
+    write(healthy_root, "talks/ok.mp3", b"ok")
+    await factory.job(await factory.recording(healthy, key="talks/ok.mp3"))
+    return broken, healthy
+
+
+async def job_rows(sessionmaker):
+    async with sessionmaker() as session:
+        jobs = (await session.scalars(select(Job).order_by(Job.created_at))).all()
+        attempts = (await session.scalars(select(JobAttempt))).all()
+    return jobs, attempts
+
+
+async def test_an_unbuildable_job_does_not_stall_the_pool(
+    client, app, sessionmaker, factory, tmp_path, caplog
+):
+    broken, healthy = await two_locations(sessionmaker, factory, tmp_path)
+    app.state.backend_factory = Broken(app.state.backend_factory, broken.id)
+    headers = await register(client, sessionmaker)
+    with caplog.at_level("WARNING"):
+        claimed = await claim(client, headers)
+    jobs, attempts = await job_rows(sessionmaker)
+    by_state = {job.state: job for job in jobs}
+    assert str(by_state["leased"].id) == claimed.job_id
+    assert (by_state["queued"].attempts, len(attempts)) == (0, 1)
+    assert "secret-key-material" not in caplog.text
+
+
+async def test_only_an_unbuildable_job_gives_204(client, app, sessionmaker, factory, tmp_path):
+    broken, _ = await two_locations(sessionmaker, factory, tmp_path)
+    async with sessionmaker() as session:
+        await session.execute(
+            Job.__table__.delete().where(
+                Job.recording_id.in_(select(Recording.id).where(Recording.location_id != broken.id))
+            )
+        )
+        await session.commit()
+    app.state.backend_factory = Broken(app.state.backend_factory, broken.id)
+    headers = await register(client, sessionmaker)
+    response = await client.post("/v1/jobs/claim", headers=headers)
+    assert (response.status_code, response.headers["retry-after"]) == (204, "10")
+    jobs, attempts = await job_rows(sessionmaker)
+    assert ([job.state for job in jobs], [job.attempts for job in jobs], attempts) == (
+        ["queued"],
+        [0],
+        [],
+    )
+
+
+async def test_no_settings_profile_for_the_device_gives_204(
+    client, sessionmaker, factory, tmp_path, caplog
+):
+    await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(client, sessionmaker, device="cuda")
+
+    async def set_cuda_profiles_device(old: str, new: str) -> None:
+        async with sessionmaker() as session:
+            await session.execute(
+                update(SettingsProfile).where(SettingsProfile.device == old).values(device=new)
+            )
+            await session.commit()
+
+    await set_cuda_profiles_device("cuda", "retired")
+    try:
+        with caplog.at_level("WARNING"):
+            response = await client.post("/v1/jobs/claim", headers=headers)
+        assert response.status_code == 204
+        jobs, attempts = await job_rows(sessionmaker)
+        assert ([job.state for job in jobs], attempts) == (["queued"], [])
+    finally:
+        await set_cuda_profiles_device("retired", "cuda")
+    assert "cuda" in caplog.text
+
+
+async def test_another_followers_credential_cannot_touch_a_lease(
+    client, sessionmaker, factory, tmp_path
+):
+    await queue_one(sessionmaker, factory, tmp_path)
+    owner = await register(client, sessionmaker)
+    claimed = await claim(client, owner)
+    intruder = await register(client, sessionmaker)
+    h = "a" * 64
+    lease = {"lease_id": claimed.lease_id}
+    attempts = {
+        "heartbeat": lease,
+        "release": lease,
+        "fail": {**lease, "code": "other", "reason": "x", "retryable": True},
+        "submit": {
+            **lease,
+            "checksums": {"source": h, "txt": h, "srt": h, "segments_json": h},
+        },
+    }
+    for action, body in attempts.items():
+        response = await client.post(
+            f"/v1/jobs/{claimed.job_id}/{action}", headers=intruder, json=body
+        )
+        assert (response.status_code, response.json()["code"]) == (409, "stale_lease"), action
+    assert (await client.post("/v1/followers/deregister", headers=intruder)).status_code == 204
+    jobs, _ = await job_rows(sessionmaker)
+    assert (jobs[0].state, str(jobs[0].lease_id)) == ("leased", claimed.lease_id)

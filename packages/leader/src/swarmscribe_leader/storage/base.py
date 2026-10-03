@@ -17,6 +17,10 @@ class StorageError(Exception):
     """A storage request that cannot be carried out (bad key, unsupported backend)."""
 
 
+class StorageUnavailable(StorageError):
+    """The storage location itself cannot be reached (missing root, unsupported backend)."""
+
+
 class StorageBackend(Protocol):
     def list(self, prefix: str = "") -> AsyncIterator[ObjectInfo]: ...
 

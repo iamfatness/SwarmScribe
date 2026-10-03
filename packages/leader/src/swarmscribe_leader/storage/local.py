@@ -6,7 +6,7 @@ from pathlib import Path, PurePosixPath
 
 from swarmscribe_protocol import Link
 
-from .base import ObjectInfo, StorageError
+from .base import ObjectInfo, StorageError, StorageUnavailable
 from .links import LinkClaims, LinkSigner
 
 
@@ -34,7 +34,7 @@ class LocalBackend:
 
     def _require_root(self) -> None:
         if not self.root.is_dir():
-            raise StorageError(f"storage root {str(self.root)!r} is not available")
+            raise StorageUnavailable(f"storage root {str(self.root)!r} is not available")
 
     def path_for(self, key: str) -> Path:
         if not key or "\x00" in key or key.startswith("/") or "\\" in key or ":" in key:
@@ -47,6 +47,17 @@ class LocalBackend:
         path = (self.root / key).resolve()
         if not path.is_relative_to(self.root):
             raise StorageError(f"invalid storage key {key!r}")
+        return path
+
+    def file_path(self, key: str) -> Path:
+        """The path for `key`, refusing a missing root and any symlink or junction on the way."""
+        self._require_root()
+        path = self.path_for(key)
+        current = self.root
+        for segment in key.split("/"):
+            current = current / segment
+            if self._is_link(current):
+                raise StorageError(f"invalid storage key {key!r}")
         return path
 
     @staticmethod

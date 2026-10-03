@@ -1,4 +1,4 @@
-﻿from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator
 
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession

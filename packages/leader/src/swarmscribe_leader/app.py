@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from functools import partial
@@ -16,6 +16,8 @@ from .ingest.scanner import scan_due_locations
 from .jobs.reaper import reap
 from .storage.links import LinkSigner
 from .storage.registry import backend_for
+
+SHUTDOWN_GRACE_SECONDS = 10
 
 
 def create_app(settings: Settings, *, background: bool = True) -> FastAPI:
@@ -63,10 +65,22 @@ def create_app(settings: Settings, *, background: bool = True) -> FastAPI:
             yield
         finally:
             stop.set()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await engine.dispose()
+            try:
+                if tasks:
+                    _done, pending = await asyncio.wait(tasks, timeout=SHUTDOWN_GRACE_SECONDS)
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+            finally:
+                await engine.dispose()
 
-    app = FastAPI(title="SwarmScribe leader", lifespan=lifespan)
+    app = FastAPI(
+        title="SwarmScribe leader",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     app.state.settings = settings
     app.state.engine = engine
     app.state.sessionmaker = sessionmaker
@@ -77,5 +91,3 @@ def create_app(settings: Settings, *, background: bool = True) -> FastAPI:
     app.include_router(health.router)
     app.include_router(files.router)
     return app
-
-

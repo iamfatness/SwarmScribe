@@ -1,5 +1,6 @@
-﻿import asyncio
+import asyncio
 import os
+import time
 from datetime import timedelta
 
 import httpx
@@ -27,6 +28,10 @@ async def client(app):
         transport=httpx.ASGITransport(app=app), base_url="http://leader"
     ) as http:
         yield http
+
+
+def no_temp_files(root):
+    return not any(".upload" in name for _, _, files in os.walk(root) for name in files)
 
 
 def write(root, key, data=b"audio bytes"):
@@ -84,7 +89,7 @@ async def test_upload_through_a_signed_link_creates_directories(app, client, fac
     response = await client.put(link.url, content=b"hello\n")
     assert response.status_code == 201
     assert (tmp_path / "transcripts" / "talks" / "one.mp3.txt").read_bytes() == b"hello\n"
-    assert not any(name.endswith(".upload") for _, _, files in os.walk(tmp_path) for name in files)
+    assert no_temp_files(tmp_path)
 
 
 async def test_a_get_link_cannot_upload_and_a_put_link_cannot_download(
@@ -128,6 +133,8 @@ async def test_uploading_over_a_directory_answers_400(app, client, factory, tmp_
     link = app.state.backend_factory(location).upload_link("talks", timedelta(minutes=5))
     response = await client.put(link.url, content=b"x")
     assert response.status_code == 400
+    assert response.json()["code"] == "invalid_key"
+    assert no_temp_files(tmp_path)
 
 
 async def test_an_oversize_upload_answers_413_and_leaves_nothing(
@@ -147,7 +154,7 @@ async def test_readyz_is_503_when_migrations_are_behind(app, client):
     assert response.status_code == 503
 
 
-async def test_background_loops_start_and_stop_with_the_lifespan(engine, migrated_database_url):
+def _background_app(migrated_database_url):
     settings = Settings(
         database_url=migrated_database_url,
         public_url="http://leader",
@@ -155,10 +162,225 @@ async def test_background_loops_start_and_stop_with_the_lifespan(engine, migrate
         reaper_interval_seconds=0.05,
         scanner_interval_seconds=0.05,
     )
-    application = create_app(settings, background=True)
+    return create_app(settings, background=True)
+
+
+async def test_background_loops_run_each_step_and_dispose_the_engine(
+    engine, migrated_database_url, monkeypatch
+):
+    ran = []
+
+    async def fake_run_exclusive(_engine, name, work):
+        ran.append(name)
+
+    monkeypatch.setattr("swarmscribe_leader.app.run_exclusive", fake_run_exclusive)
+    application = _background_app(migrated_database_url)
+    pool_before = application.state.engine.sync_engine.pool
+    async with application.router.lifespan_context(application):
+        await asyncio.sleep(0.3)
+    assert {"reaper", "scanner"} <= set(ran)
+    # AsyncEngine.dispose() recreates the pool, so a new pool means it was disposed.
+    assert application.state.engine.sync_engine.pool is not pool_before
+
+
+async def test_shutdown_cannot_hang_on_a_stuck_background_step(
+    engine, migrated_database_url, monkeypatch
+):
+    async def blocks_forever(_engine, name, work):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("swarmscribe_leader.app.run_exclusive", blocks_forever)
+    application = _background_app(migrated_database_url)
+    started = time.monotonic()
     async with application.router.lifespan_context(application):
         await asyncio.sleep(0.2)
+    assert time.monotonic() - started < 15
 
 
+async def test_the_shutdown_grace_is_ten_seconds():
+    from swarmscribe_leader import app as app_module
+
+    assert app_module.SHUTDOWN_GRACE_SECONDS == 10
 
 
+async def test_upload_under_a_file_answers_400_and_leaves_no_temp(app, client, factory, tmp_path):
+    write(tmp_path, "talks/one.mp3")
+    location = await factory.location()
+    backend = app.state.backend_factory(location)
+    link = backend.upload_link("talks/one.mp3/x.txt", timedelta(minutes=5))
+    response = await client.put(link.url, content=b"x")
+    assert (response.status_code, response.json()["code"]) == (400, "invalid_key")
+    assert no_temp_files(tmp_path)
+
+
+async def test_a_blocked_replace_answers_409_with_retry_after(
+    app, client, factory, tmp_path, monkeypatch
+):
+    write(tmp_path, "out.txt", b"old")
+    location = await factory.location()
+    link = app.state.backend_factory(location).upload_link("out.txt", timedelta(minutes=5))
+
+    def refuse(*_args, **_kwargs):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr("swarmscribe_leader.api.files.os.replace", refuse)
+    response = await client.put(link.url, content=b"new")
+    assert (response.status_code, response.json()["code"]) == (409, "conflict")
+    assert response.headers["retry-after"] == "5"
+    assert (tmp_path / "out.txt").read_bytes() == b"old"
+    assert no_temp_files(tmp_path)
+
+
+async def test_other_os_errors_answer_500_storage_error(
+    app, client, factory, tmp_path, monkeypatch
+):
+    location = await factory.location()
+    link = app.state.backend_factory(location).upload_link("out.txt", timedelta(minutes=5))
+
+    def broken(*_args, **_kwargs):
+        raise OSError(5, "disk on fire", str(tmp_path))
+
+    monkeypatch.setattr("swarmscribe_leader.api.files.os.replace", broken)
+    response = await client.put(link.url, content=b"new")
+    assert (response.status_code, response.json()["code"]) == (500, "storage_error")
+    assert str(tmp_path) not in response.text
+    assert no_temp_files(tmp_path)
+
+
+async def test_a_240_character_file_name_uploads(app, client, factory, tmp_path):
+    name = "n" * 236 + ".txt"
+    try:
+        (tmp_path / "probe").mkdir()
+        (tmp_path / "probe" / name).write_bytes(b"")
+    except OSError:
+        pytest.skip("this platform cannot hold a 240 character name under the temp directory")
+    key = "a/" + name
+    location = await factory.location()
+    link = app.state.backend_factory(location).upload_link(key, timedelta(minutes=5))
+    response = await client.put(link.url, content=b"long")
+    assert response.status_code == 201
+    assert (tmp_path / "a" / name).read_bytes() == b"long"
+    assert no_temp_files(tmp_path)
+
+
+async def test_the_temp_name_does_not_grow_with_the_target_name(
+    app, client, factory, tmp_path, monkeypatch
+):
+    seen = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        seen.append(os.path.basename(src))
+        real_replace(src, dst)
+
+    monkeypatch.setattr("swarmscribe_leader.api.files.os.replace", spy)
+    location = await factory.location()
+    link = app.state.backend_factory(location).upload_link("n" * 100 + ".txt", timedelta(minutes=5))
+    assert (await client.put(link.url, content=b"x")).status_code == 201
+    assert len(seen[0]) == len(".upload-") + 32
+
+
+async def test_unknown_routes_and_wrong_methods_answer_error_body_json(
+    app, client, factory, tmp_path
+):
+    response = await client.get("/v1/nope")
+    assert (response.status_code, response.json()["code"]) == (404, "not_found")
+    assert set(response.json()) == {"code", "message"}
+    write(tmp_path, "talks/one.mp3")
+    location = await factory.location()
+    backend = app.state.backend_factory(location)
+    link = backend.download_link("talks/one.mp3", "", timedelta(minutes=5))
+    response = await client.post(link.url)
+    assert (response.status_code, response.json()["code"]) == (405, "method_not_allowed")
+    assert "allow" in response.headers
+    assert set(response.json()) == {"code", "message"}
+
+
+async def test_unhandled_errors_answer_500_internal_without_the_path(app, caplog):
+    async def boom():
+        raise RuntimeError("secret detail")
+
+    app.add_api_route("/boom-token-xyz", boom)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://leader") as http:
+        response = await http.get("/boom-token-xyz")
+    assert response.status_code == 500
+    assert response.json() == {"code": "internal", "message": "internal error"}
+    assert "boom-token-xyz" not in caplog.text
+
+
+async def test_request_validation_errors_answer_422_error_body(app, client):
+    async def needs_int(n: int):
+        return n
+
+    app.add_api_route("/needs-int", needs_int)
+    response = await client.get("/needs-int?n=abc")
+    assert (response.status_code, response.json()["code"]) == (422, "invalid_request")
+    assert set(response.json()) == {"code", "message"}
+
+
+async def test_docs_and_openapi_are_not_served(client):
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        response = await client.get(path)
+        assert (response.status_code, response.json()["code"]) == (404, "not_found")
+
+
+async def test_storage_errors_never_reveal_server_paths(app, client, factory, tmp_path):
+    location = await factory.location(config={"root": str(tmp_path / "removed")})
+    link = app.state.backend_factory(location).download_link("a.mp3", "", timedelta(minutes=5))
+    response = await client.get(link.url)
+    assert response.status_code == 400
+    text = response.text
+    assert str(tmp_path) not in text
+    assert ":\\" not in text
+    assert "/Users" not in text
+    assert response.json()["message"] == "storage location is not available"
+    good_location = await factory.location()
+    bad = app.state.signer.sign(
+        LinkClaims(str(good_location.id), "a/../b", "GET", "", 4102444800)
+    )
+    response = await client.get(f"/v1/files/{bad}")
+    assert response.json()["message"] == "invalid storage key"
+
+
+async def test_a_download_of_a_file_deleted_after_the_link_answers_404(
+    app, client, factory, tmp_path
+):
+    path = write(tmp_path, "talks/one.mp3", b"here")
+    location = await factory.location()
+    backend = app.state.backend_factory(location)
+    info = await backend.stat("talks/one.mp3")
+    link = backend.download_link("talks/one.mp3", info.version, timedelta(minutes=5))
+    path.unlink()
+    response = await client.get(link.url)
+    assert (response.status_code, response.json()["code"]) == (404, "not_found")
+
+
+def _symlink(link, target):
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not permitted here")
+
+
+async def test_symlinked_keys_are_refused_for_download_and_upload(app, client, factory, tmp_path):
+    write(tmp_path, "real.txt", b"secret")
+    _symlink(tmp_path / "alias.txt", tmp_path / "real.txt")
+    location = await factory.location()
+    backend = app.state.backend_factory(location)
+    get_link = backend.download_link("alias.txt", "", timedelta(minutes=5))
+    put_link = backend.upload_link("alias.txt", timedelta(minutes=5))
+    for response in (await client.get(get_link.url), await client.put(put_link.url, content=b"x")):
+        assert (response.status_code, response.json()["code"]) == (400, "invalid_key")
+    assert (tmp_path / "real.txt").read_bytes() == b"secret"
+
+
+async def test_a_declared_oversize_body_is_refused_before_reading(
+    app, client, factory, tmp_path, monkeypatch
+):
+    monkeypatch.setattr("swarmscribe_leader.api.files.MAX_UPLOAD_BYTES", 10)
+    location = await factory.location()
+    link = app.state.backend_factory(location).upload_link("big.txt", timedelta(minutes=5))
+    response = await client.put(link.url, content=b"x", headers={"content-length": "11"})
+    assert (response.status_code, response.json()["code"]) == (413, "too_large")
+    assert list(tmp_path.iterdir()) == []

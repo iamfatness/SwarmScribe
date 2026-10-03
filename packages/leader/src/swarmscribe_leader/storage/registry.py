@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from ..db.models import StorageLocation
-from .base import StorageBackend, StorageError
+from .base import StorageBackend, StorageUnavailable
 from .links import LinkSigner
 from .local import LocalBackend
 
@@ -12,11 +12,11 @@ def backend_for(
     if location.backend == "local":
         root = (location.config or {}).get("root")
         if not root:
-            raise StorageError("local storage location has no 'root' configured")
+            raise StorageUnavailable("local storage location has no 'root' configured")
         return LocalBackend(
             Path(root),
             location_id=str(location.id),
             signer=signer,
             public_url=public_url,
         )
-    raise StorageError(f"storage backend {location.backend!r} is not available yet")
+    raise StorageUnavailable(f"storage backend {location.backend!r} is not available yet")

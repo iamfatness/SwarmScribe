@@ -127,5 +127,12 @@ async def test_consented_recordings_complete_even_when_a_follower_dies(
     secret = [r for r in recordings.values() if r.key == "private/secret.mp3"]
     assert [r.consent for r in secret] == ["not_consented"]
     assert {str(a.job_id) for a in attempts if a.outcome == "expired"} == {abandoned}
+    # The abandoned job was taken over exactly once: one expired attempt by the follower that
+    # died, one completed attempt by another follower.
+    abandoned_attempts = [a for a in attempts if str(a.job_id) == abandoned]
+    (expired,) = [a for a in abandoned_attempts if a.outcome == "expired"]
+    (completed,) = [a for a in abandoned_attempts if a.outcome == "completed"]
+    assert len(abandoned_attempts) == 2
+    assert expired.follower_id != completed.follower_id
     for name in ("a", "b", "c"):
         assert (tmp_path / "transcripts" / "talks" / f"{name}.mp3.segments.json").exists()

@@ -14,7 +14,7 @@ class VocabularyFileError(ValueError):
 
 
 def _content_lines(text: str) -> list[tuple[int, str]]:
-    if text.startswith("﻿"):
+    if text.startswith("\ufeff"):
         text = text[1:]
     return [
         (number, line.strip())

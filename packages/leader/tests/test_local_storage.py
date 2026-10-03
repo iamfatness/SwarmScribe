@@ -50,7 +50,7 @@ async def test_list_filters_by_prefix(tmp_path):
 
 
 async def test_read_text_strips_a_bom_and_returns_none_when_absent(tmp_path):
-    write(tmp_path, "consent.txt", "﻿talks/*.mp3\n".encode())
+    write(tmp_path, "consent.txt", "\ufefftalks/*.mp3\n".encode())
     store = backend(tmp_path)
     assert await store.read_text("consent.txt") == "talks/*.mp3\n"
     assert await store.read_text("missing.txt") is None

@@ -14,7 +14,7 @@ def is_recording(key: str) -> bool:
 def parse_consent(text: str | None) -> tuple[str, ...]:
     if not text:
         return ()
-    if text.startswith("﻿"):
+    if text.startswith("\ufeff"):
         text = text[1:]
     return tuple(
         line.strip()
@@ -82,7 +82,7 @@ def compile_consent(text: str | None) -> tuple[tuple[str, re.Pattern[str]], ...]
     """Parse consent.txt and compile every pattern, naming the line of one that is unusable."""
     if not text:
         return ()
-    if text.startswith("﻿"):
+    if text.startswith("\ufeff"):
         text = text[1:]
     compiled: list[tuple[str, re.Pattern[str]]] = []
     for number, raw in enumerate(text.splitlines(), start=1):

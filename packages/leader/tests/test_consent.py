@@ -39,7 +39,7 @@ def test_glob_semantics(pattern, key, matches):
 
 
 def test_parse_consent_skips_comments_blanks_and_a_bom():
-    assert parse_consent("﻿# allowed\ntalks/*.mp3\n\n  2024/**  \n") == (
+    assert parse_consent("\ufeff# allowed\ntalks/*.mp3\n\n  2024/**  \n") == (
         "talks/*.mp3",
         "2024/**",
     )

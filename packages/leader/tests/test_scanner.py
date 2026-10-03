@@ -7,7 +7,7 @@ import uuid
 from datetime import timedelta
 from pathlib import Path
 
-from sqlalchemy import func, insert, select
+from sqlalchemy import func, insert, select, update
 from swarmscribe_leader.clock import utcnow
 from swarmscribe_leader.db.models import AuditEntry, Job, Recording, StorageLocation
 from swarmscribe_leader.ingest.scanner import scan_due_locations, scan_location
@@ -523,3 +523,84 @@ async def test_an_unreadable_folder_outside_the_input_prefix_does_not_stop_the_s
     monkeypatch.setattr(os, "walk", walk)
     summary = await scan(sessionmaker, await factory.location(input_prefix="incoming/"))
     assert summary.jobs_created == 1
+
+
+async def test_a_version_an_administrator_cancelled_is_not_queued_again(
+    sessionmaker, factory, tmp_path
+):
+    write(tmp_path, "consent.txt", b"**/*.mp3\n")
+    write(tmp_path, "talks/one.mp3")
+    location = await factory.location()
+    await scan(sessionmaker, location)
+    async with sessionmaker() as session:
+        (job,) = (await session.scalars(select(Job).with_for_update())).all()
+        await store.cancel(
+            session, job, now=utcnow(), reason="cancelled by an administrator", by="admin-1"
+        )
+        await session.commit()
+    assert (await scan(sessionmaker, location)).jobs_created == 0
+    write(tmp_path, "talks/one.mp3", b"a new version of the audio")
+    assert (await scan(sessionmaker, location)).jobs_created == 1
+
+
+async def test_a_requested_scan_runs_before_the_location_is_due(sessionmaker, factory, tmp_path):
+    write(tmp_path, "consent.txt", b"**/*.mp3\n")
+    write(tmp_path, "talks/one.mp3")
+    now = utcnow()
+    location = await factory.location(
+        last_scan_at=now - timedelta(seconds=10), scan_requested_at=now - timedelta(seconds=1)
+    )
+    results = await scan_due_locations(sessionmaker, backends, now=now, max_attempts=3)
+    assert results[location.name].jobs_created == 1
+    async with sessionmaker() as session:
+        assert (await session.get(StorageLocation, location.id)).scan_requested_at is None
+
+
+async def test_a_scan_request_made_during_a_scan_is_kept(sessionmaker, factory, tmp_path):
+    write(tmp_path, "consent.txt", b"**/*.mp3\n")
+    write(tmp_path, "talks/one.mp3")
+    now = utcnow()
+    location = await factory.location(scan_requested_at=now - timedelta(seconds=5))
+
+    def requesting_backends(loc):
+        inner = backends(loc)
+
+        class RequestsAgainWhileListing:
+            async def stat(self, key):
+                return await inner.stat(key)
+
+            async def read_text(self, key):
+                return await inner.read_text(key)
+
+            async def list(self, prefix=""):
+                async with sessionmaker() as other:
+                    await other.execute(
+                        update(StorageLocation)
+                        .where(StorageLocation.id == loc.id)
+                        .values(scan_requested_at=utcnow())
+                    )
+                    await other.commit()
+                async for obj in inner.list(prefix):
+                    yield obj
+
+        return RequestsAgainWhileListing()
+
+    results = await scan_due_locations(sessionmaker, requesting_backends, now=now, max_attempts=3)
+    assert results[location.name].jobs_created == 1
+    async with sessionmaker() as session:
+        assert (await session.get(StorageLocation, location.id)).scan_requested_at is not None
+
+
+async def test_a_requested_scan_that_fails_is_not_retried_every_tick(
+    sessionmaker, factory, tmp_path
+):
+    now = utcnow()
+    broken = await factory.location(
+        backend="azure", config={}, last_scan_at=now, scan_requested_at=now
+    )
+    results = await scan_due_locations(sessionmaker, backends, now=now, max_attempts=3)
+    assert "not available" in results[broken.name]
+    async with sessionmaker() as session:
+        stored = await session.get(StorageLocation, broken.id)
+    assert stored.scan_requested_at is None
+    assert "not available" in stored.last_scan_error

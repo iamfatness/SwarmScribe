@@ -302,8 +302,11 @@ async def release_all(session: AsyncSession, follower: Follower, *, now: datetim
     return len(jobs)
 
 
-async def cancel(session: AsyncSession, job: Job, *, now: datetime, reason: str) -> None:
-    """Cancel a queued or leased job. A leased job keeps its lease id so the holder hears cancel."""
+async def cancel(
+    session: AsyncSession, job: Job, *, now: datetime, reason: str, by: str | None = None
+) -> None:
+    """Cancel a queued or leased job. A leased job keeps its lease id so the holder hears
+    cancel. `by` names the administrator; None means the system cancelled it."""
     if job.state not in OPEN_STATES:
         return
     if job.state == "leased":
@@ -311,3 +314,4 @@ async def cancel(session: AsyncSession, job: Job, *, now: datetime, reason: str)
         job.lease_expires_at = None
     job.state = "cancelled"
     job.failure_reason = reason
+    job.cancelled_by = by

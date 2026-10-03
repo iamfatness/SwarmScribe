@@ -43,10 +43,12 @@ jobs:
           mkdir -p e2e/compose/work/data
           docker compose -f e2e/compose/docker-compose.yml up -d
       - name: Run the scenario (kills leader-1 mid-run)
-        run: uv run python e2e/compose/run_e2e.py
-      - name: Show the leaders' logs
+        run: uv run python e2e/compose/run_e2e.py --replicas 2
+      - name: Show every service's logs
         if: failure()
-        run: docker compose -f e2e/compose/docker-compose.yml logs --no-color migrate leader-1 leader-2
+        run: >-
+          docker compose -f e2e/compose/docker-compose.yml logs --no-color
+          postgres migrate leader-1 leader-2 proxy
       - name: Tear down
         if: always()
         run: docker compose -f e2e/compose/docker-compose.yml down -v

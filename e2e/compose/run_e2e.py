@@ -2,8 +2,10 @@
 
 Postgres, two leader replicas behind nginx, and two scripted followers on a local location
 holding consented and unconsented recordings. One follower dies holding a job; after two
-completions one leader replica is killed. Every consented recording must complete exactly
-once, and the unconsented one must never be linked.
+completions, and once both replicas have answered requests (the proxy names the upstream
+in an X-Upstream header), one leader replica is killed. Every consented recording must
+complete exactly once (one job, one completed attempt), and the unconsented one must never
+be linked.
 
 CI runs this after `docker compose up` (.github/workflows/ci.yml); the leader's tests also
 run it in-process against one leader (packages/leader/tests/test_compose_driver.py).
@@ -141,6 +143,20 @@ class Report:
     completed: int
     abandoned_job: str
     killed_after: int
+    upstreams_before_kill: frozenset[str]
+
+
+class Upstreams:
+    """The leader replicas that answered, from the proxy's X-Upstream header. A request the
+    proxy moved to another replica names several and counts for none."""
+
+    def __init__(self) -> None:
+        self.served: set[str] = set()
+
+    async def note(self, response: httpx.Response) -> None:
+        upstream = response.headers.get("x-upstream", "").strip()
+        if upstream and "," not in upstream and " : " not in upstream:
+            self.served.add(upstream)
 
 
 def write_recordings(data_dir: Path) -> None:
@@ -214,6 +230,17 @@ async def completed_recordings(sessionmaker: async_sessionmaker[AsyncSession]) -
         )
 
 
+async def jobs_completed_more_than_once(session: AsyncSession) -> list[uuid.UUID]:
+    rows = await session.scalars(
+        select(JobAttempt.job_id)
+        .where(JobAttempt.outcome == "completed")
+        .group_by(JobAttempt.job_id)
+        .having(func.count() > 1)
+        .order_by(JobAttempt.job_id)
+    )
+    return list(rows.all())
+
+
 async def check(
     sessionmaker: async_sessionmaker[AsyncSession],
     data_dir: Path,
@@ -231,6 +258,7 @@ async def check(
                 select(JobAttempt).where(JobAttempt.job_id == uuid.UUID(abandoned))
             )
         ).all()
+        repeated = await jobs_completed_more_than_once(session)
     expect(set(recordings) == {*CONSENTED, UNCONSENTED}, f"catalogued {sorted(recordings)}")
     for key in CONSENTED:
         done = [j for j in jobs if j.recording_id == recordings[key].id and j.state == "completed"]
@@ -238,6 +266,7 @@ async def check(
         expect(done[0].id in results, f"{key} has no recorded result")
         outputs = data_dir / "transcripts" / f"{key}.segments.json"
         expect(outputs.exists(), f"{key} has no outputs in storage")
+    expect(not repeated, f"{len(repeated)} job(s) have more than one completed attempt")
     held = recordings[UNCONSENTED]
     expect(held.consent == "not_consented", f"the unconsented recording is {held.consent}")
     expect(
@@ -262,17 +291,25 @@ async def run(
     storage_root: str,
     kill_replica: Callable[[], object],
     transport: httpx.AsyncBaseTransport | None = None,
+    replicas: int = 0,
     work_seconds: float = 1.0,
     timeout: float = 240.0,
 ) -> Report:
+    """`replicas`: how many distinct upstreams must have answered before one is killed
+    (0 when there is no proxy to name them)."""
     write_recordings(data_dir)
     engine = make_engine(database_url)
     sessionmaker = make_sessionmaker(engine)
     deadline = time.monotonic() + timeout
+    upstreams = Upstreams()
+    served_before_kill: frozenset[str] = frozenset()
     try:
         token = await seed(sessionmaker, storage_root)
         async with httpx.AsyncClient(
-            base_url=base_url, transport=transport, timeout=30.0
+            base_url=base_url,
+            transport=transport,
+            timeout=30.0,
+            event_hooks={"response": [upstreams.note]},
         ) as client:
             await wait_until_ready(client, deadline)
             doomed, steady = Follower(client), Follower(client)
@@ -283,6 +320,12 @@ async def run(
             while await completed_recordings(sessionmaker) < len(CONSENTED):
                 expect(time.monotonic() < deadline, "not every consented recording completed")
                 if killed_after is None and len(steady.completed) >= 2:
+                    served_before_kill = frozenset(upstreams.served)
+                    expect(
+                        len(served_before_kill) >= replicas,
+                        f"only {len(served_before_kill)} of {replicas} leader replicas "
+                        "answered before the kill",
+                    )
                     killed_after = len(steady.completed)
                     await asyncio.to_thread(kill_replica)
                 claim = await steady.claim()
@@ -294,7 +337,12 @@ async def run(
         await check(sessionmaker, data_dir, doomed=doomed, steady=steady, abandoned=abandoned)
     finally:
         await engine.dispose()
-    return Report(completed=len(CONSENTED), abandoned_job=abandoned, killed_after=killed_after)
+    return Report(
+        completed=len(CONSENTED),
+        abandoned_job=abandoned,
+        killed_after=killed_after,
+        upstreams_before_kill=served_before_kill,
+    )
 
 
 def main() -> int:
@@ -305,7 +353,10 @@ def main() -> int:
     )
     parser.add_argument("--data-dir", type=Path, default=HERE / "work" / "data")
     parser.add_argument("--storage-root", default="/data")
-    parser.add_argument("--replica", default="leader-1")
+    parser.add_argument("--replica", default="leader-1", help="the replica to kill")
+    parser.add_argument(
+        "--replicas", type=int, default=2, help="replicas that must answer before the kill"
+    )
     args = parser.parse_args()
 
     def kill() -> None:
@@ -322,6 +373,7 @@ def main() -> int:
                 data_dir=args.data_dir,
                 storage_root=args.storage_root,
                 kill_replica=kill,
+                replicas=args.replicas,
             )
         )
     except AssertionError as exc:
@@ -329,7 +381,8 @@ def main() -> int:
         return 1
     print(
         f"passed: {report.completed} recordings completed once each; "
-        f"{args.replica} was killed after {report.killed_after} completions"
+        f"{len(report.upstreams_before_kill)} replicas answered, then {args.replica} was "
+        f"killed after {report.killed_after} completions"
     )
     return 0
 

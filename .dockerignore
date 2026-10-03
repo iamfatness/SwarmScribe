@@ -6,3 +6,5 @@
 .superpowers
 **/__pycache__
 e2e/compose/work
+*.env
+**/*.env

@@ -110,3 +110,114 @@ async def test_registry_builds_a_local_backend_and_refuses_others(tmp_path, fact
     azure = await factory.location(backend="azure", config={})
     with pytest.raises(StorageError, match="not available"):
         backend_for(azure, signer=SIGNER, public_url="https://l")
+
+
+def symlink(link, target, is_dir=False):
+    try:
+        os.symlink(target, link, target_is_directory=is_dir)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not permitted here")
+
+
+async def test_list_skips_symlinks_and_dangling_links(tmp_path):
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    (outside / "secret.mp3").write_bytes(b"s")
+    write(root, "ok.mp3")
+    symlink(root / "link.mp3", outside / "secret.mp3")
+    symlink(root / "dangling.mp3", outside / "nope.mp3")
+    symlink(root / "dirlink", outside, is_dir=True)
+    keys = [i.key for i in await collect(backend(root).list())]
+    assert keys == ["ok.mp3"]
+
+
+async def test_list_survives_a_file_vanishing_before_stat(tmp_path, monkeypatch):
+    write(tmp_path, "a.mp3")
+    write(tmp_path, "b.mp3")
+    real_stat = type(tmp_path).stat
+
+    def flaky(self, *args, **kwargs):
+        if self.name == "a.mp3":
+            raise FileNotFoundError(2, "gone", str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(tmp_path), "stat", flaky)
+    keys = [i.key for i in await collect(backend(tmp_path).list())]
+    assert keys == ["b.mp3"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="backslash is not legal in Windows filenames")
+async def test_list_skips_keys_path_for_would_refuse(tmp_path):
+    write(tmp_path, "good.mp3")
+    write(tmp_path, "bad\name.mp3")
+    keys = [i.key for i in await collect(backend(tmp_path).list())]
+    assert keys == ["good.mp3"]
+
+
+async def test_nul_in_a_key_is_a_storage_error(tmp_path):
+    with pytest.raises(StorageError):
+        backend(tmp_path).path_for("a\x00b.mp3")
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "./x",
+        "x/",
+        "talks//x",
+        "x/.",
+        "a/./b",
+        "a/../b",
+        "C:/x",
+        "a:b",
+        "x.mp3:stream",
+        "dir./x",
+        "dir /x",
+        "x.",
+        "x ",
+    ],
+)
+async def test_non_canonical_or_windows_hostile_keys_are_rejected(tmp_path, key):
+    with pytest.raises(StorageError):
+        backend(tmp_path).path_for(key)
+
+
+@pytest.mark.parametrize(
+    "key", ["talks/one.mp3", "a+b (1).mp3", "2024/x/y.wav", "José.mp3"]
+)
+async def test_ordinary_keys_stay_valid(tmp_path, key):
+    assert backend(tmp_path).path_for(key).is_relative_to(tmp_path.resolve())
+
+
+async def test_deleting_a_directory_is_a_storage_error(tmp_path):
+    (tmp_path / "talks").mkdir()
+    with pytest.raises(StorageError):
+        await backend(tmp_path).delete("talks")
+    assert (tmp_path / "talks").is_dir()
+
+
+async def test_read_text_of_invalid_utf8_names_the_key(tmp_path):
+    write(tmp_path, "bad.txt", b"\xff\xfe\x00bad")
+    with pytest.raises(StorageError, match="bad.txt"):
+        await backend(tmp_path).read_text("bad.txt")
+
+
+async def test_a_missing_or_non_directory_root_is_a_storage_error(tmp_path):
+    missing = backend(tmp_path / "nope")
+    with pytest.raises(StorageError, match="is not available"):
+        await collect(missing.list())
+    with pytest.raises(StorageError, match="is not available"):
+        await missing.read_text("a.txt")
+    with pytest.raises(StorageError, match="is not available"):
+        await missing.stat("a.txt")
+    afile = write(tmp_path, "file.txt")
+    with pytest.raises(StorageError, match="is not available"):
+        await collect(backend(afile).list())
+
+
+async def test_registry_refuses_a_local_location_without_a_root(factory):
+    location = await factory.location(config={})
+    with pytest.raises(StorageError, match="root"):
+        backend_for(location, signer=SIGNER, public_url="https://l")

@@ -32,36 +32,59 @@ class LocalBackend:
         self.public_url = public_url.rstrip("/")
         self.clock = clock
 
+    def _require_root(self) -> None:
+        if not self.root.is_dir():
+            raise StorageError(f"storage root {str(self.root)!r} is not available")
+
     def path_for(self, key: str) -> Path:
-        if (
-            not key
-            or key.startswith("/")
-            or "\\" in key
-            or ".." in PurePosixPath(key).parts
-        ):
+        if not key or "\x00" in key or key.startswith("/") or "\\" in key or ":" in key:
             raise StorageError(f"invalid storage key {key!r}")
+        if key != PurePosixPath(key).as_posix():
+            raise StorageError(f"invalid storage key {key!r}")
+        for segment in key.split("/"):
+            if segment in ("", ".", "..") or segment.endswith((".", " ")):
+                raise StorageError(f"invalid storage key {key!r}")
         path = (self.root / key).resolve()
         if not path.is_relative_to(self.root):
             raise StorageError(f"invalid storage key {key!r}")
         return path
 
+    @staticmethod
+    def _is_link(path: Path) -> bool:
+        return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
+
     async def list(self, prefix: str = "") -> AsyncIterator[ObjectInfo]:
+        self._require_root()
         for dirpath, dirnames, filenames in os.walk(self.root):
-            dirnames.sort()
+            dirnames[:] = sorted(d for d in dirnames if not self._is_link(Path(dirpath) / d))
             for name in sorted(filenames):
                 full = Path(dirpath) / name
+                if self._is_link(full):
+                    continue
                 key = full.relative_to(self.root).as_posix()
-                if key.startswith(prefix):
+                if not key.startswith(prefix):
+                    continue
+                try:
+                    self.path_for(key)
                     st = full.stat()
-                    yield ObjectInfo(key=key, size=st.st_size, version=version_of(st))
+                except StorageError:
+                    continue
+                except FileNotFoundError:
+                    continue
+                yield ObjectInfo(key=key, size=st.st_size, version=version_of(st))
 
     async def read_text(self, key: str) -> str | None:
+        self._require_root()
         path = self.path_for(key)
         if not path.is_file():
             return None
-        return path.read_text(encoding="utf-8-sig")
+        try:
+            return path.read_text(encoding="utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise StorageError(f"{key!r} is not valid UTF-8 text") from exc
 
     async def stat(self, key: str) -> ObjectInfo | None:
+        self._require_root()
         path = self.path_for(key)
         if not path.is_file():
             return None
@@ -86,4 +109,7 @@ class LocalBackend:
         return self._link(key, "PUT", "", ttl)
 
     async def delete(self, key: str) -> None:
-        self.path_for(key).unlink(missing_ok=True)
+        path = self.path_for(key)
+        if path.is_dir():
+            raise StorageError(f"{key!r} is a directory, not an object")
+        path.unlink(missing_ok=True)

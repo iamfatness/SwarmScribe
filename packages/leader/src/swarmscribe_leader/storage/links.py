@@ -51,10 +51,15 @@ class LinkSigner:
             given = _decode(signature)
         except (ValueError, binascii.Error) as exc:
             raise InvalidLink("malformed link") from exc
+        if _encode(given) != signature:
+            raise InvalidLink("malformed link")
         if not hmac.compare_digest(given, self._mac(payload)):
             raise InvalidLink("bad link signature")
         try:
-            claims = LinkClaims(**json.loads(_decode(payload)))
+            body = _decode(payload)
+            if _encode(body) != payload:
+                raise InvalidLink("malformed link")
+            claims = LinkClaims(**json.loads(body))
         except (ValueError, TypeError, binascii.Error) as exc:
             raise InvalidLink("malformed link") from exc
         if claims.expires <= now:

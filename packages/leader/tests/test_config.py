@@ -146,7 +146,7 @@ def test_both_providers_and_role_lists_from_the_environment(monkeypatch):
         ),
         ({"entra_client_secret": "s"}, "entra_client_secret needs entra_client_id"),
         ({"google_client_id": "g"}, "google_client_secret is required"),
-        ({"google_hosted_domain": "example.org"}, "need google_client_id"),
+        ({"google_hosted_domain": "example.org"}, "google_hosted_domain needs google_client_id"),
         ({"role_admin_entra_groups": "g1"}, "role_admin_entra_groups needs Entra ID sign-in"),
         (
             {
@@ -204,3 +204,96 @@ def test_sign_in_secrets_are_not_shown_in_the_settings_repr():
     assert "entra-hidden" not in shown
     assert "google-hidden" not in shown
     assert "not-a-real-key" not in shown
+
+
+GOOGLE = {"google_client_id": "g", "google_client_secret": "s"}
+
+
+def test_a_blank_google_secret_does_not_satisfy_google_sign_in():
+    with pytest.raises(ValidationError, match="google_client_secret is required"):
+        Settings(**BASE, google_client_id="g", google_client_secret="")
+
+
+def test_blank_secrets_count_as_unset():
+    assert Settings(**BASE, entra_client_secret="").entra_client_secret is None
+    settings = Settings(**BASE, **GOOGLE, google_service_account="  ")
+    assert settings.google_service_account is None
+    assert settings.google_service_account_key() is None
+
+
+@pytest.mark.parametrize(
+    "setting, entry",
+    [
+        ("role_admin_domains", "*.example.org"),
+        ("role_admin_domains", "a@b.org"),
+        ("role_admin_domains", "exa mple.org"),
+        ("role_admin_domains", "localhost"),
+        ("role_viewer_emails", "no-at-sign.example.org"),
+        ("role_viewer_emails", "a@b@example.org"),
+        ("role_viewer_emails", "@example.org"),
+        ("role_viewer_emails", "a@localhost"),
+    ],
+)
+def test_malformed_role_entries_are_refused_naming_setting_and_position(setting, entry):
+    values = {setting: f"fine.example.org,{entry}"}
+    if setting.endswith("emails"):
+        values[setting] = f"ok@example.org,{entry}"
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(**BASE, **GOOGLE, **values)
+    message = str(excinfo.value.errors(include_input=False, include_url=False))
+    assert setting in message
+    assert "entry 2" in message
+
+
+def test_hosted_domain_loses_one_leading_at_sign():
+    settings = Settings(**BASE, **GOOGLE, google_hosted_domain="@Example.org")
+    assert settings.google_hosted_domain == "example.org"
+
+
+def test_the_orphaned_google_setting_is_named():
+    with pytest.raises(ValidationError, match="google_service_account needs google_client_id"):
+        Settings(**BASE, google_service_account=SERVICE_ACCOUNT)
+
+
+def test_empty_role_lists_are_empty(monkeypatch):
+    monkeypatch.setenv("SWARMSCRIBE_DATABASE_URL", "postgresql://x/y")
+    monkeypatch.setenv("SWARMSCRIBE_PUBLIC_URL", "https://l")
+    monkeypatch.setenv("SWARMSCRIBE_LINK_KEY", "z" * 40)
+    monkeypatch.setenv("SWARMSCRIBE_ROLE_ADMIN_EMAILS", "")
+    monkeypatch.setenv("SWARMSCRIBE_ROLE_VIEWER_DOMAINS", " , ")
+    settings = Settings()
+    assert settings.role_admin_emails == ()
+    assert settings.role_viewer_domains == ()
+    assert settings.role_operator_emails == ()
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        TENANT,
+        TENANT.replace("-", ""),
+        "{" + TENANT + "}",
+        "urn:uuid:" + TENANT,
+    ],
+)
+def test_tenant_guid_forms_are_normalised(form):
+    settings = Settings(**BASE, entra_client_id="c", entra_tenant_id=form)
+    assert settings.entra_tenant_id == TENANT.lower()
+
+
+def test_a_missing_service_account_file_is_refused_by_setting_name(tmp_path):
+    missing = tmp_path / "nope.json"
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(**BASE, **GOOGLE, google_service_account=str(missing))
+    message = str(excinfo.value.errors(include_input=False, include_url=False))
+    assert "google_service_account must be a service-account JSON key" in message
+
+
+def test_a_service_account_file_with_bad_contents_does_not_leak_them(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text("file-secret-material", encoding="utf-8")
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(**BASE, **GOOGLE, google_service_account=str(path))
+    message = str(excinfo.value.errors(include_input=False, include_url=False))
+    assert "google_service_account" in message
+    assert "file-secret-material" not in message

@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 ROLES = ("viewer", "operator", "admin")
@@ -17,6 +17,10 @@ _BAD_SERVICE_ACCOUNT = (
 
 NameList = Annotated[tuple[str, ...], NoDecode]
 """Comma-separated in the environment, e.g. `a@example.org, b@example.org`."""
+
+
+def _is_domain(name: str) -> bool:
+    return "." in name and not any(c in name for c in "*@") and not any(c.isspace() for c in name)
 
 
 class Settings(BaseSettings):
@@ -87,6 +91,37 @@ class Settings(BaseSettings):
             return tuple(name for name in names if name)
         return value
 
+    @field_validator(*_ROLE_LISTS)
+    @classmethod
+    def _entries_are_well_formed(cls, names: tuple[str, ...], info: ValidationInfo) -> Any:
+        kind = (info.field_name or "").rsplit("_", 1)[-1]
+        for position, name in enumerate(names, start=1):
+            if kind == "domains":
+                ok = _is_domain(name)
+            elif kind == "emails":
+                local, at, domain = name.partition("@")
+                ok = bool(local) and at == "@" and _is_domain(domain)
+            else:
+                ok = True
+            if not ok:
+                raise ValueError(
+                    f"{info.field_name} entry {position} ({name!r}) is not a valid "
+                    f"{'domain' if kind == 'domains' else 'email address'}"
+                )
+        return names
+
+    @field_validator(
+        "entra_client_secret", "google_client_secret", "google_service_account", mode="before"
+    )
+    @classmethod
+    def _blank_secret_is_unset(cls, value: Any) -> Any:
+        # Compose/Kubernetes pass an unset variable as an empty string.
+        if isinstance(value, str) and not value.strip():
+            return None
+        if isinstance(value, SecretStr) and not value.get_secret_value().strip():
+            return None
+        return value
+
     @field_validator("entra_tenant_id")
     @classmethod
     def _tenant_is_an_id(cls, value: str | None) -> str | None:
@@ -109,7 +144,7 @@ class Settings(BaseSettings):
     @field_validator("google_hosted_domain")
     @classmethod
     def _domain_lowercase(cls, value: str | None) -> str | None:
-        return value.lower() if value else value
+        return value.removeprefix("@").lower() if value else value
 
     @model_validator(mode="after")
     def _heartbeat_inside_lease(self) -> "Settings":
@@ -134,9 +169,10 @@ class Settings(BaseSettings):
                 "google_client_secret is required with google_client_id "
                 "(the admin CLI's device sign-in sends it)"
             )
-        extras = (self.google_client_secret, self.google_hosted_domain, self.google_service_account)
-        if not self.google_client_id and any(value is not None for value in extras):
-            raise ValueError("the google_* settings need google_client_id")
+        if not self.google_client_id:
+            for name in ("google_client_secret", "google_hosted_domain", "google_service_account"):
+                if getattr(self, name) is not None:
+                    raise ValueError(f"{name} needs google_client_id")
         for role in ROLES:
             if getattr(self, f"role_{role}_entra_groups") and not self.entra_client_id:
                 raise ValueError(f"role_{role}_entra_groups needs Entra ID sign-in")

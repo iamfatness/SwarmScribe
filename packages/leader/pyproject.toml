@@ -1,0 +1,27 @@
+[project]
+name = "swarmscribe-leader"
+version = "0.1.0"
+description = "SwarmScribe leader: catalogue, consent, jobs and the follower API"
+requires-python = ">=3.11"
+dependencies = [
+    "swarmscribe-protocol",
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30,<1",
+    "sqlalchemy[asyncio]>=2.0.30,<3",
+    "asyncpg>=0.29,<1",
+    "alembic>=1.13,<2",
+    "pydantic-settings>=2.4,<3",
+]
+
+[project.scripts]
+swarmscribe-leader = "swarmscribe_leader.main:run"
+
+[tool.uv.sources]
+swarmscribe-protocol = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/swarmscribe_leader"]

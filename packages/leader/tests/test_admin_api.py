@@ -1045,3 +1045,72 @@ def test_an_unrelated_mount_is_fine():
     app = FastAPI()
     app.mount("/static", FastAPI())
     assert admin_surface_problems(app)[0] == []
+
+
+# --- channel settings -------------------------------------------------------------
+
+
+async def test_a_location_can_split_stereo_recordings(admin_client, idp, tmp_path):
+    response = await post(
+        admin_client,
+        idp,
+        "/v1/admin/locations",
+        "admin",
+        {
+            "name": "calls-1",
+            "root": str(tmp_path),
+            "channel_mode": "stereo_split",
+            "channel_labels": ["Agent", "Customer"],
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert (body["channel_mode"], body["channel_labels"]) == (
+        "stereo_split",
+        ["Agent", "Customer"],
+    )
+    (listed,) = await get(admin_client, idp, "/v1/admin/locations")
+    assert (listed["channel_mode"], listed["channel_labels"]) == (
+        "stereo_split",
+        ["Agent", "Customer"],
+    )
+
+
+async def test_a_location_is_mono_unless_told_otherwise(admin_client, idp, tmp_path):
+    body = {"name": "archive-1", "root": str(tmp_path)}
+    response = await post(admin_client, idp, "/v1/admin/locations", "admin", body)
+    assert (response.json()["channel_mode"], response.json()["channel_labels"]) == (
+        "mono",
+        ["Left", "Right"],
+    )
+
+
+async def test_auto_keeps_the_default_labels(admin_client, idp, tmp_path):
+    body = {"name": "mixed-1", "root": str(tmp_path), "channel_mode": "auto"}
+    response = await post(admin_client, idp, "/v1/admin/locations", "admin", body)
+    assert (response.json()["channel_mode"], response.json()["channel_labels"]) == (
+        "auto",
+        ["Left", "Right"],
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"channel_mode": "stereo"},
+        {"channel_mode": "auto", "channel_labels": ["Agent"]},
+        {"channel_mode": "auto", "channel_labels": ["Agent", "Customer", "Supervisor"]},
+        {"channel_mode": "auto", "channel_labels": ["", "Customer"]},
+        {"channel_mode": "auto", "channel_labels": ["A" * 41, "Customer"]},
+        {"channel_mode": "auto", "channel_labels": ["Agent\nOne", "Customer"]},
+        {"channel_mode": "auto", "channel_labels": ["Agent", "agent"]},
+        {"channel_labels": ["Agent", "Customer"]},
+        {"channel_mode": "mono", "channel_labels": ["Agent", "Customer"]},
+    ],
+)
+async def test_invalid_channel_settings_are_refused(admin_client, idp, tmp_path, change):
+    body = {"name": "calls-1", "root": str(tmp_path), **change}
+    response = await post(admin_client, idp, "/v1/admin/locations", "admin", body)
+    assert (response.status_code, response.json()["code"]) == (422, "invalid_request")
+    assert "channel" in response.json()["message"]
+    assert await get(admin_client, idp, "/v1/admin/locations") == []

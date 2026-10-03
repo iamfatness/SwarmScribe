@@ -5,12 +5,14 @@ import asyncio
 import os
 import stat
 import uuid
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from swarmscribe_protocol import DEFAULT_CHANNEL_LABELS
 
 from .. import audit
 from ..db.models import StorageLocation
@@ -112,6 +114,8 @@ async def add_location(
     required_device: str,
     scan_interval_s: int,
     actor: str,
+    channel_mode: str = "mono",
+    channel_labels: Sequence[str] = DEFAULT_CHANNEL_LABELS,
 ) -> StorageLocation:
     """A local-folder location (Azure and GCS arrive with Plan B). The folder must be
     visible to this replica, which suggests every replica mounts it at the same path. The
@@ -136,6 +140,8 @@ async def add_location(
         scan_interval_s=scan_interval_s,
         enabled=True,
         vocabulary_version=0,
+        channel_mode=channel_mode,
+        channel_labels=list(channel_labels),
     )
     session.add(location)
     try:

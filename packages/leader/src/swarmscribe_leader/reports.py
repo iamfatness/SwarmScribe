@@ -38,6 +38,8 @@ def location_view(location: StorageLocation) -> dict[str, Any]:
         "last_scan_at": location.last_scan_at,
         "last_scan_error": location.last_scan_error,
         "scan_requested": location.scan_requested_at is not None,
+        "channel_mode": location.channel_mode,
+        "channel_labels": list(location.channel_labels),
     }
 
 

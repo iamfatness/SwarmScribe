@@ -662,3 +662,66 @@ async def test_login_shows_the_signed_in_person_without_control_characters(store
     assert code == 0, err
     assert "signed in as" in out
     assert not has_control_characters(out), repr(out)
+
+
+async def test_locations_add_with_channels_and_labels(cli, store, idp, sessionmaker, tmp_path):
+    sign_in_as(store, idp, "admin")
+    code, _out, err = await cli(
+        "locations",
+        "add",
+        "calls-1",
+        "--root",
+        str(tmp_path),
+        "--channels",
+        "stereo-split",
+        "--labels",
+        "Agent, Customer",
+    )
+    assert code == 0, err
+    async with sessionmaker() as session:
+        location = (await session.scalars(select(StorageLocation))).one()
+    assert (location.channel_mode, location.channel_labels) == (
+        "stereo_split",
+        ["Agent", "Customer"],
+    )
+    assert "stereo_split" in (await cli("locations", "list"))[1]
+
+
+async def test_locations_add_is_mono_by_default(cli, store, idp, sessionmaker, tmp_path):
+    sign_in_as(store, idp, "admin")
+    code, _out, err = await cli("locations", "add", "archive-1", "--root", str(tmp_path))
+    assert code == 0, err
+    async with sessionmaker() as session:
+        location = (await session.scalars(select(StorageLocation))).one()
+    assert (location.channel_mode, location.channel_labels) == ("mono", ["Left", "Right"])
+
+
+async def test_locations_add_labels_without_a_split_mode_is_refused(
+    cli, store, idp, sessionmaker, tmp_path
+):
+    sign_in_as(store, idp, "admin")
+    code, out, err = await cli(
+        "locations", "add", "calls-1", "--root", str(tmp_path), "--labels", "Agent,Customer"
+    )
+    assert (code, out) == (1, "")
+    assert "--labels needs --channels stereo-split or auto" in err
+    async with sessionmaker() as session:
+        assert (await session.scalars(select(StorageLocation))).all() == []
+
+
+@pytest.mark.parametrize("labels", ["Agent", "Agent,Customer,Supervisor"])
+async def test_locations_add_labels_must_be_two_names(cli, store, idp, tmp_path, labels):
+    sign_in_as(store, idp, "admin")
+    with pytest.raises(SystemExit) as excinfo:
+        await cli(
+            "locations",
+            "add",
+            "calls-1",
+            "--root",
+            str(tmp_path),
+            "--channels",
+            "auto",
+            "--labels",
+            labels,
+        )
+    assert excinfo.value.code == 2

@@ -166,6 +166,12 @@ uv run swarmscribe-admin followers revoke <follower-id>
 uv run swarmscribe-admin consent report
 ```
 
+For recordings with one speaker per channel (such as call recordings), add
+`--channels stereo-split --labels "Agent,Customer"`: each recording is
+transcribed per channel and every transcript line starts with its channel's
+label. `--channels auto` splits two-channel files and mixes the rest. The
+default, `mono`, mixes the channels as before.
+
 The CLI accepts HTTPS leaders only; HTTP is allowed only for localhost
 (`http://localhost`, `http://127.0.0.1`, or `http://[::1]`).
 

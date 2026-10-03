@@ -883,3 +883,25 @@ async def test_the_channel_settings_come_from_the_recordings_location_not_the_ou
         "stereo_split",
         ("Left", "Right"),
     )
+
+
+async def test_a_location_with_labels_the_protocol_refuses_is_skipped_not_a_500(
+    client, sessionmaker, factory, tmp_path
+):
+    # Equal labels pass the database CHECK but fail JobSettings validation.
+    broken, healthy = await two_locations(sessionmaker, factory, tmp_path)
+    async with sessionmaker() as session:
+        row = await session.get(StorageLocation, broken.id)
+        row.channel_mode = "stereo_split"
+        row.channel_labels = ["Same", "Same"]
+        await session.commit()
+    headers = await register(client, sessionmaker)
+    claimed = await claim(client, headers)
+    jobs, attempts = await job_rows(sessionmaker)
+    by_state = {job.state: job for job in jobs}
+    assert str(by_state["leased"].id) == claimed.job_id
+    assert (claimed.settings.channel_mode, by_state["queued"].attempts, len(attempts)) == (
+        "mono",
+        0,
+        1,
+    )

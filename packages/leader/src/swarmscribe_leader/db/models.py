@@ -4,6 +4,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -34,6 +35,16 @@ class _Row:
 
 class StorageLocation(_Row, Base):
     __tablename__ = "storage_locations"
+    __table_args__ = (
+        CheckConstraint(
+            "channel_mode IN ('mono','stereo_split','auto')",
+            name="ck_storage_locations_channel_mode",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(channel_labels) = 'array' AND jsonb_array_length(channel_labels) = 2",
+            name="ck_storage_locations_channel_labels",
+        ),
+    )
 
     name: Mapped[str] = mapped_column(String(200), unique=True)
     backend: Mapped[str] = mapped_column(String(16))

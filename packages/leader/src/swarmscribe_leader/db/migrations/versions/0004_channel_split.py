@@ -32,8 +32,20 @@ def upgrade() -> None:
             nullable=False,
         ),
     )
+    op.create_check_constraint(
+        "ck_storage_locations_channel_mode",
+        "storage_locations",
+        "channel_mode IN ('mono','stereo_split','auto')",
+    )
+    op.create_check_constraint(
+        "ck_storage_locations_channel_labels",
+        "storage_locations",
+        "jsonb_typeof(channel_labels) = 'array' AND jsonb_array_length(channel_labels) = 2",
+    )
 
 
 def downgrade() -> None:
+    op.drop_constraint("ck_storage_locations_channel_labels", "storage_locations", type_="check")
+    op.drop_constraint("ck_storage_locations_channel_mode", "storage_locations", type_="check")
     op.drop_column("storage_locations", "channel_labels")
     op.drop_column("storage_locations", "channel_mode")

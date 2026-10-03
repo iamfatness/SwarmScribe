@@ -6,7 +6,7 @@ from functools import partial
 from fastapi import FastAPI
 
 from .api import errors as api_errors
-from .api import files, health
+from .api import files, follower, health
 from .background import run_exclusive, run_periodically
 from .clock import utcnow
 from .config import Settings
@@ -90,4 +90,5 @@ def create_app(settings: Settings, *, background: bool = True) -> FastAPI:
     api_errors.install(app)
     app.include_router(health.router)
     app.include_router(files.router)
+    app.include_router(follower.router)
     return app

@@ -4,6 +4,7 @@ from datetime import timedelta
 import httpx
 import pytest
 from sqlalchemy import select, update
+from sqlalchemy.exc import DBAPIError
 from swarmscribe_leader.app import create_app
 from swarmscribe_leader.auth.followers import create_join_token
 from swarmscribe_leader.clock import utcnow
@@ -496,6 +497,34 @@ async def test_no_settings_profile_for_the_device_gives_204(
     finally:
         await set_cuda_profiles_device("retired", "cuda")
     assert "cuda" in caplog.text
+
+
+async def test_claim_with_the_database_unreachable_is_503_unavailable():
+    settings = Settings(
+        database_url="postgresql://u:p@127.0.0.1:1/none",
+        public_url="http://leader",
+        link_key="k" * 32,
+    )
+    application = create_app(settings, background=False)
+    async with application.router.lifespan_context(application):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=application), base_url="http://leader"
+        ) as http:
+            response = await http.post("/v1/jobs/claim", headers={"Authorization": "Bearer x"})
+    assert response.status_code == 503
+    assert response.json()["code"] == "unavailable"
+    assert response.headers["retry-after"] == "10"
+
+
+async def test_a_database_error_during_claim_is_503_unavailable(app, client, monkeypatch):
+    class Failing:
+        def __call__(self):
+            raise DBAPIError("select 1", {}, ConnectionError("server closed the connection"))
+
+    monkeypatch.setattr(app.state, "sessionmaker", Failing())
+    response = await client.post("/v1/jobs/claim", headers={"Authorization": "Bearer x"})
+    assert (response.status_code, response.json()["code"]) == (503, "unavailable")
+    assert response.headers["retry-after"] == "10"
 
 
 async def test_another_followers_credential_cannot_touch_a_lease(

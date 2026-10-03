@@ -1,9 +1,10 @@
 import os
 from datetime import timedelta
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
-from swarmscribe_leader.storage.base import StorageError
+from swarmscribe_leader.storage.base import StorageError, StorageUnavailable
 from swarmscribe_leader.storage.links import LinkSigner
 from swarmscribe_leader.storage.local import LocalBackend, version_of
 from swarmscribe_leader.storage.registry import backend_for
@@ -215,6 +216,34 @@ async def test_a_missing_or_non_directory_root_is_a_storage_error(tmp_path):
     afile = write(tmp_path, "file.txt")
     with pytest.raises(StorageError, match="is not available"):
         await collect(backend(afile).list())
+
+
+def fail_for(monkeypatch, name, method):
+    """Make Path.<method> raise an I/O error (not 'not found') for files called `name`."""
+    real = getattr(Path, method)
+
+    def failing(self, *args, **kwargs):
+        if self.name == name:
+            raise OSError(5, "I/O error", str(self))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, method, failing)
+
+
+@pytest.mark.parametrize(
+    ("method", "call"),
+    [
+        ("stat", lambda store: store.stat("a.mp3")),
+        ("open", lambda store: store.read_text("a.mp3")),
+        ("unlink", lambda store: store.delete("a.mp3")),
+    ],
+)
+async def test_io_errors_become_storage_unavailable_not_absent(tmp_path, monkeypatch, method, call):
+    write(tmp_path, "a.mp3", b"data")
+    store = backend(tmp_path)
+    fail_for(monkeypatch, "a.mp3", method)
+    with pytest.raises(StorageUnavailable):
+        await call(store)
 
 
 async def test_registry_refuses_a_local_location_without_a_root(factory):

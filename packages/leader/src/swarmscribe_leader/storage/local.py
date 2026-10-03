@@ -1,4 +1,5 @@
 import os
+import stat
 import time
 from collections.abc import AsyncIterator, Callable
 from datetime import timedelta
@@ -84,22 +85,39 @@ class LocalBackend:
                     continue
                 yield ObjectInfo(key=key, size=st.st_size, version=version_of(st))
 
+    @staticmethod
+    def _stat_file(path: Path, key: str) -> os.stat_result | None:
+        """The stat of a regular file, None when there is none. Any other failure is an
+        outage, never 'absent': an unreadable consent.txt must not read as 'no consent'."""
+        try:
+            st = path.stat()
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        except OSError as exc:
+            raise StorageUnavailable(f"cannot stat {key!r}: {exc.strerror}") from exc
+        return st if stat.S_ISREG(st.st_mode) else None
+
     async def read_text(self, key: str) -> str | None:
         self._require_root()
         path = self.path_for(key)
-        if not path.is_file():
+        if self._stat_file(path, key) is None:
             return None
         try:
-            return path.read_text(encoding="utf-8-sig")
+            with path.open("r", encoding="utf-8-sig") as handle:
+                return handle.read()
         except UnicodeDecodeError as exc:
             raise StorageError(f"{key!r} is not valid UTF-8 text") from exc
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise StorageUnavailable(f"cannot read {key!r}: {exc.strerror}") from exc
 
     async def stat(self, key: str) -> ObjectInfo | None:
         self._require_root()
         path = self.path_for(key)
-        if not path.is_file():
+        st = self._stat_file(path, key)
+        if st is None:
             return None
-        st = path.stat()
         return ObjectInfo(key=key, size=st.st_size, version=version_of(st))
 
     def _link(self, key: str, method: str, version: str, ttl: timedelta) -> Link:
@@ -121,6 +139,9 @@ class LocalBackend:
 
     async def delete(self, key: str) -> None:
         path = self.path_for(key)
-        if path.is_dir():
-            raise StorageError(f"{key!r} is a directory, not an object")
-        path.unlink(missing_ok=True)
+        try:
+            if path.is_dir():
+                raise StorageError(f"{key!r} is a directory, not an object")
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise StorageUnavailable(f"cannot delete {key!r}: {exc.strerror}") from exc

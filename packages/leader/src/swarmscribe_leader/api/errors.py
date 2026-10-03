@@ -3,6 +3,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import DBAPIError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from swarmscribe_protocol import ErrorBody
 
@@ -12,6 +13,18 @@ from ..storage.base import StorageError, StorageUnavailable
 logger = logging.getLogger(__name__)
 
 _HTTP_CODES = {404: "not_found", 405: "method_not_allowed"}
+STORAGE_RETRY_AFTER = 30
+OUTAGE_RETRY_AFTER = 10
+
+
+def _describe_outage(exc: Exception) -> str:
+    """Exception classes and OS error text only: a DBAPIError's string carries the SQL and
+    its parameters, and an OSError's string can carry a server path."""
+    if isinstance(exc, DBAPIError):
+        return f"{type(exc).__name__} ({type(exc.orig).__name__})"
+    if isinstance(exc, OSError):
+        return f"{type(exc).__name__} (errno {exc.errno}: {exc.strerror})"
+    return type(exc).__name__
 
 
 def error_response(
@@ -29,15 +42,30 @@ def install(app: FastAPI) -> None:
 
     @app.exception_handler(StorageError)
     async def storage_error(_request: Request, exc: StorageError) -> JSONResponse:
-        logger.warning("storage request refused: %s", exc)
         if isinstance(exc, StorageUnavailable):
-            return error_response("invalid_key", "storage location is not available", 400)
+            logger.warning("storage location unavailable: %s", exc)
+            return error_response(
+                "unavailable",
+                "storage location is not available",
+                503,
+                headers={"Retry-After": str(STORAGE_RETRY_AFTER)},
+            )
+        logger.warning("storage request refused: %s", exc)
         return error_response("invalid_key", "invalid storage key", 400)
 
-    @app.exception_handler(OSError)
-    async def os_error(_request: Request, exc: OSError) -> JSONResponse:
-        logger.error("storage failure: %s", exc, exc_info=exc)
-        return error_response("storage_error", "storage failure", 500)
+    async def outage(_request: Request, exc: Exception) -> JSONResponse:
+        # A database outage, or an OSError (connection refused, timeout) that no storage
+        # boundary translated. Transient: the caller should retry, not give up.
+        logger.error("service unavailable: %s", _describe_outage(exc))
+        return error_response(
+            "unavailable",
+            "service temporarily unavailable",
+            503,
+            headers={"Retry-After": str(OUTAGE_RETRY_AFTER)},
+        )
+
+    app.add_exception_handler(DBAPIError, outage)
+    app.add_exception_handler(OSError, outage)
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error(_request: Request, exc: StarletteHTTPException) -> JSONResponse:

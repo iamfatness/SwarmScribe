@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 
 from ..db.models import StorageLocation
 from ..errors import Forbidden, NotFound, PayloadTooLarge, PreconditionFailed
-from ..storage.base import StorageError
+from ..storage.base import StorageError, StorageUnavailable
 from ..storage.links import InvalidLink, LinkClaims
 from ..storage.local import LocalBackend, version_of
 from .errors import error_response
@@ -50,17 +50,27 @@ def _open_current(path: Path, version: str):
     try:
         handle = path.open("rb")
     except OSError as exc:
-        if not path.is_file():
+        if not _is_file(path):
             raise NotFound("file not found") from exc
-        raise
+        raise StorageUnavailable("the file cannot be opened") from exc
     try:
         stat_result = os.fstat(handle.fileno())
         if version and version_of(stat_result) != version:
             raise PreconditionFailed("the file changed after this link was issued")
+    except OSError as exc:
+        handle.close()
+        raise StorageUnavailable("the file cannot be read") from exc
     except BaseException:
         handle.close()
         raise
     return handle, stat_result.st_size
+
+
+def _is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError:
+        return True  # it may well be there; we cannot tell, so do not answer 404
 
 
 async def _stream(handle) -> AsyncIterator[bytes]:
@@ -111,6 +121,8 @@ async def upload(token: str, request: Request) -> Response:
         return error_response(
             "conflict", "the file is in use; retry shortly", 409, headers={"Retry-After": "5"}
         )
+    except OSError as exc:
+        raise StorageUnavailable("the upload could not be stored") from exc
     finally:
         with contextlib.suppress(OSError):
             temp.unlink(missing_ok=True)

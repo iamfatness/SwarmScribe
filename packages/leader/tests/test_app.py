@@ -5,6 +5,7 @@ from datetime import timedelta
 
 import httpx
 import pytest
+from sqlalchemy.exc import DBAPIError
 from swarmscribe_leader.app import create_app
 from swarmscribe_leader.config import Settings
 from swarmscribe_leader.storage.links import LinkClaims
@@ -116,14 +117,18 @@ async def test_forged_and_expired_links_are_refused(app, client, factory, tmp_pa
         assert response.json()["code"] == "forbidden"
 
 
-async def test_a_link_to_a_missing_root_answers_400_not_500(app, client, factory, tmp_path):
+async def test_a_link_to_a_missing_root_answers_503_unavailable(app, client, factory, tmp_path):
     location = await factory.location(config={"root": str(tmp_path / "removed")})
     backend = app.state.backend_factory(location)
     get_link = backend.download_link("talks/one.mp3", "", timedelta(minutes=5))
     put_link = backend.upload_link("talks/one.mp3", timedelta(minutes=5))
     for response in (await client.get(get_link.url), await client.put(put_link.url, content=b"x")):
-        assert response.status_code == 400
-        assert response.json()["code"] == "invalid_key"
+        assert response.status_code == 503
+        assert response.json() == {
+            "code": "unavailable",
+            "message": "storage location is not available",
+        }
+        assert response.headers["retry-after"] == "30"
     assert not (tmp_path / "removed").exists()
 
 
@@ -231,7 +236,7 @@ async def test_a_blocked_replace_answers_409_with_retry_after(
     assert no_temp_files(tmp_path)
 
 
-async def test_other_os_errors_answer_500_storage_error(
+async def test_other_upload_os_errors_answer_503_unavailable(
     app, client, factory, tmp_path, monkeypatch
 ):
     location = await factory.location()
@@ -242,9 +247,52 @@ async def test_other_os_errors_answer_500_storage_error(
 
     monkeypatch.setattr("swarmscribe_leader.api.files.os.replace", broken)
     response = await client.put(link.url, content=b"new")
-    assert (response.status_code, response.json()["code"]) == (500, "storage_error")
+    assert (response.status_code, response.json()["code"]) == (503, "unavailable")
+    assert response.headers["retry-after"] == "30"
     assert str(tmp_path) not in response.text
     assert no_temp_files(tmp_path)
+
+
+async def test_a_download_read_error_answers_503_unavailable(
+    app, client, factory, tmp_path, monkeypatch
+):
+    write(tmp_path, "talks/one.mp3", b"audio")
+    location = await factory.location()
+    link = app.state.backend_factory(location).download_link(
+        "talks/one.mp3", "", timedelta(minutes=5)
+    )
+
+    def unreadable(*_args, **_kwargs):
+        raise OSError(5, "I/O error", str(tmp_path))
+
+    monkeypatch.setattr("swarmscribe_leader.api.files.os.fstat", unreadable)
+    response = await client.get(link.url)
+    assert (response.status_code, response.json()["code"]) == (503, "unavailable")
+    assert response.headers["retry-after"] == "30"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError(5, "raw failure"),
+        DBAPIError("select secret", {}, RuntimeError("db down")),
+    ],
+    ids=["oserror", "dbapierror"],
+)
+async def test_outages_reaching_the_app_answer_503_without_the_path(app, caplog, error):
+    async def outage():
+        raise error
+
+    app.add_api_route("/outage-token-xyz", outage)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://leader") as http:
+        with caplog.at_level("WARNING"):
+            response = await http.get("/outage-token-xyz")
+    assert response.status_code == 503
+    assert response.json() == {"code": "unavailable", "message": "service temporarily unavailable"}
+    assert response.headers["retry-after"] == "10"
+    assert caplog.records
+    assert "outage-token-xyz" not in caplog.text
 
 
 async def test_a_240_character_file_name_uploads(app, client, factory, tmp_path):
@@ -329,7 +377,7 @@ async def test_storage_errors_never_reveal_server_paths(app, client, factory, tm
     location = await factory.location(config={"root": str(tmp_path / "removed")})
     link = app.state.backend_factory(location).download_link("a.mp3", "", timedelta(minutes=5))
     response = await client.get(link.url)
-    assert response.status_code == 400
+    assert response.status_code == 503
     text = response.text
     assert str(tmp_path) not in text
     assert ":\\" not in text

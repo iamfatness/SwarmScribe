@@ -27,17 +27,25 @@ async def retry_job(
     """Queue a failed or cancelled job's recording again, as a new job (the old one stays as
     history; the new one is not cancelled, has no failure and is claimable at once). Consent,
     presence and version are checked again here: retry can never queue a recording its
-    location's consent.txt does not match. The old job's row lock serialises two retries of
-    the same job, and the recording's row lock two retries of different jobs for it."""
+    location's consent.txt does not match. Rows are locked in the scanner's order (location,
+    recording, job), so a retry and a scan of the same recording cannot both queue it."""
+    # Lock order is the scanner's: location, then recording, then jobs.
+    unlocked = await session.get(Job, job_id)
+    if unlocked is None:
+        raise NotFound("no such job")
+    recording = await session.get(Recording, unlocked.recording_id)
+    location = await session.get(
+        StorageLocation, recording.location_id, with_for_update=True, populate_existing=True
+    )
+    recording = await session.get(
+        Recording, unlocked.recording_id, with_for_update=True, populate_existing=True
+    )
     job = await _locked(session, job_id)
     if job.state not in ("failed", "cancelled"):
         raise Conflict(
             f"the job is {job.state}; only failed or cancelled jobs can be retried",
             code="not_retryable",
         )
-    recording = await session.get(
-        Recording, job.recording_id, with_for_update=True, populate_existing=True
-    )
     if recording.consent != "consented" or recording.missing:
         raise Conflict(
             "the recording is not consented or is no longer present", code="not_consented"
@@ -47,6 +55,19 @@ async def retry_job(
             "the recording changed after this job; the next scan queues the new version",
             code="recording_changed",
         )
+    completed = await session.scalar(
+        select(Job.id)
+        .where(
+            Job.recording_id == recording.id,
+            Job.source_version == recording.source_version,
+            Job.state == "completed",
+        )
+        .limit(1)
+    )
+    if completed is not None:
+        raise Conflict(
+            "this version of the recording was already transcribed", code="already_completed"
+        )
     open_job = await session.scalar(
         select(Job.id)
         .where(Job.recording_id == recording.id, Job.state.in_(OPEN_STATES))
@@ -54,7 +75,6 @@ async def retry_job(
     )
     if open_job is not None:
         raise Conflict("the recording already has a queued or leased job", code="already_open")
-    location = await session.get(StorageLocation, recording.location_id)
     retry = Job(
         id=uuid.uuid4(),
         recording_id=recording.id,
@@ -93,6 +113,10 @@ async def cancel_job(
         )
     if job.state != "cancelled":
         await cancel(session, job, now=now, reason=ADMIN_CANCEL_REASON, by=actor)
+    elif job.cancelled_by is None:
+        # The system cancelled it; an administrator now owns the decision, so scanning must
+        # not queue that version again.
+        job.cancelled_by = actor
     audit.record(session, actor=actor, action="job.cancel", subject_type="job", subject_id=job.id)
     return job
 

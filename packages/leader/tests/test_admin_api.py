@@ -692,7 +692,7 @@ BELOW = {"viewer": None, "operator": "viewer", "admin": "operator"}
 
 
 @pytest.fixture
-async def world(factory, sessionmaker, tmp_path):
+async def world(factory, sessionmaker, tmp_path_factory):
     location = await factory.location(name="here")
     failed = await factory.job(await factory.recording(location, key="talks/a.mp3"), state="failed")
     open_job = await factory.job(await factory.recording(location, key="talks/b.mp3"))
@@ -704,7 +704,8 @@ async def world(factory, sessionmaker, tmp_path):
         "open_job": open_job.id,
         "follower": follower.id,
         "token": token_id,
-        "root": str(tmp_path),
+        # a folder apart from the factory location's, which would overlap
+        "root": str(tmp_path_factory.mktemp("added-root")),
     }
 
 
@@ -745,3 +746,213 @@ async def test_every_admin_route_is_in_the_role_table(admin_app):
     }
     table = {(method, shape(path)) for method, path, _, _ in ROUTES}
     assert served - {("GET", "/v1/admin/login-config")} == table
+
+
+# --- fix round 1 ----------------------------------------------------------------
+
+
+async def add_at(client, idp, name, root, **extra):
+    return await post(
+        client, idp, "/v1/admin/locations", "admin", {"name": name, "root": str(root), **extra}
+    )
+
+
+async def test_a_second_location_on_the_same_root_cannot_reanchor_consent(
+    admin_client, idp, tmp_path
+):
+    write(tmp_path, "consent.txt", b"public/*.mp3\n")
+    assert (await add_at(admin_client, idp, "a", tmp_path)).status_code == 201
+    again = await add_at(admin_client, idp, "b", tmp_path, input_prefix="private/")
+    assert (again.status_code, again.json()["code"]) == (409, "overlaps")
+    assert "'a'" in again.json()["message"]
+
+
+async def test_nested_and_containing_roots_overlap_but_siblings_do_not(
+    admin_client, idp, tmp_path
+):
+    for folder in ("outer", "outer/inner", "sibling-1", "sibling-2"):
+        (tmp_path / folder).mkdir(parents=True, exist_ok=True)
+    assert (await add_at(admin_client, idp, "outer", tmp_path / "outer")).status_code == 201
+    inside = await add_at(admin_client, idp, "inner", tmp_path / "outer" / "inner")
+    assert (inside.status_code, inside.json()["code"]) == (409, "overlaps")
+    assert (await add_at(admin_client, idp, "s1", tmp_path / "sibling-1")).status_code == 201
+    containing = await add_at(admin_client, idp, "parent", tmp_path)
+    assert (containing.status_code, containing.json()["code"]) == (409, "overlaps")
+    assert (await add_at(admin_client, idp, "s2", tmp_path / "sibling-2")).status_code == 201
+
+
+async def test_a_disabled_location_still_holds_its_folder(admin_client, idp, tmp_path):
+    await add_at(admin_client, idp, "a", tmp_path)
+    await post(admin_client, idp, "/v1/admin/locations/a/disable", "admin")
+    again = await add_at(admin_client, idp, "b", tmp_path)
+    assert (again.status_code, again.json()["code"]) == (409, "overlaps")
+
+
+async def test_two_overlapping_additions_at_once_add_one(admin_client, idp, tmp_path):
+    responses = await asyncio.gather(
+        add_at(admin_client, idp, "a", tmp_path), add_at(admin_client, idp, "b", tmp_path)
+    )
+    assert sorted(r.status_code for r in responses) == [201, 409]
+
+
+async def test_the_stored_root_is_the_resolved_path(admin_client, idp, tmp_path):
+    (tmp_path / "real").mkdir()
+    awkward = f"{tmp_path}/real/../real"
+    response = await add_at(admin_client, idp, "a", awkward)
+    assert response.status_code == 201, response.text
+    assert response.json()["root"] == str((tmp_path / "real").resolve())
+
+
+async def test_a_root_through_a_symlink_is_refused(admin_client, idp, tmp_path):
+    (tmp_path / "real").mkdir()
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(tmp_path / "real", target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are not permitted here")
+    response = await add_at(admin_client, idp, "a", link)
+    assert (response.status_code, response.json()["code"]) == (422, "invalid_root")
+    through = await add_at(admin_client, idp, "b", link / "deeper")
+    assert through.status_code in (422, 400)
+
+
+async def test_a_root_that_is_a_file_is_refused(admin_client, idp, tmp_path):
+    write(tmp_path, "file.txt")
+    response = await add_at(admin_client, idp, "a", tmp_path / "file.txt")
+    assert (response.status_code, response.json()["code"]) == (422, "invalid_root")
+
+
+@pytest.mark.parametrize(
+    "field, value, status",
+    [
+        ("input_prefix", "incoming//", 422),
+        ("input_prefix", "incoming", 422),
+        ("output_prefix", "transcripts", 422),
+        ("output_prefix", "out//", 422),
+        ("input_prefix", "a/b/", 201),
+        ("input_prefix", "", 201),
+    ],
+)
+async def test_prefixes_end_in_exactly_one_slash(admin_client, idp, tmp_path, field, value, status):
+    response = await add_at(admin_client, idp, "a", tmp_path, **{field: value})
+    assert response.status_code == status, response.text
+
+
+async def test_a_retry_and_a_scan_of_the_same_recording_queue_it_once(
+    admin_app, admin_client, idp, factory, sessionmaker, tmp_path
+):
+    write(tmp_path, "consent.txt", b"**/*.mp3\n")
+    write(tmp_path, "talks/one.mp3")
+    await factory.location(name="here")
+    backends = admin_app.state.backend_factory
+    now = utcnow()
+    await scan_due_locations(sessionmaker, backends, now=now, max_attempts=3)
+    for round_ in range(4):
+        async with sessionmaker() as session:
+            job = (
+                await session.scalars(
+                    select(Job).where(Job.state.in_(("queued", "failed"))).limit(1)
+                )
+            ).first()
+            if job is None:
+                job = (
+                    await session.scalars(select(Job).where(Job.state == "cancelled").limit(1))
+                ).first()
+            # The system cancelled it (no administrator): scanning would queue the version again.
+            job.state, job.cancelled_by = "cancelled", None
+            await session.commit()
+            job_id = job.id
+        await post(admin_client, idp, "/v1/admin/locations/here/ingest", "operator")
+        retry, scan = await asyncio.gather(
+            post(admin_client, idp, f"/v1/admin/jobs/{job_id}/retry", "operator"),
+            scan_due_locations(
+                sessionmaker, backends, now=now + timedelta(seconds=round_ + 1), max_attempts=3
+            ),
+        )
+        assert retry.status_code in (200, 409), retry.text
+        async with sessionmaker() as session:
+            open_jobs = (await session.scalars(select(Job).where(Job.state == "queued"))).all()
+        assert len(open_jobs) <= 1
+        async with sessionmaker() as session:  # close the open one so the next round starts clean
+            for open_job in open_jobs:
+                open_job.state = "failed"
+            await session.commit()
+
+
+async def test_cancelling_a_system_cancelled_job_makes_the_cancel_the_administrators(
+    admin_client, idp, factory, sessionmaker
+):
+    job = await factory.job(state="cancelled", failure_reason="recording missing")
+    response = await post(admin_client, idp, f"/v1/admin/jobs/{job.id}/cancel", "operator")
+    assert response.status_code == 200
+    assert response.json()["cancelled_by"] == actor(idp, "operator")
+    async with sessionmaker() as session:
+        assert (await session.get(Job, job.id)).cancelled_by == actor(idp, "operator")
+
+
+async def test_retry_refuses_a_version_that_was_already_transcribed(
+    admin_client, idp, factory
+):
+    recording = await factory.recording()
+    await factory.job(recording, state="completed")
+    failed = await factory.job(recording, state="failed")
+    response = await post(admin_client, idp, f"/v1/admin/jobs/{failed.id}/retry", "operator")
+    assert (response.status_code, response.json()["code"]) == (409, "already_completed")
+
+
+async def test_location_names_are_unique_ignoring_case(admin_client, idp, tmp_path):
+    (tmp_path / "x").mkdir()
+    (tmp_path / "y").mkdir()
+    assert (await add_at(admin_client, idp, "Archive", tmp_path / "x")).status_code == 201
+    again = await add_at(admin_client, idp, "archive", tmp_path / "y")
+    assert (again.status_code, again.json()["code"]) == (409, "exists")
+
+
+async def test_refused_changes_are_audited_without_their_values(
+    admin_client, idp, factory, sessionmaker
+):
+    queued = await factory.job()
+    conflict = await post(admin_client, idp, f"/v1/admin/jobs/{queued.id}/retry", "operator")
+    missing = await post(admin_client, idp, f"/v1/admin/jobs/{uuid.uuid4()}/cancel", "operator")
+    assert (conflict.status_code, missing.status_code) == (409, 404)
+    entries = await audit_rows(sessionmaker, "admin.change_refused")
+    assert sorted((e.subject_id, e.detail["code"]) for e in entries) == [
+        ("POST /v1/admin/jobs/{job_id}/cancel", "not_found"),
+        ("POST /v1/admin/jobs/{job_id}/retry", "not_retryable"),
+    ]
+    assert {e.actor for e in entries} == {actor(idp, "operator")}
+    assert str(queued.id) not in str([e.detail for e in entries])
+
+
+async def test_a_refused_read_or_role_is_not_a_refused_change(
+    admin_client, idp, sessionmaker
+):
+    await admin_client.get("/v1/admin/consent/report", headers=idp.bearer("viewer"),
+                           params={"location": "nowhere"})
+    await post(admin_client, idp, "/v1/admin/tokens", "viewer", {})
+    assert await audit_rows(sessionmaker, "admin.change_refused") == []
+
+
+async def test_no_admin_route_is_hidden_or_mounted_as_a_sub_application(admin_app):
+    from fastapi.routing import APIRoute
+    from starlette.routing import Mount
+
+    def walk(routes):
+        for route in routes:
+            nested = getattr(route, "original_router", None)
+            if nested is not None:
+                yield from walk(nested.routes)
+            else:
+                yield route
+
+    seen = 0
+    for route in walk(admin_app.routes):
+        path = getattr(route, "path", "")
+        if isinstance(route, Mount):
+            assert not "/v1/admin/".startswith(path.rstrip("/") + "/"), f"mounted at {path}"
+            continue
+        if path.startswith("/v1/admin/"):
+            seen += 1
+            assert isinstance(route, APIRoute), path
+            assert route.include_in_schema, f"{path} is hidden from the schema"
+    assert seen >= len(ROUTES)

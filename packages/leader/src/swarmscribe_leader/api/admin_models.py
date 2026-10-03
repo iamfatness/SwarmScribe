@@ -162,9 +162,13 @@ class LocationIn(BaseModel):
     def _relative_prefix(cls, value: str) -> str:
         if value:
             try:
-                validate_key(value.rstrip("/"))
+                if not value.endswith("/"):
+                    raise StorageError("no trailing slash")
+                validate_key(value[:-1])
             except StorageError:
-                raise ValueError("must be a relative folder such as incoming/") from None
+                raise ValueError(
+                    "must be a relative folder ending in one /, such as incoming/"
+                ) from None
         return value
 
 

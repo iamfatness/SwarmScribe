@@ -9,6 +9,7 @@ from swarmscribe_protocol import ErrorBody
 
 from ..errors import LeaderError
 from ..storage.base import StorageError, StorageUnavailable
+from .admin_auth import audit_refused_change
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,9 @@ def error_response(
 def install(app: FastAPI) -> None:
     # Nothing here logs the request URL or path: signed-link tokens live in paths.
     @app.exception_handler(LeaderError)
-    async def leader_error(_request: Request, exc: LeaderError) -> JSONResponse:
+    async def leader_error(request: Request, exc: LeaderError) -> JSONResponse:
+        if exc.status in (400, 404, 409, 422):
+            await audit_refused_change(request, exc.code)
         headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
         return error_response(exc.code, exc.message, exc.status, headers=headers)
 
@@ -74,7 +77,8 @@ def install(app: FastAPI) -> None:
         return error_response(code, str(exc.detail), exc.status_code, headers=exc.headers)
 
     @app.exception_handler(RequestValidationError)
-    async def validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        await audit_refused_change(request, "invalid_request")
         summary = "; ".join(
             f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}" for err in exc.errors()
         )

@@ -2,11 +2,12 @@
 caller commits."""
 
 import asyncio
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +28,64 @@ async def _by_name(session: AsyncSession, name: str) -> StorageLocation:
     return location
 
 
+class InvalidRoot(LeaderError):
+    status = 422
+    code = "invalid_root"
+
+
+# Serialises every addition of a location, so that two at once cannot both pass the
+# name and overlap checks below.
+_ADD_LOCK = 7_204_511_001
+
+
+def _is_link(path: Path) -> bool:
+    return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
+
+
+def canonical_root(root: str) -> Path:
+    """The real folder `root` names. Refused when it, or any folder on the way to it, is a
+    symlink or junction (the consent and storage rules assume a root cannot be redirected),
+    or when it is not a folder. A missing folder is `root_unavailable`."""
+    path = Path(root)
+    walked = Path(path.anchor)
+    for part in path.parts[1:] if path.anchor else path.parts:
+        walked = walked / part
+        if part != ".." and _is_link(walked):
+            raise InvalidRoot(f"{root!r} goes through a symlink or junction; give the real folder")
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise LeaderError(
+            f"{root!r} is not a folder this leader can see; every replica must mount it there",
+            code="root_unavailable",
+        ) from exc
+    if not resolved.is_dir():
+        raise InvalidRoot(f"{root!r} is not a folder")
+    return resolved
+
+
+def _same_or_nested(a: Path, b: Path) -> bool:
+    x, y = Path(os.path.normcase(a)), Path(os.path.normcase(b))
+    return x == y or x.is_relative_to(y) or y.is_relative_to(x)
+
+
+async def _refuse_overlap(session: AsyncSession, root: Path) -> None:
+    """Two locations on the same folder, or one inside another, would let one location's
+    consent.txt (anchored at its input prefix) reach files the other refuses."""
+    rows = (await session.execute(select(StorageLocation.name, StorageLocation.config))).all()
+    for other_name, config in rows:
+        other_root = (config or {}).get("root")
+        if not other_root:
+            continue
+        other = await asyncio.to_thread(lambda r=other_root: Path(r).resolve())
+        if _same_or_nested(root, other):
+            raise Conflict(
+                f"the folder overlaps location {other_name!r} ({other_root}); locations must "
+                "not share or nest folders",
+                code="overlaps",
+            )
+
+
 async def add_location(
     session: AsyncSession,
     *,
@@ -40,17 +99,21 @@ async def add_location(
     actor: str,
 ) -> StorageLocation:
     """A local-folder location (Azure and GCS arrive with Plan B). The folder must be
-    visible to this replica, which suggests every replica mounts it at the same path."""
-    if not await asyncio.to_thread(Path(root).is_dir):
-        raise LeaderError(
-            f"{root!r} is not a folder this leader can see; every replica must mount it there",
-            code="root_unavailable",
-        )
+    visible to this replica, which suggests every replica mounts it at the same path. The
+    stored root is the canonical path; names are unique ignoring case."""
+    canonical = await asyncio.to_thread(canonical_root, root)
+    await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _ADD_LOCK})
+    taken = await session.scalar(
+        select(StorageLocation.name).where(func.lower(StorageLocation.name) == name.lower())
+    )
+    if taken is not None:
+        raise Conflict(f"a location named {taken!r} already exists", code="exists")
+    await _refuse_overlap(session, canonical)
     location = StorageLocation(
         id=uuid.uuid4(),
         name=name,
         backend="local",
-        config={"root": root},
+        config={"root": str(canonical)},
         input_prefix=input_prefix,
         output_prefix=output_prefix,
         pool=pool,
@@ -71,7 +134,7 @@ async def add_location(
         action="location.add",
         subject_type="location",
         subject_id=location.id,
-        detail={"name": name, "backend": "local", "root": root, "pool": pool},
+        detail={"name": name, "backend": "local", "root": str(canonical), "pool": pool},
     )
     return location
 

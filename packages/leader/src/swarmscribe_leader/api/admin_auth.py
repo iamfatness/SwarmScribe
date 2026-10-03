@@ -110,6 +110,29 @@ async def _audit_refusal(
         await session.commit()
 
 
+async def audit_refused_change(request: Request, code: str) -> None:
+    """Record that a signed-in administrator's change was refused for a business reason.
+    Own session: the request's transaction is rolled back. Only the route template and the
+    error code are recorded, never request values."""
+    admin = getattr(request.state, "admin", None)
+    if admin is None or request.method in ("GET", "HEAD", "OPTIONS"):
+        return
+    route = request.scope.get("route")
+    try:
+        async with request.app.state.sessionmaker() as session:
+            audit.record(
+                session,
+                actor=admin.actor,
+                action="admin.change_refused",
+                subject_type="endpoint",
+                subject_id=f"{request.method} {getattr(route, 'path', '?')}",
+                detail={"code": code},
+            )
+            await session.commit()
+    except Exception:
+        logger.exception("a refused change could not be audited")
+
+
 def require(role: Role) -> Callable[[Request], Awaitable[Admin]]:
     """A dependency admitting people whose role is `role` or higher."""
 
@@ -121,6 +144,8 @@ def require(role: Role) -> Callable[[Request], Awaitable[Admin]]:
             if granted is None:
                 raise Forbidden("you have no SwarmScribe role; ask an administrator for one")
             raise Forbidden(f"this needs the {role} role; you have {granted}")
-        return Admin(identity=identity, role=granted)
+        admin = Admin(identity=identity, role=granted)
+        request.state.admin = admin
+        return admin
 
     return dependency

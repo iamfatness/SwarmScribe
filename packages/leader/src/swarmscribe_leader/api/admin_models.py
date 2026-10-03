@@ -4,7 +4,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from swarmscribe_protocol import DEFAULT_CHANNEL_LABELS, ChannelLabels, ChannelMode
 
 from ..storage.base import StorageError
 from ..storage.local import validate_key
@@ -76,6 +77,8 @@ class LocationOut(BaseModel):
     last_scan_at: datetime | None
     last_scan_error: str | None
     scan_requested: bool
+    channel_mode: str
+    channel_labels: list[str]
 
 
 class JobOut(BaseModel):
@@ -149,6 +152,8 @@ class LocationIn(BaseModel):
     pool: str = Field(default="default", pattern=NAME_PATTERN)
     required_device: RequiredDevice = "any"
     scan_interval_s: int = Field(default=900, ge=30, le=7 * 86400)
+    channel_mode: ChannelMode = "mono"
+    channel_labels: ChannelLabels = DEFAULT_CHANNEL_LABELS
 
     @field_validator("root")
     @classmethod
@@ -170,6 +175,12 @@ class LocationIn(BaseModel):
                     "must be a relative folder ending in one /, such as incoming/"
                 ) from None
         return value
+
+    @model_validator(mode="after")
+    def _labels_need_a_split_mode(self) -> "LocationIn":
+        if "channel_labels" in self.model_fields_set and self.channel_mode == "mono":
+            raise ValueError("channel_labels needs channel_mode stereo_split or auto")
+        return self
 
 
 class PriorityIn(BaseModel):

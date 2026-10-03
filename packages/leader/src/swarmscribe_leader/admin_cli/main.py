@@ -33,6 +33,15 @@ def parse_duration(text: str) -> int:
     return int(match.group(1)) * _UNITS[match.group(2)]
 
 
+def parse_labels(text: str) -> tuple[str, ...]:
+    names = tuple(name.strip() for name in text.split(","))
+    if len(names) != 2:
+        raise argparse.ArgumentTypeError(
+            'give exactly two names separated by a comma, e.g. "Agent,Customer"'
+        )
+    return names
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="swarmscribe-admin", description="Administer a SwarmScribe leader."
@@ -60,6 +69,18 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--pool", default="default")
     add.add_argument("--device", choices=("any", "cuda", "cpu"), default="any")
     add.add_argument("--scan-interval", type=parse_duration, default=900, help="e.g. 15m")
+    add.add_argument(
+        "--channels",
+        choices=("mono", "stereo-split", "auto"),
+        default="mono",
+        help="mono mixes channels (default); stereo-split transcribes left and right separately;"
+        " auto splits two-channel files",
+    )
+    add.add_argument(
+        "--labels",
+        type=parse_labels,
+        help='names of the left and right channels, e.g. "Agent,Customer" (default: Left,Right)',
+    )
     locations.add_parser("list")
     for action in ("disable", "enable"):
         locations.add_parser(action).add_argument("name")
@@ -222,6 +243,8 @@ async def dispatch(args: argparse.Namespace, client: LeaderClient) -> tuple[Any,
         return await post(f"/v1/admin/locations/{_seg(args.name)}/ingest"), print_scan
     if command == "locations":
         if action == "add":
+            if args.labels is not None and args.channels == "mono":
+                raise CliError("--labels needs --channels stereo-split or auto")
             body = {
                 "name": args.name,
                 "root": args.root,
@@ -230,7 +253,10 @@ async def dispatch(args: argparse.Namespace, client: LeaderClient) -> tuple[Any,
                 "pool": args.pool,
                 "required_device": args.device,
                 "scan_interval_s": args.scan_interval,
+                "channel_mode": args.channels.replace("-", "_"),
             }
+            if args.labels is not None:
+                body["channel_labels"] = list(args.labels)
             return await post("/v1/admin/locations", body=body), print_fields
         if action == "list":
             columns = (
@@ -239,6 +265,8 @@ async def dispatch(args: argparse.Namespace, client: LeaderClient) -> tuple[Any,
                 "root",
                 "input_prefix",
                 "pool",
+                "channel_mode",
+                "channel_labels",
                 "last_scan_at",
                 "last_scan_error",
             )

@@ -836,3 +836,75 @@ async def test_a_transcript_with_a_zero_segment_document_is_a_normal_result(
     async with sessionmaker() as session:
         result = (await session.scalars(select(JobResult))).one()
     assert result.no_speech is False
+
+
+async def test_a_claim_carries_its_locations_channel_settings(
+    client, sessionmaker, factory, tmp_path
+):
+    location = await queue_one(sessionmaker, factory, tmp_path)
+    async with sessionmaker() as session:
+        row = await session.get(StorageLocation, location.id)
+        row.channel_mode = "stereo_split"
+        row.channel_labels = ["Agent", "Customer"]
+        await session.commit()
+    headers = await register(client, sessionmaker)
+    claimed = await claim(client, headers)
+    assert (claimed.settings.channel_mode, claimed.settings.channel_labels) == (
+        "stereo_split",
+        ("Agent", "Customer"),
+    )
+
+
+async def test_a_claim_from_a_location_left_at_the_defaults_is_mono(
+    client, sessionmaker, factory, tmp_path
+):
+    await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(client, sessionmaker)
+    claimed = await claim(client, headers)
+    assert (claimed.settings.channel_mode, claimed.settings.channel_labels) == (
+        "mono",
+        ("Left", "Right"),
+    )
+
+
+async def test_the_channel_settings_come_from_the_recordings_location_not_the_output(
+    client, sessionmaker, factory, tmp_path
+):
+    location = await queue_one(sessionmaker, factory, tmp_path)
+    output = await factory.location(channel_mode="auto", channel_labels=["Host", "Guest"])
+    async with sessionmaker() as session:
+        row = await session.get(StorageLocation, location.id)
+        row.output_location_id = output.id
+        row.channel_mode = "stereo_split"
+        await session.commit()
+    headers = await register(client, sessionmaker)
+    claimed = await claim(client, headers)
+    assert (claimed.settings.channel_mode, claimed.settings.channel_labels) == (
+        "stereo_split",
+        ("Left", "Right"),
+    )
+
+
+async def test_a_location_with_labels_the_protocol_refuses_is_skipped_not_a_500(
+    client, sessionmaker, factory, tmp_path
+):
+    # Equal labels pass the database CHECK but fail JobSettings validation.
+    broken, healthy = await two_locations(sessionmaker, factory, tmp_path)
+    async with sessionmaker() as session:
+        row = await session.get(StorageLocation, broken.id)
+        row.channel_mode = "stereo_split"
+        row.channel_labels = ["Same", "Same"]
+        await session.commit()
+    headers = await register(client, sessionmaker)
+    started = utcnow()
+    claimed = await claim(client, headers)
+    jobs, attempts = await job_rows(sessionmaker)
+    by_state = {job.state: job for job in jobs}
+    # The broken job was tried and pushed back, not merely sorted behind the healthy one.
+    assert by_state["queued"].available_at >= started + timedelta(seconds=59)
+    assert str(by_state["leased"].id) == claimed.job_id
+    assert (claimed.settings.channel_mode, by_state["queued"].attempts, len(attempts)) == (
+        "mono",
+        0,
+        1,
+    )

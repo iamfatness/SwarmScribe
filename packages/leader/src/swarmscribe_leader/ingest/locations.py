@@ -5,12 +5,14 @@ import asyncio
 import os
 import stat
 import uuid
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from swarmscribe_protocol import DEFAULT_CHANNEL_LABELS
 
 from .. import audit
 from ..db.models import StorageLocation
@@ -101,6 +103,11 @@ async def _refuse_overlap(session: AsyncSession, root: Path) -> None:
             )
 
 
+def _violated_constraint(exc: IntegrityError) -> str | None:
+    cause = getattr(exc.orig, "__cause__", None)
+    return getattr(cause, "constraint_name", None) or getattr(exc.orig, "constraint_name", None)
+
+
 async def add_location(
     session: AsyncSession,
     *,
@@ -112,6 +119,8 @@ async def add_location(
     required_device: str,
     scan_interval_s: int,
     actor: str,
+    channel_mode: str = "mono",
+    channel_labels: Sequence[str] = DEFAULT_CHANNEL_LABELS,
 ) -> StorageLocation:
     """A local-folder location (Azure and GCS arrive with Plan B). The folder must be
     visible to this replica, which suggests every replica mounts it at the same path. The
@@ -136,11 +145,15 @@ async def add_location(
         scan_interval_s=scan_interval_s,
         enabled=True,
         vocabulary_version=0,
+        channel_mode=channel_mode,
+        channel_labels=list(channel_labels),
     )
     session.add(location)
     try:
         await session.flush()
     except IntegrityError as exc:
+        if _violated_constraint(exc) != "storage_locations_name_key":
+            raise
         raise Conflict(f"a location named {name!r} already exists", code="exists") from exc
     await session.refresh(location)
     audit.record(
@@ -149,7 +162,14 @@ async def add_location(
         action="location.add",
         subject_type="location",
         subject_id=location.id,
-        detail={"name": name, "backend": "local", "root": str(canonical), "pool": pool},
+        detail={
+            "name": name,
+            "backend": "local",
+            "root": str(canonical),
+            "pool": pool,
+            "channel_mode": channel_mode,
+            "channel_labels": list(channel_labels),
+        },
     )
     return location
 

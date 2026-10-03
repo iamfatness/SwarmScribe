@@ -13,7 +13,7 @@ Design: [`docs/superpowers/specs/2026-10-02-swarmscribe-architecture-design.md`]
 |---|---|
 | `swarmscribe-protocol` — leader–follower wire models | Built |
 | `swarmscribe-engine` — single-file transcriber | Built |
-| `swarmscribe-leader` | Core built (local storage); sign-in and admin tools next |
+| `swarmscribe-leader` — catalogue, consent, jobs, admin API and `swarmscribe-admin` | Built (local storage); cloud storage and vocabulary next |
 | `swarmscribe-follower` | Not started |
 | Helm chart | Not started |
 
@@ -82,8 +82,92 @@ recordings may be processed, one glob per line (`talks/*.mp3`, `2024/**`).
 Nothing else is ever queued. Transcripts are written beside the recordings
 under `transcripts/`.
 
-Admin commands (adding locations, creating join tokens) arrive with the next
-plan; until then, locations and tokens are created directly in the database.
+### Administrators: sign-in and roles
+
+Administrators sign in with Microsoft Entra ID, Google, or either (both may be
+configured at once). Each person gets a role; roles are cumulative:
+
+| Role | May |
+|---|---|
+| viewer | `status`, `whoami`, `locations list`, `jobs list`, `followers list`, `consent report` |
+| operator | viewer + `ingest`, `jobs retry/cancel/priority`, `followers drain` |
+| admin | operator + `locations add/disable/enable`, `tokens create/list/revoke`, `followers revoke` |
+
+Every admin call is written to the audit log with the person's email, issuer and
+subject. Roles are cached for five minutes, so a change of group membership takes
+up to five minutes to apply.
+
+**Entra ID.** Register an application with "Allow public client flows" enabled
+and the `groups` claim added to the ID token (security groups). Set
+`SWARMSCRIBE_ENTRA_TENANT_ID` (the tenant's GUID) and
+`SWARMSCRIBE_ENTRA_CLIENT_ID`, and map group object IDs to roles with
+`SWARMSCRIBE_ROLE_VIEWER_ENTRA_GROUPS`, `…_OPERATOR_…`, `…_ADMIN_ENTRA_GROUPS`
+(comma-separated). People in too many groups for the token are looked up in
+Microsoft Graph: give the application a client secret
+(`SWARMSCRIBE_ENTRA_CLIENT_SECRET`) and the `GroupMember.Read.All` application
+permission.
+
+**Google.** Create an OAuth client of type "TVs and Limited Input devices" and
+set `SWARMSCRIBE_GOOGLE_CLIENT_ID` and `SWARMSCRIBE_GOOGLE_CLIENT_SECRET` (the
+CLI needs this secret for device sign-in; Google treats it as public, and the
+leader hands it to the CLI). Optionally restrict sign-in to one Workspace domain
+with `SWARMSCRIBE_GOOGLE_HOSTED_DOMAIN`. Roles come from Google Groups when
+`SWARMSCRIBE_GOOGLE_SERVICE_ACCOUNT` holds a service-account JSON key (or the path
+of a mounted file with it) whose service account has the Groups Reader admin
+role — map group emails with `SWARMSCRIBE_ROLE_<ROLE>_GOOGLE_GROUPS` — and, in
+addition or instead, from `SWARMSCRIBE_ROLE_<ROLE>_EMAILS` and
+`SWARMSCRIBE_ROLE_<ROLE>_DOMAINS`. Email and domain lists apply to Google
+sign-ins only.
+
+`/readyz` reports ready once each configured provider's signing keys have been
+fetched. When identity providers are unreachable, this may take up to
+approximately 40 seconds; set probe timeouts accordingly.
+
+### `swarmscribe-admin`
+
+```
+uv run swarmscribe-admin --leader https://leader.example.org login --provider entra
+uv run swarmscribe-admin status
+uv run swarmscribe-admin locations add archive --root /mnt/archive --input-prefix incoming/
+uv run swarmscribe-admin ingest archive
+uv run swarmscribe-admin tokens create --pool default --expires 7d --max-uses 5
+uv run swarmscribe-admin jobs list --state failed
+uv run swarmscribe-admin jobs retry <job-id>
+uv run swarmscribe-admin followers revoke <follower-id>
+uv run swarmscribe-admin consent report
+```
+
+The CLI accepts HTTPS leaders only; HTTP is allowed only for localhost
+(`http://localhost`, `http://127.0.0.1`, or `http://[::1]`).
+
+`login` shows a code to enter in the browser. The sign-in is kept in
+`~/.config/swarmscribe/credentials.json` (readable by you only; override the
+path with `SWARMSCRIBE_ADMIN_CREDENTIALS`) and refreshed silently; the leader
+URL is remembered, or set `SWARMSCRIBE_LEADER_URL`. `--json` prints the
+leader's answer as JSON. A join token is shown once, by `tokens create`.
+
+A location's root must be visible at the same path to every leader replica.
+Local storage locations use the file's size, modification time and inode number
+to detect changes; all leader replicas must see the same real filesystem. Network
+filesystems that invent inode numbers per client are not supported.
+`ingest` asks for a scan within a minute; `jobs cancel` is final for that
+version of the recording until `jobs retry`; `followers revoke` releases the
+follower's work at once.
+
+### Multi-replica test
+
+`e2e/compose/` runs Postgres, two leader replicas behind nginx and scripted
+followers, kills a follower and a replica mid-run, and checks that every
+consented recording completes exactly once. It runs in GitHub Actions (job
+`compose-e2e`); locally, with Docker:
+
+```
+docker build -t swarmscribe-leader:e2e -f e2e/compose/Dockerfile .
+mkdir -p e2e/compose/work/data
+docker compose -f e2e/compose/docker-compose.yml up -d
+uv run python e2e/compose/run_e2e.py
+docker compose -f e2e/compose/docker-compose.yml down -v
+```
 
 Tests use a real Postgres: set `SWARMSCRIBE_TEST_DATABASE_URL`, or leave it
 unset and an embedded one starts automatically in `.pgdata/`.

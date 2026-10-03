@@ -66,15 +66,42 @@ run_scenario() {
 recflags_ok=1
 
 MIX=""; has mix-method && MIX="--mix-method=channels"
-SCEN=${SCENARIOS:-"rtp_wav srtp_wav srtp_mp3 srtp_tap pcap"}
+TCP=""
+if has tcp-send-to; then
+  ( python3 -c "
+import socket,sys
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('127.0.0.1',5555)); s.listen(8)
+n=0
+while True:
+    c,_=s.accept(); n+=1
+    f=open('$OUT/tcp_conn_%d.pcm'%n,'wb')
+    while True:
+        d=c.recv(65536)
+        if not d: break
+        f.write(d)
+    f.close()
+" & ) ; TCP="--tcp-send-to=127.0.0.1:5555 --tcp-resample=8000"
+fi
+SCEN=${SCENARIOS:-"rtp_wav srtp_wav srtp_wav2ch srtp_mp3 srtp_tap srs_split srs_publish srtp_wav_userspace pcap"}
 for s in $SCEN; do
   case $s in
     rtp_wav)  run_scenario rtp_wav  proc "" "--output-format=wav --output-mixed --output-single $MIX" "--plain" ;;
     srtp_wav) run_scenario srtp_wav proc "" "--output-format=wav --output-mixed --output-single $MIX" "" ;;
+    srtp_wav2ch) run_scenario srtp_wav2ch proc "" "--output-format=wav --output-mixed --mix-method=channels --mix-num-inputs=2" "" ;;
     srtp_mp3) run_scenario srtp_mp3 proc "" "--output-format=mp3 --output-mixed --output-single" "" ;;
-    srtp_mixdirect) run_scenario srtp_mixdirect proc "" "--output-format=wav --output-mixed --mix-method=direct" "" ;;
-    srtp_tap) run_scenario srtp_tap proc "" "--output-format=wav --output-mixed $MIX" "--subscribe" ;;
+    srtp_tap) run_scenario srtp_tap proc "" "--output-format=wav --output-mixed $MIX --mix-num-inputs=2 $TCP" "--subscribe" ;;
+    srs_split) run_scenario srs_split proc "" "--output-format=wav --output-mixed --output-single --mix-method=channels --mix-num-inputs=2" "--mode srs-split" ;;
+    srs_publish) run_scenario srs_publish proc "" "--output-format=wav --output-mixed --output-single --mix-method=channels --mix-num-inputs=2" "--mode srs-publish" ;;
+    srtp_wav_userspace) K=$KERNEL; KERNEL=0; run_scenario srtp_wav_userspace proc "" "--output-format=wav --output-mixed --output-single --mix-method=channels --mix-num-inputs=2" ""; KERNEL=$K ;;
     pcap)     run_scenario pcap pcap "" "" "" ;;
   esac
+done
+ls -la $OUT/tcp_conn_* 2>/dev/null && for f in $OUT/tcp_conn_*.pcm; do
+  python3 - "$f" <<'PY'
+import sys, numpy as np
+sys.path.insert(0, "spike"); from analyze import timeline
+x = np.frombuffer(open(sys.argv[1],'rb').read(), dtype='<i2').astype(np.float32)/32768
+print(sys.argv[1], "s16le@8k mono assumed:", len(x)/8000, "s", timeline(x))
+PY
 done
 exit 0

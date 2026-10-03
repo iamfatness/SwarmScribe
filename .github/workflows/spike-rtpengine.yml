@@ -5,13 +5,22 @@ on:
     branches: [spike/rtpengine]
   workflow_dispatch:
 jobs:
-  distro:
+  spike:
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [distro, dfx-latest]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: install
         run: |
+          if [ "${{ matrix.source }}" = dfx-latest ]; then
+            curl -fsSLO https://rtpengine.dfx.at/latest/pool/main/r/rtpengine-dfx-repo-keyring/rtpengine-dfx-repo-keyring_1.0_all.deb
+            sudo dpkg -i rtpengine-dfx-repo-keyring_1.0_all.deb
+            echo "deb [signed-by=/usr/share/keyrings/dfx.at-rtpengine-archive-keyring.gpg] https://rtpengine.dfx.at/latest noble main" | sudo tee /etc/apt/sources.list.d/dfx.at-rtpengine.list
+          fi
           sudo apt-get update -q
           apt-cache policy rtpengine rtpengine-daemon rtpengine-recording-daemon rtpengine-kernel-dkms | tee apt-policy.txt
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q rtpengine-daemon rtpengine-recording-daemon ffmpeg python3-numpy "linux-headers-$(uname -r)" || true
@@ -22,7 +31,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: rtpengine-spike-distro
+          name: rtpengine-spike-${{ matrix.source }}
           path: |
             out
             apt-policy.txt

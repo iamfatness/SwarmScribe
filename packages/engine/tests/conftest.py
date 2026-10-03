@@ -1,3 +1,7 @@
+import math
+import struct
+import wave
+
 import pytest
 from swarmscribe_engine import Segment, TranscribeSettings, Transcript, Word
 
@@ -38,5 +42,30 @@ def make_transcript():
         }
         values.update(overrides)
         return Transcript(**values)
+
+    return _make
+
+
+@pytest.fixture
+def make_wav(tmp_path):
+    """Writes a 16-bit WAV with one entry per channel: a tone frequency in Hz, or None for
+    silence."""
+
+    def _make(name, channels, seconds=1.0, rate=16000):
+        frames = bytearray()
+        for i in range(int(rate * seconds)):
+            for frequency in channels:
+                if frequency is None:
+                    value = 0
+                else:
+                    value = int(8000 * math.sin(2 * math.pi * frequency * i / rate))
+                frames += struct.pack("<h", value)
+        path = tmp_path / name
+        with wave.open(str(path), "wb") as handle:
+            handle.setnchannels(len(channels))
+            handle.setsampwidth(2)
+            handle.setframerate(rate)
+            handle.writeframes(bytes(frames))
+        return path
 
     return _make

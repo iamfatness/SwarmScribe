@@ -1,4 +1,6 @@
+import json
 import os
+import re
 
 import pytest
 from pydantic import ValidationError
@@ -89,3 +91,116 @@ def test_heartbeat_must_be_shorter_than_the_lease():
 )
 def test_to_async_url(given, expected):
     assert to_async_url(given) == expected
+
+
+TENANT = "0F0E0D0C-0B0A-4908-8706-050403020100"
+SERVICE_ACCOUNT = json.dumps(
+    {
+        "type": "service_account",
+        "client_email": "group-reader@project-1.iam.gserviceaccount.com",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----\n",
+    }
+)
+
+
+def test_no_sign_in_provider_is_configured_by_default():
+    settings = Settings(**BASE)
+    assert (settings.entra_client_id, settings.google_client_id) == (None, None)
+    assert settings.role_admin_emails == ()
+    assert settings.role_cache_seconds == 300
+
+
+def test_both_providers_and_role_lists_from_the_environment(monkeypatch):
+    for name, value in {
+        "SWARMSCRIBE_DATABASE_URL": "postgresql://x/y",
+        "SWARMSCRIBE_PUBLIC_URL": "https://l",
+        "SWARMSCRIBE_LINK_KEY": "z" * 40,
+        "SWARMSCRIBE_ENTRA_TENANT_ID": TENANT,
+        "SWARMSCRIBE_ENTRA_CLIENT_ID": "entra-client",
+        "SWARMSCRIBE_ENTRA_CLIENT_SECRET": "entra-secret",
+        "SWARMSCRIBE_GOOGLE_CLIENT_ID": "google-client",
+        "SWARMSCRIBE_GOOGLE_CLIENT_SECRET": "google-secret",
+        "SWARMSCRIBE_GOOGLE_HOSTED_DOMAIN": "Example.ORG",
+        "SWARMSCRIBE_ROLE_ADMIN_ENTRA_GROUPS": "A1A1A1A1-0000-4000-8000-000000000003, b2",
+        "SWARMSCRIBE_ROLE_VIEWER_EMAILS": "One@Example.org,two@example.org ,",
+        "SWARMSCRIBE_ROLE_OPERATOR_DOMAINS": "@Example.org",
+    }.items():
+        monkeypatch.setenv(name, value)
+    settings = Settings()
+    assert settings.entra_tenant_id == TENANT.lower()
+    assert settings.google_hosted_domain == "example.org"
+    assert settings.role_admin_entra_groups == ("a1a1a1a1-0000-4000-8000-000000000003", "b2")
+    assert settings.role_viewer_emails == ("one@example.org", "two@example.org")
+    assert settings.role_operator_domains == ("example.org",)
+    assert settings.entra_client_secret.get_secret_value() == "entra-secret"
+
+
+@pytest.mark.parametrize(
+    "values, problem",
+    [
+        ({"entra_client_id": "c"}, "entra_client_id and entra_tenant_id must be set together"),
+        ({"entra_tenant_id": TENANT}, "entra_client_id and entra_tenant_id must be set together"),
+        (
+            {"entra_client_id": "c", "entra_tenant_id": "contoso.example"},
+            "tenant's ID (a GUID)",
+        ),
+        ({"entra_client_secret": "s"}, "entra_client_secret needs entra_client_id"),
+        ({"google_client_id": "g"}, "google_client_secret is required"),
+        ({"google_hosted_domain": "example.org"}, "need google_client_id"),
+        ({"role_admin_entra_groups": "g1"}, "role_admin_entra_groups needs Entra ID sign-in"),
+        (
+            {
+                "google_client_id": "g",
+                "google_client_secret": "s",
+                "role_viewer_google_groups": "x",
+            },
+            "role_viewer_google_groups needs google_service_account",
+        ),
+        ({"role_operator_emails": "a@example.org"}, "role_operator_emails applies to Google"),
+    ],
+)
+def test_half_configured_sign_in_is_refused(values, problem):
+    with pytest.raises(ValidationError, match=re.escape(problem)):
+        Settings(**BASE, **values)
+
+
+def test_the_service_account_key_can_be_json_or_a_file(tmp_path):
+    google = {"google_client_id": "g", "google_client_secret": "s"}
+    inline = Settings(**BASE, **google, google_service_account=SERVICE_ACCOUNT)
+    key = inline.google_service_account_key()
+    assert key["client_email"] == "group-reader@project-1.iam.gserviceaccount.com"
+    assert key["token_uri"] == "https://oauth2.googleapis.com/token"
+    path = tmp_path / "service-account.json"
+    path.write_text(SERVICE_ACCOUNT, encoding="utf-8")
+    from_file = Settings(**BASE, **google, google_service_account=str(path))
+    assert from_file.google_service_account_key() == key
+
+
+def test_an_unusable_service_account_is_refused_without_echoing_it():
+    secret_text = '{"client_email": "x", "private_key": ""} plus-secret-material'
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(
+            **BASE,
+            google_client_id="g",
+            google_client_secret="s",
+            google_service_account=secret_text,
+        )
+    rendered = str(excinfo.value.errors(include_input=False, include_url=False))
+    assert "google_service_account must be a service-account JSON key" in rendered
+    assert "plus-secret-material" not in rendered
+
+
+def test_sign_in_secrets_are_not_shown_in_the_settings_repr():
+    settings = Settings(
+        **BASE,
+        entra_tenant_id=TENANT,
+        entra_client_id="c",
+        entra_client_secret="entra-hidden",
+        google_client_id="g",
+        google_client_secret="google-hidden",
+        google_service_account=SERVICE_ACCOUNT,
+    )
+    shown = repr(settings)
+    assert "entra-hidden" not in shown
+    assert "google-hidden" not in shown
+    assert "not-a-real-key" not in shown

@@ -117,7 +117,11 @@ of a mounted file with it) whose service account has the Groups Reader admin
 role — map group emails with `SWARMSCRIBE_ROLE_<ROLE>_GOOGLE_GROUPS` — and, in
 addition or instead, from `SWARMSCRIBE_ROLE_<ROLE>_EMAILS` and
 `SWARMSCRIBE_ROLE_<ROLE>_DOMAINS`. Email and domain lists apply to Google
-sign-ins only.
+sign-ins only, and only to Google Workspace accounts (the token's `hd` claim):
+a domain entry matches people whose Workspace is that domain, and an email entry
+matches only when the address belongs to its own Workspace. Personal Google
+accounts registered with a work address never match; the exception is a
+`gmail.com` or `googlemail.com` address on an email list.
 
 `/readyz` reports ready once each configured provider's signing keys have been
 fetched. When identity providers are unreachable, this may take up to

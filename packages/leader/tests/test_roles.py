@@ -54,14 +54,19 @@ def entra_identity(idp, *, groups=(), email="person@example.org", **claims) -> I
     )
 
 
-def google_identity(idp, email="person@example.org") -> Identity:
+WORKSPACE = object()  # hd: the email's own domain, as Google sets it for Workspace accounts
+
+
+def google_identity(idp, email="person@example.org", *, hd=WORKSPACE) -> Identity:
     # One subject per email: roles are cached per (issuer, subject).
+    if hd is WORKSPACE:
+        hd = email.rpartition("@")[2]
     return Identity(
         provider="google",
         issuer=idp.GOOGLE_ISSUER,
-        subject=f"google-{email}",
+        subject=f"google-{email}-{hd}",
         email=email,
-        claims={},
+        claims={} if hd is None else {"hd": hd},
     )
 
 
@@ -310,6 +315,49 @@ async def test_a_non_ascii_email_skips_lists_but_not_google_groups(
     email = "x@straße.example"
     google_groups.groups[email] = {"admins@example.org"}
     assert await make_resolver().role_for(google_identity(idp, email)) == "admin"
+
+
+@pytest.fixture
+def list_resolver(make_resolver, sign_in_settings):
+    """Email and domain lists only (no Google Groups lookup)."""
+    settings = sign_in_settings(
+        role_viewer_emails=("viewer@example.org", "personal@gmail.com", "old@googlemail.com"),
+        role_operator_emails=(),
+        role_admin_emails=(),
+        role_operator_domains=("example.org",),
+    )
+    return make_resolver(settings=settings, with_groups=False)
+
+
+@pytest.mark.parametrize("email", ["viewer@example.org", "someone@example.org"])
+async def test_a_work_address_without_hd_gets_no_role(list_resolver, idp, email):
+    # A personal Google account registered with a work address: no Workspace membership.
+    assert await list_resolver.role_for(google_identity(idp, email, hd=None)) is None
+
+
+async def test_a_matching_hd_gives_the_list_roles(list_resolver, idp):
+    resolver = list_resolver
+    assert await resolver.role_for(google_identity(idp, "someone@example.org")) == "operator"
+    assert await resolver.role_for(google_identity(idp, "viewer@example.org")) == "operator"
+    viewer = google_identity(idp, "viewer@example.org", hd="EXAMPLE.ORG")
+    assert await resolver.role_for(viewer) == "operator"
+
+
+@pytest.mark.parametrize("email", ["personal@gmail.com", "old@googlemail.com"])
+async def test_a_consumer_address_on_the_email_list_gets_its_role(list_resolver, idp, email):
+    assert await list_resolver.role_for(google_identity(idp, email, hd=None)) == "viewer"
+
+
+@pytest.mark.parametrize("email", ["viewer@example.org", "someone@example.org"])
+async def test_an_hd_of_another_domain_gets_no_role(list_resolver, idp, email):
+    identity = google_identity(idp, email, hd="elsewhere.example")
+    assert await list_resolver.role_for(identity) is None
+
+
+async def test_an_hd_that_is_not_ascii_or_not_text_gets_no_role(list_resolver, idp):
+    for hd in ("exampłe.org", ["example.org"], 1):
+        identity = google_identity(idp, "someone@example.org", hd=hd)
+        assert await list_resolver.role_for(identity) is None, hd
 
 
 def test_max_entries_must_be_positive(sign_in_settings):

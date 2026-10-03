@@ -284,7 +284,8 @@ class FakeIdentityProviders:
             groups = [self.ENTRA_GROUPS[role]] if role else []
             token = self.entra(groups=groups, sub=f"entra-{name}", email=email)
         else:
-            token = self.google(email=email, sub=f"google-{name}")
+            # A Google Workspace account: Google sets hd to the organisation's domain.
+            token = self.google(email=email, sub=f"google-{name}", hd="example.org")
         return {"Authorization": f"Bearer {token}"}
 
 

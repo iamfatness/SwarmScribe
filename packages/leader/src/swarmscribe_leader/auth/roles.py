@@ -2,7 +2,9 @@
 
 Entra ID: the token's group object ids, or Microsoft Graph when the person is in too many
 groups for the token ("overage"). Google: the person's Google Groups through Cloud Identity
-(when a service account is configured), plus email and domain lists. Lookups are cached
+(when a service account is configured), plus email and domain lists — which need Workspace
+membership (the token's hd claim), except gmail.com/googlemail.com addresses on the email
+list. Lookups are cached
 per person; a directory that cannot be asked is a transient failure, never "no role".
 """
 
@@ -26,6 +28,8 @@ logger = logging.getLogger(__name__)
 Role = Literal["viewer", "operator", "admin"]
 RANK = {"viewer": 1, "operator": 2, "admin": 3}
 DIRECTORY_TIMEOUT_SECONDS = 10.0
+# Google's consumer (non-Workspace) address domains; their tokens never carry hd.
+CONSUMER_GOOGLE_DOMAINS = frozenset({"gmail.com", "googlemail.com"})
 
 
 class RoleLookupFailed(Exception):
@@ -76,6 +80,14 @@ class RoleMapping:
 
     def wants_google_groups(self) -> bool:
         return any(self.google_groups.values())
+
+
+def _hosted_domain(claims: dict[str, Any]) -> str | None:
+    """A Google token's hd claim (the Workspace domain), lowercased; None unless ASCII text."""
+    hd = claims.get("hd")
+    if isinstance(hd, str) and hd and hd.isascii():
+        return hd.lower()
+    return None
 
 
 def _has_group_overage(claims: dict[str, Any]) -> bool:
@@ -130,10 +142,20 @@ class RoleResolver:
             roles |= {role for role, names in self.mapping.google_groups.items() if names & groups}
         if email and email.isascii():  # Unicode lookalikes never match the ASCII lists
             address = email.lower()
-            roles |= {role for role, names in self.mapping.emails.items() if address in names}
             local, at, domain = address.partition("@")
             if local and at and domain and "@" not in domain:  # exactly one "@"
-                roles |= {role for role, names in self.mapping.domains.items() if domain in names}
+                # Workspace membership (Google's hd claim), not mailbox ownership, places a
+                # person in an organisation: a personal Google account can be registered
+                # with any work address. Consumer accounts carry no hd.
+                hosted = _hosted_domain(identity.claims)
+                if hosted == domain or domain in CONSUMER_GOOGLE_DOMAINS:
+                    roles |= {
+                        role for role, names in self.mapping.emails.items() if address in names
+                    }
+                if hosted == domain:
+                    roles |= {
+                        role for role, names in self.mapping.domains.items() if domain in names
+                    }
         return highest(roles)
 
     async def _entra_groups(self, identity: Identity) -> set[str]:

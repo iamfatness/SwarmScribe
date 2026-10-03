@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
 from sqlalchemy import text
+from swarmscribe_leader.auth.roles import RoleLookupFailed
 from swarmscribe_leader.auth.secrets import hash_secret, new_secret
 from swarmscribe_leader.clock import utcnow
 from swarmscribe_leader.config import ROLES, Settings
@@ -334,3 +335,43 @@ def sign_in_settings(signing_keys):
         return Settings(**values)
 
     return make
+
+
+class FakeGraph:
+    """Microsoft Graph's getMemberObjects, answered from a dict."""
+
+    def __init__(self):
+        self.groups: dict[str, set[str]] = {}
+        self.calls: list[str] = []
+        self.failing = False
+
+    async def member_object_ids(self, user_object_id: str) -> set[str]:
+        self.calls.append(user_object_id)
+        if self.failing:
+            raise RoleLookupFailed("Microsoft Graph could not be asked: ConnectError")
+        return {group.lower() for group in self.groups.get(user_object_id, set())}
+
+
+class FakeGoogleGroups:
+    """Cloud Identity's transitive group search, answered from a dict."""
+
+    def __init__(self):
+        self.groups: dict[str, set[str]] = {}
+        self.calls: list[str] = []
+        self.failing = False
+
+    async def group_emails(self, email: str) -> set[str]:
+        self.calls.append(email)
+        if self.failing:
+            raise RoleLookupFailed("Google Cloud Identity could not be asked: ConnectError")
+        return {group.lower() for group in self.groups.get(email, set())}
+
+
+@pytest.fixture
+def graph():
+    return FakeGraph()
+
+
+@pytest.fixture
+def google_groups():
+    return FakeGoogleGroups()

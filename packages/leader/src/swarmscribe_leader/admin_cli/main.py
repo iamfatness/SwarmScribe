@@ -43,6 +43,15 @@ def parse_labels(text: str) -> tuple[str, ...]:
     return names
 
 
+def parse_temperatures(text: str) -> list[float]:
+    try:
+        return [float(part) for part in text.split(",")]
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "give numbers separated by commas, e.g. 0,0.2,0.4"
+        ) from None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="swarmscribe-admin", description="Administer a SwarmScribe leader."
@@ -150,6 +159,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--revoke-followers",
         action="store_true",
         help="also revoke every follower the token registered (for a token that has leaked)",
+    )
+
+    profiles = commands.add_parser(
+        "profiles", help="the model each device class transcribes with"
+    ).add_subparsers(dest="action", required=True)
+    profiles.add_parser("list")
+    profile_set = profiles.add_parser("set", help="change a device class's model")
+    profile_set.add_argument("device", choices=("cuda", "cpu"))
+    profile_set.add_argument("--model", required=True, help="e.g. large-v3")
+    profile_set.add_argument("--compute-type", required=True, help="e.g. float16 or int8")
+    profile_set.add_argument(
+        "--temperatures", type=parse_temperatures, help="e.g. 0,0.2,0.4 (default: unchanged)"
     )
 
     consent = commands.add_parser("consent", help="consent overview").add_subparsers(
@@ -376,6 +397,14 @@ async def dispatch(args: argparse.Namespace, client: LeaderClient) -> tuple[Any,
         body = {"revoke_followers": True} if args.revoke_followers else None
         path = f"/v1/admin/pool-tokens/{_seg(args.name)}/revoke"
         return await post(path, body=body), print_fields
+    if command == "profiles":
+        if action == "list":
+            columns = ("device", "model", "compute_type", "temperatures")
+            return await get("/v1/admin/profiles"), table(columns)
+        body = {"model": args.model, "compute_type": args.compute_type}
+        if args.temperatures is not None:
+            body["temperatures"] = args.temperatures
+        return await post(f"/v1/admin/profiles/{_seg(args.device)}", body=body), print_fields
     if command == "consent":
         params = {"limit": args.limit}
         if args.location:

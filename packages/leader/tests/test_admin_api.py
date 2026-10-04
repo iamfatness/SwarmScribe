@@ -765,6 +765,14 @@ ROUTES = [
     ("GET", "/v1/admin/pool-tokens", None, "admin"),
     ("POST", "/v1/admin/pool-tokens", {"name": "added-pool-token"}, "admin"),
     ("POST", "/v1/admin/pool-tokens/{pool_token}/revoke", None, "admin"),
+    ("GET", "/v1/admin/profiles", None, "viewer"),
+    # The seeded values, so that the allowed call leaves the shared profile as it was.
+    (
+        "POST",
+        "/v1/admin/profiles/{device}",
+        {"model": "distil-large-v3", "compute_type": "int8"},
+        "admin",
+    ),
 ]
 BELOW = {"viewer": None, "operator": "viewer", "admin": "operator"}
 
@@ -788,6 +796,7 @@ async def world(factory, sessionmaker, tmp_path_factory):
         "token": token_id,
         "console": "fleet",
         "pool_token": "gpu-pods",
+        "device": "cpu",
         # a folder apart from the factory location's, which would overlap
         "root": str(tmp_path_factory.mktemp("added-root")),
     }
@@ -1309,6 +1318,8 @@ CONSOLE_MANAGEMENT = {
     "/v1/admin/consoles/{console}/revoke",
     "/v1/admin/pool-tokens",
     "/v1/admin/pool-tokens/{pool_token}/revoke",
+    "/v1/admin/profiles",
+    "/v1/admin/profiles/{device}",
 }
 DELEGABLE = [route for route in ROUTES if route[1] not in CONSOLE_MANAGEMENT]
 
@@ -1645,3 +1656,164 @@ async def test_pool_token_routes_are_for_administrators_signed_in_as_people(
     viewer = await admin_client.request(method, path, headers=idp.bearer("viewer"), json=body)
     assert (viewer.status_code, viewer.json()["code"]) == (403, "forbidden")
     await for_people_with_the_role(admin_client, idp, factory, method, path, body, role)
+
+
+# --- settings profiles (follower spec 12.4) -----------------------------------------------
+
+
+@pytest.fixture
+async def restore_profiles(sessionmaker):
+    """settings_profiles is seeded by a migration and kept between tests: put it back."""
+    from swarmscribe_leader.db.models import SettingsProfile
+
+    async with sessionmaker() as session:
+        before = {
+            row.device: (row.model, row.compute_type, list(row.temperatures))
+            for row in (await session.scalars(select(SettingsProfile))).all()
+        }
+    yield
+    async with sessionmaker() as session:
+        for row in (await session.scalars(select(SettingsProfile))).all():
+            if row.device in before:
+                row.model, row.compute_type, row.temperatures = before[row.device]
+            else:
+                await session.delete(row)
+        await session.commit()
+
+
+async def test_profiles_are_listed_per_device(admin_client, idp, sessionmaker):
+    rows = await get(admin_client, idp, "/v1/admin/profiles")
+    assert {row["device"]: (row["model"], row["compute_type"]) for row in rows} == {
+        "cpu": ("distil-large-v3", "int8"),
+        "cuda": ("large-v3", "float16"),
+    }
+    assert all(row["temperatures"] == [0.0, 0.2, 0.4] for row in rows)
+    assert len(await audit_rows(sessionmaker, "profiles.view")) == 1
+
+
+async def test_a_changed_profile_is_what_the_next_claim_carries(
+    admin_client, idp, sessionmaker, factory, tmp_path, restore_profiles
+):
+    response = await post(
+        admin_client,
+        idp,
+        "/v1/admin/profiles/cpu",
+        "admin",
+        {"model": "tiny.en", "compute_type": "int8", "temperatures": [0.0, 0.2]},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "device": "cpu",
+        "name": "cpu",
+        "model": "tiny.en",
+        "compute_type": "int8",
+        "temperatures": [0.0, 0.2],
+    }
+    (entry,) = await audit_rows(sessionmaker, "profile.set")
+    assert entry.actor == actor(idp, "admin")
+    assert entry.detail == {
+        "device": "cpu",
+        "model": "tiny.en",
+        "compute_type": "int8",
+        "temperatures": [0.0, 0.2],
+        "before": {"model": "distil-large-v3", "compute_type": "int8"},
+    }
+    location = await factory.location(name="here")
+    await factory.job(await factory.recording(location, key="talks/a.mp3"))
+    write(tmp_path, "talks/a.mp3")
+    _, credential = await factory.follower()
+    claimed = await admin_client.post(
+        "/v1/jobs/claim", headers={"Authorization": f"Bearer {credential}"}
+    )
+    assert claimed.status_code == 200, claimed.text
+    settings = claimed.json()["settings"]
+    assert (settings["model"], settings["temperatures"]) == ("tiny.en", [0.0, 0.2])
+
+
+async def test_a_profile_keeps_its_ladder_when_none_is_given(admin_client, idp, restore_profiles):
+    body = {"model": "owner/custom-model", "compute_type": "float32"}
+    response = await post(admin_client, idp, "/v1/admin/profiles/cuda", "admin", body)
+    assert response.json()["temperatures"] == [0.0, 0.2, 0.4]
+    assert response.json()["model"] == "owner/custom-model"
+
+
+async def test_every_profile_change_is_audited_and_changes_the_row_in_place(
+    admin_client, idp, sessionmaker, restore_profiles
+):
+    """A profile is only ever updated, never replaced or deleted, so a job that names it
+    (settings_profile_id) and a location (which does not name profiles at all) cannot be
+    broken by a change: the next claim simply carries the new settings."""
+    from swarmscribe_leader.db.models import SettingsProfile
+
+    async with sessionmaker() as session:
+        before = (await session.scalars(select(SettingsProfile.id))).all()
+    for model in ("tiny.en", "base.en"):
+        body = {"model": model, "compute_type": "int8"}
+        response = await post(admin_client, idp, "/v1/admin/profiles/cpu", "admin", body)
+        assert response.status_code == 200
+    entries = await audit_rows(sessionmaker, "profile.set")
+    assert {entry.detail["model"] for entry in entries} == {"tiny.en", "base.en"}
+    assert {entry.detail["before"]["model"] for entry in entries} == {"distil-large-v3", "tiny.en"}
+    async with sessionmaker() as session:
+        after = (await session.scalars(select(SettingsProfile.id))).all()
+    assert sorted(after) == sorted(before)
+    # There is no way to delete a profile through the API.
+    for method in ("DELETE", "PUT", "PATCH"):
+        response = await admin_client.request(
+            method, "/v1/admin/profiles/cpu", headers=idp.bearer("admin")
+        )
+        assert response.status_code in (404, 405), method
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"model": "/models/large-v3", "compute_type": "int8"},
+        {"model": "..\\models", "compute_type": "int8"},
+        {"model": "C:/models/x", "compute_type": "int8"},
+        {"model": "a/b/c", "compute_type": "int8"},
+        {"model": "", "compute_type": "int8"},
+        {"model": "tiny.en", "compute_type": "float128"},
+        {"model": "tiny.en", "compute_type": "int8", "temperatures": []},
+        {"model": "tiny.en", "compute_type": "int8", "temperatures": [0.5]},
+        {"model": "tiny.en", "compute_type": "int8", "temperatures": [-0.1, 0.2]},
+        {"model": "tiny.en", "compute_type": "int8", "temperatures": ["hot"]},
+        {"model": "tiny.en", "compute_type": "int8", "language": "fr"},
+        {"model": "tiny.en"},
+    ],
+)
+async def test_invalid_profiles_are_refused_and_change_nothing(
+    admin_client, idp, sessionmaker, body
+):
+    response = await post(admin_client, idp, "/v1/admin/profiles/cpu", "admin", body)
+    assert (response.status_code, response.json()["code"]) == (422, "invalid_request")
+    assert await audit_rows(sessionmaker, "profile.set") == []
+    rows = await get(admin_client, idp, "/v1/admin/profiles")
+    assert next(row for row in rows if row["device"] == "cpu")["model"] == "distil-large-v3"
+
+
+async def test_a_profile_for_an_unknown_device_is_422(admin_client, idp):
+    body = {"model": "tiny.en", "compute_type": "int8"}
+    response = await post(admin_client, idp, "/v1/admin/profiles/tpu", "admin", body)
+    assert response.status_code == 422
+
+
+PROFILE_ROUTES = [
+    ("GET", "/v1/admin/profiles", None, "viewer"),
+    ("POST", "/v1/admin/profiles/cpu", {"model": "tiny.en", "compute_type": "int8"}, "admin"),
+]
+
+
+@pytest.mark.parametrize(
+    "method, path, body, role", PROFILE_ROUTES, ids=[f"{m} {p}" for m, p, _, _ in PROFILE_ROUTES]
+)
+async def test_profile_routes_are_for_people_with_the_role(
+    admin_client, idp, factory, restore_profiles, method, path, body, role
+):
+    await for_people_with_the_role(admin_client, idp, factory, method, path, body, role)
+    if role == "admin":
+        for below in ("viewer", "operator"):
+            refused = await admin_client.request(
+                method, path, headers=idp.bearer(below), json=body
+            )
+            assert (refused.status_code, refused.json()["code"]) == (403, "forbidden"), below

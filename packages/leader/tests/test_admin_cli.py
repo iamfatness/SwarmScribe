@@ -939,3 +939,43 @@ async def test_pool_tokens_are_refused_below_admin(cli, store, idp):
     code, out, err = await cli("pool-tokens", "create", "--name", "gpu-pods")
     assert (code, out) == (1, "")
     assert err.startswith("error: ")
+
+
+# --- settings profiles (follower spec 12.4) ----------------------------------------------
+
+
+async def test_profiles_list_and_set(cli, store, idp, sessionmaker):
+    from swarmscribe_leader.db.models import SettingsProfile
+
+    sign_in_as(store, idp, "admin")
+    code, out, err = await cli("profiles", "list")
+    assert code == 0, err
+    assert "distil-large-v3" in out and "large-v3" in out
+    try:
+        change = ("profiles", "set", "cpu", "--compute-type", "int8")
+        code, out, err = await cli(*change, "--model", "tiny.en", "--temperatures", "0,0.2")
+        assert code == 0, err
+        assert "model: tiny.en" in out and "temperatures: 0.0, 0.2" in out
+        code, _out, err = await cli(*change, "--model", "../x")
+        assert code == 1
+        code, _out, err = await cli(*change, "--model", "tiny.en", "--temperatures", "0,0.9")
+        assert code == 1 and err.startswith("error: ")
+    finally:
+        async with sessionmaker() as session:
+            row = await session.scalar(
+                select(SettingsProfile).where(SettingsProfile.device == "cpu")
+            )
+            row.model, row.compute_type = "distil-large-v3", "int8"
+            row.temperatures = [0.0, 0.2, 0.4]
+            await session.commit()
+
+
+async def test_profiles_set_is_refused_below_admin(cli, store, idp):
+    sign_in_as(store, idp, "operator")
+    code, out, err = await cli(
+        "profiles", "set", "cpu", "--model", "tiny.en", "--compute-type", "int8"
+    )
+    assert (code, out) == (1, "")
+    assert err.startswith("error: ")
+    code, out, _err = await cli("profiles", "list")
+    assert code == 0 and "distil-large-v3" in out

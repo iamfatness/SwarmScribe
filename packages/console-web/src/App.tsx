@@ -2,8 +2,11 @@ import { useEffect } from "react";
 import { startActivityTracking } from "./app/activity";
 import { FleetProvider } from "./app/fleet";
 import { RouterProvider, matchPath, useLocation, useNavigate } from "./app/router";
-import { SessionProvider } from "./app/session";
+import { SessionProvider, useSession } from "./app/session";
 import { Layout, type NavItem } from "./components/Layout";
+import { AdminAdminsPage } from "./pages/admin/AdminAdminsPage";
+import { AdminGrantsPage } from "./pages/admin/AdminGrantsPage";
+import { AdminLeadersPage } from "./pages/admin/AdminLeadersPage";
 import { FleetPage } from "./pages/FleetPage";
 import { LeaderPage } from "./pages/leader/LeaderPage";
 import { leaderUrl } from "./pages/leader/tabs";
@@ -14,6 +17,12 @@ const FLEET: NavItem = {
   to: "/",
   label: "Fleet",
   match: (pathname) => pathname === "/" || pathname.startsWith("/leaders/"),
+};
+
+const ADMIN: NavItem = {
+  to: "/admin/leaders",
+  label: "Administration",
+  match: (pathname) => pathname.startsWith("/admin"),
 };
 
 /**
@@ -39,7 +48,23 @@ function SignedInPage() {
   if (drill !== null) return <LeaderPage name={drill.name as string} tab={drill.tab as string} />;
   const bare = matchPath("/leaders/:name", pathname);
   if (bare !== null) return <Redirect to={leaderUrl(bare.name as string)} />;
+  if (pathname === "/admin") return <Redirect to="/admin/leaders" />;
+  if (pathname === "/admin/leaders") return <AdminLeadersPage />;
+  if (pathname === "/admin/grants") return <AdminGrantsPage />;
+  if (pathname === "/admin/admins") return <AdminAdminsPage />;
   return <NotFoundPage />;
+}
+
+function SignedIn() {
+  const { session } = useSession();
+  const nav = session.console_admin ? [FLEET, ADMIN] : [FLEET];
+  return (
+    <FleetProvider>
+      <Layout nav={nav} pageOf={pageOf}>
+        <SignedInPage />
+      </Layout>
+    </FleetProvider>
+  );
 }
 
 function Routes() {
@@ -48,11 +73,7 @@ function Routes() {
   if (pathname === "/sign-in") return <SignInPage />;
   return (
     <SessionProvider>
-      <FleetProvider>
-        <Layout nav={[FLEET]} pageOf={pageOf}>
-          <SignedInPage />
-        </Layout>
-      </FleetProvider>
+      <SignedIn />
     </SessionProvider>
   );
 }

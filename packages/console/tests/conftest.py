@@ -125,13 +125,15 @@ def make_settings(migrated_database_url):
 
 
 @pytest.fixture
-async def app(engine, make_settings, idp, graph, google_groups):
+async def app(engine, make_settings, idp, graph, google_groups, fake_leader):
     application = create_app(
         make_settings(),
+        background=False,
         fetch=idp.fetch,
         idp_transport=idp.transport,
         graph=graph,
         google_groups=google_groups,
+        leader_transport=fake_leader.transport,
     )
     async with application.router.lifespan_context(application):
         yield application

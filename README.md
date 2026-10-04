@@ -170,6 +170,10 @@ uv run swarmscribe-admin console list
 uv run swarmscribe-admin console revoke fleet
 ```
 
+`status --json` also gives `completed_last_day` and `oldest_queued_age_s` (how
+long the oldest queued job has existed, by the database's clock; `null` when
+nothing is queued).
+
 For recordings with one speaker per channel (such as call recordings), add
 `--channels stereo-split --labels "Agent,Customer"`: each recording is
 transcribed per channel and every transcript line starts with its channel's

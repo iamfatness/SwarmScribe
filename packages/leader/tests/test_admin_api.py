@@ -2,10 +2,10 @@ import asyncio
 import random
 import re
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import event, select, update
+from sqlalchemy import event, extract, func, literal, select, update
 from sqlalchemy.exc import IntegrityError
 from swarmscribe_leader.auth.consoles import create_console
 from swarmscribe_leader.auth.followers import create_join_token
@@ -1385,3 +1385,88 @@ async def test_status_reads_followers_with_one_query_however_many_pools(
         event.remove(engine, "before_cursor_execute", record)
     assert len(body["follower_pools"]) == 6
     assert len([s for s in statements if "FROM followers" in s]) == 1
+
+
+# --- completed in the last day; age of the oldest queued job ----------------------------
+
+
+async def _job(factory, **values):
+    return await factory.job(await factory.recording(await factory.location()), **values)
+
+
+async def test_status_with_no_jobs_has_no_queue_age(admin_client, idp):
+    body = await get(admin_client, idp, "/v1/admin/status")
+    assert (body["completed_last_hour"], body["completed_last_day"]) == (0, 0)
+    assert body["oldest_queued_age_s"] is None
+
+
+async def test_status_counts_completions_in_the_last_hour_and_day(admin_client, idp, factory):
+    now = utcnow()
+    for ago in (timedelta(minutes=10), timedelta(hours=5), timedelta(days=2)):
+        await _job(factory, state="completed", completed_at=now - ago)
+    await _job(factory, state="failed", completed_at=now - timedelta(minutes=5))
+    await _job(factory, state="cancelled", completed_at=now - timedelta(minutes=5))
+    body = await get(admin_client, idp, "/v1/admin/status")
+    assert (body["completed_last_hour"], body["completed_last_day"]) == (1, 2)
+
+
+async def test_the_queue_age_is_the_oldest_queued_jobs(admin_client, idp, factory):
+    now = utcnow()
+    await _job(factory, state="queued", created_at=now - timedelta(hours=3))
+    await _job(factory, state="queued", created_at=now - timedelta(hours=1), pool="gpu")
+    await _job(factory, state="leased", created_at=now - timedelta(hours=10))
+    await _job(
+        factory, state="completed", created_at=now - timedelta(hours=20), completed_at=now
+    )
+    body = await get(admin_client, idp, "/v1/admin/status")
+    age = body["oldest_queued_age_s"]
+    assert isinstance(age, int)
+    assert 3 * 3600 - 5 <= age <= 3 * 3600 + 60
+
+
+async def test_nothing_queued_is_no_age_not_zero(admin_client, idp, factory):
+    await _job(factory, state="leased", created_at=utcnow() - timedelta(hours=2))
+    body = await get(admin_client, idp, "/v1/admin/status")
+    assert body["oldest_queued_age_s"] is None
+
+
+async def test_a_queued_job_from_the_future_has_age_zero(admin_client, idp, factory):
+    await _job(factory, state="queued", created_at=utcnow() + timedelta(hours=1))
+    body = await get(admin_client, idp, "/v1/admin/status")
+    assert body["oldest_queued_age_s"] == 0
+
+
+async def test_the_queue_age_uses_the_databases_clock(
+    admin_client, idp, factory, sessionmaker, monkeypatch
+):
+    old = datetime(2000, 1, 1, tzinfo=UTC)
+    await _job(factory, state="queued", created_at=old)
+    # A leader host whose clock is wrong must not change the figure.
+    wrong = datetime(1990, 1, 1, tzinfo=UTC)
+    monkeypatch.setattr("swarmscribe_leader.clock.utcnow", lambda: wrong)
+    body = await get(admin_client, idp, "/v1/admin/status")
+    async with sessionmaker() as session:
+        expected = await session.scalar(select(extract("epoch", func.now() - literal(old))))
+    assert isinstance(body["oldest_queued_age_s"], int)
+    assert abs(body["oldest_queued_age_s"] - int(expected)) <= 5
+
+
+async def test_status_makes_no_extra_job_queries(admin_app, admin_client, idp, factory):
+    now = utcnow()
+    for n in range(4):
+        created = now - timedelta(hours=n)
+        await _job(factory, state="queued", pool=f"pool-{n}", created_at=created)
+    await _job(factory, state="completed", completed_at=now)
+    statements: list[str] = []
+
+    def record(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    engine = admin_app.state.engine.sync_engine
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        await get(admin_client, idp, "/v1/admin/status")
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    # By state (with the queue age), open jobs by pool, completions (hour and day): as before.
+    assert len([s for s in statements if "FROM jobs" in s]) == 3

@@ -32,7 +32,25 @@ MAX_URL_CHARS = 2000
 # Serialises registrations, so that two at once cannot both pass the name check.
 _REGISTRY_LOCK = 0x53430010
 _CREDENTIAL = re.compile(r"[A-Za-z0-9_-]{43}")
-_BLOCKED_HOSTS = frozenset({"localhost", "metadata", "metadata.google.internal"})
+_BLOCKED_HOSTS = frozenset(
+    {
+        "localhost",
+        "localhost.localdomain",
+        "ip6-localhost",
+        "ip6-loopback",
+        "metadata",
+        "metadata.internal",
+        "metadata.google.internal",
+        "instance-data",
+        "instance-data.ec2.internal",
+    }
+)
+# Ranges that embed or stand for another address: 6to4 and Teredo carry an IPv4 address that
+# is not ours to judge, "this network" is not a destination, fec0::/10 is deprecated site-local.
+# NAT64 64:ff9b::/96 is refused as reserved (::/8); a test pins that.
+_BLOCKED_NETWORKS = tuple(
+    ipaddress.ip_network(n) for n in ("2002::/16", "2001::/32", "fec0::/10", "0.0.0.0/8")
+)
 # Cloud metadata services that are not link-local or otherwise caught by the range checks.
 _BLOCKED_ADDRESSES = frozenset(
     ipaddress.ip_address(a) for a in ("fd00:ec2::254", "100.100.100.200")
@@ -45,6 +63,15 @@ def _bad_url(message: str) -> Invalid:
     return Invalid(message, code="invalid_url")
 
 
+def sealing_context(name: str, base_url: str) -> str:
+    """The associated-data string a leader's credential is sealed and opened with: the
+    lowercased name, a newline, and the normalised base URL. Binding the URL means a
+    database-only change of `base_url` leaves a credential nothing can open
+    (CredentialUnreadable), instead of one the poller would send to the new host. The poller
+    (C2b) must open with exactly this, from the row's own name and base_url."""
+    return f"{name.lower()}\n{base_url}"
+
+
 def validate_name(name: str) -> str:
     if not isinstance(name, str) or not LEADER_NAME.fullmatch(name):
         raise Invalid(
@@ -55,15 +82,21 @@ def validate_name(name: str) -> str:
     return name
 
 
-def _check_host(host: str) -> None:
+def _check_host(host: str, *, bracketed: bool) -> None:
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
         address = None
+    if bracketed and not isinstance(address, ipaddress.IPv6Address):
+        # Brackets hold an IPv6 address only (not an IPvFuture "v1.x" or a name).
+        raise _bad_url("a leader URL's [brackets] hold an IPv6 address")
     if address is not None:
+        if getattr(address, "scope_id", None) is not None:
+            raise _bad_url("a leader URL cannot use an address with a scope or zone id")
         candidate = getattr(address, "ipv4_mapped", None) or address
         if (
             candidate in _BLOCKED_ADDRESSES
+            or any(candidate in network for network in _BLOCKED_NETWORKS)
             or candidate.is_loopback
             or candidate.is_link_local
             or candidate.is_unspecified
@@ -77,9 +110,8 @@ def _check_host(host: str) -> None:
         return
     labels = host.split(".")
     if (
-        "%" in host  # an IPv6 zone id
-        or host in _BLOCKED_HOSTS
-        or host.endswith(".localhost")
+        host.rstrip(".") in _BLOCKED_HOSTS
+        or host.rstrip(".").endswith(".localhost")
         or len(host) > 253
         or not all(_HOST_LABEL.fullmatch(label) for label in labels)
         or not labels[-1][0].isalpha()
@@ -97,7 +129,11 @@ def validate_base_url(value: str) -> str:
         or any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in raw)
     ):
         raise _bad_url("a leader URL is an https:// URL of printable ASCII without spaces")
-    parts = urlsplit(raw)
+    try:
+        parts = urlsplit(raw)
+        host = parts.hostname
+    except ValueError:  # an unbalanced or misplaced bracket
+        raise _bad_url("a leader URL's host is malformed") from None
     if parts.scheme.lower() != "https":
         raise _bad_url("a leader URL must use https://")
     if parts.username is not None or parts.password is not None or "@" in parts.netloc:
@@ -110,10 +146,9 @@ def validate_base_url(value: str) -> str:
         raise _bad_url("the port must be a number from 1 to 65535") from None
     if port == 0:
         raise _bad_url("the port must be a number from 1 to 65535")
-    host = parts.hostname
     if not host:
         raise _bad_url("a leader URL needs a host name")
-    _check_host(host)
+    _check_host(host, bracketed="[" in parts.netloc or "]" in parts.netloc)
     path = parts.path.rstrip("/")
     if not _PATH.fullmatch(path) or any(seg in (".", "..") for seg in path.split("/")):
         raise _bad_url("a leader URL's path holds only letters, digits and . _ ~ - segments")
@@ -193,7 +228,7 @@ async def add_leader(
         base_url=url,
         labels=clean_labels,
         enabled=enabled,
-        credential=keys.seal_credential(name, credential),
+        credential=keys.seal_credential(sealing_context(name, url), credential),
         credential_updated_by=actor,
         added_by=actor,
     )
@@ -225,15 +260,18 @@ async def edit_leader(
     actor: str,
 ) -> Leader:
     """Edit in place. A new base URL must come with the credential in the same call (ruling
-    R3): the poller sends the credential to the URL, so an edit that only repointed the URL
-    could hand the stored credential to another host. The credential is then sealed again
-    for the new URL and the change is audited as a URL change plus a rotation. A credential
-    without a URL change is refused here too: that is what the rotation call is for."""
+    R3): the credential is sealed bound to the URL (see sealing_context), so the stored one
+    cannot be opened for a different address, and an edit that only repointed the URL could
+    otherwise hand the credential to another host. The change is audited as a URL change plus
+    a rotation. A credential is accepted only with a URL that really changes; replacing it
+    on its own is the rotation call (`use_rotate`)."""
+    if credential is not None and (keys is None or now is None):
+        raise TypeError("keys and now are needed to seal a credential")
+    use_rotate = Invalid(
+        "to replace the credential alone, use PUT .../credential", code="use_rotate"
+    )
     if credential is not None and base_url is None:
-        raise Invalid(
-            "send the credential with a new base_url, or replace it on its own",
-            code="credential_without_url",
-        )
+        raise use_rotate
     # Everything is checked before anything is changed.
     url = None if base_url is None else validate_base_url(base_url)
     clean_labels = None if labels is None else validate_labels(labels)
@@ -245,19 +283,24 @@ async def edit_leader(
             "changing the base URL needs the credential in the same request",
             code="credential_required",
         )
+    if clean_credential is not None and not url_changed:
+        raise use_rotate
     changed: dict[str, Any] = {}
-    if url is not None and url_changed:
+    if url_changed:
         leader.base_url = changed["base_url"] = url
     if clean_labels is not None:
         leader.labels = changed["labels"] = clean_labels
     if enabled is not None:
         leader.enabled = changed["enabled"] = enabled
-    audit.record(session, actor=actor, action="leader.edit", leader=leader.name, detail=changed)
+    if changed:
+        audit.record(
+            session, actor=actor, action="leader.edit", leader=leader.name, detail=changed
+        )
     if clean_credential is not None:
-        if keys is None or now is None:
-            raise TypeError("keys and now are needed to re-seal a credential")
-        _reseal(session, keys, leader, clean_credential, now=now, actor=actor,
-                reason="base_url_change" if url_changed else "rotation")
+        _reseal(
+            session, keys, leader, clean_credential, now=now, actor=actor,
+            reason="base_url_change",
+        )
     return leader
 
 
@@ -291,7 +334,9 @@ def _reseal(
     """The credential is sealed against the leader's name, and the leader's health starts
     over (a new credential, or a new address, has not failed yet). `credential` was
     validated by the caller."""
-    leader.credential = keys.seal_credential(leader.name, credential)
+    leader.credential = keys.seal_credential(
+        sealing_context(leader.name, leader.base_url), credential
+    )
     leader.credential_updated_at = now
     leader.credential_updated_by = actor
     leader.credential_revoked_at = None

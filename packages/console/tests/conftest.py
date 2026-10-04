@@ -45,6 +45,7 @@ from swarmscribe_console.db.models import (  # noqa: E402
     Leader,
     RoleGrant,
 )
+from swarmscribe_console.leaders import sealing_context  # noqa: E402
 from swarmscribe_console.sessions import SESSION_COOKIE, create_session  # noqa: E402
 from swarmscribe_leader.auth.roles import RoleLookupFailed  # noqa: E402
 from swarmscribe_leader.clock import utcnow  # noqa: E402
@@ -214,13 +215,14 @@ class Factory:
         credential=CREDENTIAL,
         enabled=True,
     ) -> Leader:
+        base_url = base_url or f"https://{name}.leaders.example"
         return await self._save(
             Leader(
                 name=name,
-                base_url=base_url or f"https://{name}.leaders.example",
+                base_url=base_url,
                 labels=labels or {},
                 enabled=enabled,
-                credential=self.keys.seal_credential(name, credential),
+                credential=self.keys.seal_credential(sealing_context(name, base_url), credential),
                 credential_updated_by="t",
                 added_by="t",
             )

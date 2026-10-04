@@ -6,7 +6,7 @@ from sqlalchemy import select, text, update
 from swarmscribe_console.crypto import CredentialUnreadable
 from swarmscribe_console.db.models import AuditEntry, Leader
 from swarmscribe_console.errors import Invalid
-from swarmscribe_console.leaders import validate_base_url
+from swarmscribe_console.leaders import sealing_context, validate_base_url
 
 NEW_CREDENTIAL = "N" * 43
 
@@ -28,6 +28,10 @@ def _body(**overrides):
     }
     body.update(overrides)
     return body
+
+
+def _open(keys, name, base_url, sealed) -> str:
+    return keys.open_credential(sealing_context(name, base_url), sealed)
 
 
 async def _leader(sessionmaker, name="eu-1") -> Leader:
@@ -67,7 +71,7 @@ async def test_the_credential_is_encrypted_at_rest(admin, sessionmaker, engine, 
     async with engine.connect() as conn:
         raw = await conn.scalar(text("select credential from leaders where name = 'eu-1'"))
     assert CREDENTIAL.encode() not in raw
-    assert keys.open_credential("eu-1", raw) == CREDENTIAL
+    assert _open(keys, "eu-1", "https://eu-1.leaders.example", raw) == CREDENTIAL
 
 
 async def test_a_sealed_credential_moved_to_another_leader_does_not_open(
@@ -83,7 +87,7 @@ async def test_a_sealed_credential_moved_to_another_leader_does_not_open(
         await session.commit()
     us = await _leader(sessionmaker, "us-1")
     with pytest.raises(CredentialUnreadable):
-        keys.open_credential("us-1", us.credential)
+        _open(keys, "us-1", us.base_url, us.credential)
 
 
 @pytest.mark.parametrize("name", ["EU-1", "eu-1"])
@@ -194,6 +198,27 @@ def test_https_leader_urls_are_normalised(given, kept):
         "https://leader.example.org.",
         "https://leader.example.org:65536",
         "https://leader.example.org:-1",
+        "https://[fd00:ec2::254%251]",
+        "https://[fd00::5%25eth0]",
+        "https://[fe80::1%25lo]",
+        "https://[::1",
+        "https://[fd00::5]x",
+        "https://host]",
+        "https://[v1.x]",
+        "https://ip6-localhost",
+        "https://IP6-Loopback.",
+        "https://Localhost.Localdomain",
+        "https://localhost.localdomain.",
+        "https://instance-data",
+        "https://INSTANCE-DATA.",
+        "https://instance-data.ec2.internal",
+        "https://[2002:a9fe:a9fe::1]",
+        "https://[2002::]",
+        "https://[2001:0:4136:e378::1]",
+        "https://[64:ff9b::a9fe:a9fe]",
+        "https://[64:ff9b::7f00:1]",
+        "https://[fec0::1]",
+        "https://0.1.2.3",
         "https://leader.example.org/../admin",
         "https://leader.example.org/a/./b",
         "https://leader.example.org:0",
@@ -250,7 +275,7 @@ async def test_a_credential_alone_is_not_an_edit(admin):
     await admin.post("/api/admin/leaders", json=_body())
     answer = await admin.patch("/api/admin/leaders/eu-1", json={"credential": NEW_CREDENTIAL})
     assert answer.status_code == 422
-    assert answer.json()["code"] == "credential_without_url"
+    assert answer.json()["code"] == "use_rotate"
     assert NEW_CREDENTIAL not in answer.text
 
 
@@ -264,7 +289,7 @@ async def test_changing_the_url_needs_the_credential_in_the_same_request(
     assert answer.json()["code"] == "credential_required"
     leader = await _leader(sessionmaker)
     assert leader.base_url == "https://eu-1.leaders.example"
-    assert keys.open_credential("eu-1", leader.credential) == CREDENTIAL
+    assert _open(keys, "eu-1", leader.base_url, leader.credential) == CREDENTIAL
     assert [e.action for e in (await _audit(sessionmaker))[before:]] == ["request.refused"]
 
 
@@ -280,7 +305,7 @@ async def test_changing_the_url_with_the_credential_reseals_and_audits_both(
     assert answer.json()["base_url"] == "https://eu.x.org"
     assert NEW_CREDENTIAL not in answer.text
     leader = await _leader(sessionmaker)
-    assert keys.open_credential("eu-1", leader.credential) == NEW_CREDENTIAL
+    assert _open(keys, "eu-1", leader.base_url, leader.credential) == NEW_CREDENTIAL
     assert leader.credential_updated_by.startswith("admin@example.org")
     entries = (await _audit(sessionmaker))[1:]
     assert [(e.action, e.leader) for e in entries] == [
@@ -331,7 +356,7 @@ async def test_rotation_replaces_the_credential_in_place(admin, sessionmaker, ke
     assert answer.json()["credential_revoked"] is False
     assert NEW_CREDENTIAL not in answer.text
     leader = await _leader(sessionmaker)
-    assert keys.open_credential("eu-1", leader.credential) == NEW_CREDENTIAL
+    assert _open(keys, "eu-1", leader.base_url, leader.credential) == NEW_CREDENTIAL
     assert (
         leader.credential_revoked_at,
         leader.consecutive_failures,
@@ -457,3 +482,49 @@ async def test_non_ascii_names_and_credentials_are_refused_before_sealing(sessio
                 )
             assert raised.value.code in ("invalid_name", "invalid_credential")
             assert credential not in str(raised.value)
+
+
+async def test_malformed_brackets_are_refused_and_audited_not_a_500(admin, sessionmaker):
+    for bad in ("https://[::1", "https://[fd00::5]x", "https://host]", "https://[v1.x]"):
+        before = len(await _audit(sessionmaker))
+        answer = await admin.post("/api/admin/leaders", json=_body(base_url=bad))
+        assert (answer.status_code, answer.json()["code"]) == (422, "invalid_url")
+        assert [e.action for e in (await _audit(sessionmaker))[before:]] == ["request.refused"]
+
+
+async def test_the_url_is_bound_into_the_seal(admin, sessionmaker, keys):
+    await admin.post("/api/admin/leaders", json=_body())
+    leader = await _leader(sessionmaker)
+    async with sessionmaker() as session:
+        await session.execute(
+            update(Leader).where(Leader.name == "eu-1").values(base_url="https://other.example")
+        )
+        await session.commit()
+    moved = await _leader(sessionmaker)
+    with pytest.raises(CredentialUnreadable):
+        keys.open_credential(sealing_context(moved.name, moved.base_url), moved.credential)
+    assert keys.open_credential(
+        sealing_context("EU-1", leader.base_url), leader.credential
+    ) == CREDENTIAL
+
+
+async def test_a_credential_with_an_unchanged_url_is_for_the_rotation_route(admin):
+    await admin.post("/api/admin/leaders", json=_body())
+    answer = await admin.patch(
+        "/api/admin/leaders/eu-1",
+        json={"base_url": "https://eu-1.leaders.example/", "credential": NEW_CREDENTIAL},
+    )
+    assert (answer.status_code, answer.json()["code"]) == (422, "use_rotate")
+    assert NEW_CREDENTIAL not in answer.text
+
+
+async def test_an_edit_that_changes_nothing_writes_no_audit_row(admin, sessionmaker):
+    await admin.post("/api/admin/leaders", json=_body())
+    await admin.patch("/api/admin/leaders/eu-1", json={})
+    assert [e.action for e in await _audit(sessionmaker)] == ["leader.add"]
+
+
+def test_the_edit_models_credential_is_not_in_its_repr():
+    from swarmscribe_console.api.models import LeaderEdit
+
+    assert CREDENTIAL not in repr(LeaderEdit(credential=CREDENTIAL))

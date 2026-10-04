@@ -7,6 +7,7 @@ from swarmscribe_console.leader_client import (
     POLLER_ACTOR,
     ActorNotRepresentable,
     LeaderBadAnswer,
+    LeaderClient,
     LeaderReply,
     LeaderTarget,
     LeaderUnreachable,
@@ -263,14 +264,142 @@ async def test_a_redirect_sends_the_credential_nowhere_else(leader_client, fake_
     assert {r.url.host for r in fake_leader.requests} == {HOST}
 
 
-def test_the_client_ignores_proxy_and_ca_environment(monkeypatch):
-    from swarmscribe_console.leader_client import LeaderClient
+async def test_proxy_and_ca_environment_cannot_reroute_a_call(
+    monkeypatch, leader_client, fake_leader
+):
+    import asyncio
 
-    monkeypatch.setenv("HTTPS_PROXY", "http://evil.example:3128")
-    monkeypatch.setenv("SSL_CERT_FILE", "/nonexistent/ca.pem")
-    client = LeaderClient()
-    assert client._client.trust_env is False
-    assert client._client.follow_redirects is False
+    accepted = []
+
+    async def listener(reader, writer):
+        accepted.append(1)
+        writer.close()
+
+    server = await asyncio.start_server(listener, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    with socket_closed_port() as closed:
+        monkeypatch.setenv("HTTPS_PROXY", f"http://127.0.0.1:{closed}")
+        monkeypatch.setenv("https_proxy", f"http://127.0.0.1:{closed}")
+        monkeypatch.setenv("SSL_CERT_FILE", "/nonexistent/ca.pem")
+        # The fake leader still answers with the variables set.
+        reply = await leader_client.call(
+            TARGET, "GET", "/v1/admin/status", actor=POLLER_ACTOR, role="viewer", timeout=2
+        )
+        assert reply.status == 200
+        # A real transport: a proxy that listens would see a CONNECT if the variable were
+        # honoured. It must see nothing; the call goes straight to the (closed) target.
+        monkeypatch.setenv("HTTPS_PROXY", f"http://127.0.0.1:{port}")
+        monkeypatch.setenv("https_proxy", f"http://127.0.0.1:{port}")
+        real = LeaderClient()
+        try:
+            with pytest.raises(LeaderUnreachable) as raised:
+                await real.call(
+                    LeaderTarget("x", f"https://127.0.0.1:{closed}", CREDENTIAL),
+                    "GET",
+                    "/v1/admin/status",
+                    actor=POLLER_ACTOR,
+                    role="viewer",
+                    timeout=5,
+                )
+        finally:
+            await real.aclose()
+    server.close()
+    await server.wait_closed()
+    assert raised.value.reason in ("connect_error", "timeout")
+    assert accepted == []
+
+
+def socket_closed_port():
+    import contextlib
+    import socket
+
+    @contextlib.contextmanager
+    def manager():
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        yield port  # released again: connections are refused
+
+    return manager()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "@evil.example/x",
+        "//evil.example/x",
+        "/..%2f",
+        "/a/../b",
+        "\\evil",
+        "v1/x",
+        "",
+        "/a?b=1",
+        "/a#f",
+        "/a\\b",
+        "/a%2Fb",
+        "/a%5cb",
+        "/a/%2e%2e/b",
+        "/a\r\nX: 1",
+        "/a b",
+        "/a\x00b",
+        "/é",
+        "/./x",
+    ],
+)
+async def test_a_path_that_could_leave_the_leader_is_refused_before_any_request(
+    leader_client, fake_leader, path
+):
+    with pytest.raises(ValueError):
+        await leader_client.call(
+            TARGET, "GET", path, actor=POLLER_ACTOR, role="viewer", timeout=2
+        )
+    assert fake_leader.requests == []
+
+
+async def test_a_plain_http_leader_is_refused(leader_client, fake_leader):
+    target = LeaderTarget("eu-1", f"http://{HOST}", CREDENTIAL)
+    with pytest.raises(ValueError):
+        await leader_client.call(
+            target, "GET", "/v1/admin/status", actor=POLLER_ACTOR, role="viewer", timeout=2
+        )
+    assert fake_leader.requests == []
+
+
+async def test_the_call_asks_for_an_uncompressed_answer(leader_client, fake_leader):
+    await leader_client.call(
+        TARGET, "GET", "/v1/admin/status", actor=POLLER_ACTOR, role="viewer", timeout=2
+    )
+    assert fake_leader.requests[0].headers["accept-encoding"] == "identity"
+
+
+async def test_a_compressed_answer_is_still_capped_after_decoding(leader_client, fake_leader):
+    import gzip
+
+    fake_leader.replies[("GET", "/v1/admin/status")] = (
+        200,
+        gzip.compress(b"0" * (MAX_BODY_BYTES + 10), 1),
+        {"Content-Type": "text/plain", "Content-Encoding": "gzip"},
+    )
+    with pytest.raises(LeaderBadAnswer):
+        await leader_client.call(
+            TARGET, "GET", "/v1/admin/status", actor=POLLER_ACTOR, role="viewer", timeout=10
+        )
+
+
+async def test_other_transport_failures_are_labelled_transport_error(
+    leader_client, fake_leader
+):
+    import httpx
+
+    async def broken(request):
+        raise httpx.RemoteProtocolError("garbage", request=request)
+
+    fake_leader.on_request = broken
+    with pytest.raises(LeaderUnreachable) as raised:
+        await leader_client.call(
+            TARGET, "GET", "/v1/admin/status", actor=POLLER_ACTOR, role="viewer", timeout=2
+        )
+    assert raised.value.reason == "transport_error"
 
 
 @pytest.mark.parametrize(

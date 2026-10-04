@@ -15,6 +15,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 from swarmscribe_leader.auth.consoles import (
@@ -49,6 +50,30 @@ MAX_BODY_BYTES = 16 * 1024 * 1024
 REVOKED_CODE = "credential_revoked"
 _VISIBLE = re.compile(r"[!-~]+")
 _EMAIL = re.compile(r"[^@]+@[^@]+")
+_BAD_PATH_CHARS = re.compile(r"[\\@#?\x00-\x20\x7f-\U0010ffff]")
+_ENCODED_SEPARATOR = re.compile(r"%(?:2f|5c|00)", re.IGNORECASE)
+
+
+def _checked_url(base_url: str, path: str) -> str:
+    """base_url + path, or ValueError. A path is `/` then segments: no second leading slash,
+    backslash, `@`, `#`, `?` (queries go in params), control character, encoded slash or
+    dot segment. The result must stay on base_url's scheme, host and port. Messages are
+    fixed: neither value is echoed."""
+    base = httpx.URL(base_url)
+    if base.scheme != "https" or not base.host:
+        raise ValueError("a leader is called over https only")
+    if (
+        not path.startswith("/")
+        or path.startswith("//")
+        or _BAD_PATH_CHARS.search(path)
+        or _ENCODED_SEPARATOR.search(path)
+        or any(unquote(seg) in (".", "..") for seg in path.split("/"))
+    ):
+        raise ValueError("not a path the console sends to a leader")
+    url = httpx.URL(base_url.rstrip("/") + path)
+    if (url.scheme, url.host, url.port) != (base.scheme, base.host, base.port):
+        raise ValueError("not a path the console sends to a leader")
+    return str(url)
 
 
 class ActorNotRepresentable(Forbidden):
@@ -93,7 +118,7 @@ class LeaderReply:
 
 
 class LeaderUnreachable(Exception):
-    """The leader did not answer: `reason` is "timeout" or "connect_error"."""
+    """The leader did not answer: `reason` is "timeout", "connect_error" or "transport_error"."""
 
     def __init__(self, reason: str):
         super().__init__(reason)
@@ -137,13 +162,17 @@ class LeaderClient:
             "X-SwarmScribe-Actor": actor,
             "X-SwarmScribe-Actor-Role": role,
             "Accept": "application/json",
+            # Count raw bytes against the cap; a leader that compresses anyway is still
+            # counted after decoding below.
+            "Accept-Encoding": "identity",
         }
+        url = _checked_url(target.base_url, path)
         chunks: list[bytes] = []
         try:
             async with asyncio.timeout(timeout):
                 async with self._client.stream(
                     method,
-                    target.base_url + path,
+                    url,
                     headers=headers,
                     params=params,
                     json=json_body,
@@ -159,8 +188,10 @@ class LeaderClient:
             raise LeaderUnreachable("timeout") from None
         except httpx.TimeoutException:
             raise LeaderUnreachable("timeout") from None
-        except httpx.HTTPError:
+        except httpx.ConnectError:
             raise LeaderUnreachable("connect_error") from None
+        except httpx.HTTPError:
+            raise LeaderUnreachable("transport_error") from None
         raw = b"".join(chunks)
         body: Any = None
         if raw:

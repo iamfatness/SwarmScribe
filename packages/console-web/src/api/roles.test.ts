@@ -11,10 +11,13 @@ describe("roles", () => {
     const source = readFileSync(PROXY_PY, "utf8");
     const routes = [
       ...source.matchAll(
-        /ProxyRoute\(\s*"(?:GET|POST)",\s*"[^"]+",\s*"(viewer|operator|admin)",\s*"([a-z.]+)"/g,
+        /ProxyRoute\(\s*"(?:GET|POST|PUT|PATCH|DELETE)",\s*"[^"]+",\s*"(viewer|operator|admin)",\s*"([a-z0-9_.]+)"/g,
       ),
     ];
+    // Every ProxyRoute( construction must have been matched, so none is silently skipped.
+    const constructed = [...source.matchAll(/^\s+ProxyRoute\(/gm)].length;
     expect(routes.length).toBeGreaterThan(0);
+    expect(routes).toHaveLength(constructed);
     const fromPython = Object.fromEntries(routes.map(([, role, action]) => [action, role]));
     expect(ACTION_ROLE).toEqual(fromPython);
   });

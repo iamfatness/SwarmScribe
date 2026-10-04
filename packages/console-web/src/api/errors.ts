@@ -4,7 +4,7 @@
 // (docs/superpowers/plans/2026-10-03-fleet-console-c3-notes.md), the console's
 // errors.py/api/errors.py, the registry and grants modules, and the leader's admin routes.
 
-import { ApiError, NETWORK_ERROR, isAbort } from "./client";
+import { ApiError, BAD_PATH, BAD_RESPONSE, NETWORK_ERROR, isAbort } from "./client";
 
 export interface ErrorText {
   title: string;
@@ -26,6 +26,8 @@ export const ERROR_TITLES: Record<string, string> = {
   not_found: "Not found.",
   conflict: "That conflicts with the current state.",
   bad_request: "The request was refused.",
+  [BAD_RESPONSE]: "The console's answer could not be read. Reload the console, then try again.",
+  [BAD_PATH]: "The console hit an unexpected error.",
   [NETWORK_ERROR]: "The console could not be reached. Check your connection.",
   // Added by the proxy (handoff note "Codes the proxy adds").
   leader_not_found: "This leader is not visible to you.",

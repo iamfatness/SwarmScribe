@@ -30,6 +30,33 @@ export default tseslint.config(
           selector: "JSXAttribute[name.name='dangerouslySetInnerHTML']",
           message: "Never set HTML: render text.",
         },
+        // The same two props passed as an object literal to createElement or spread into JSX.
+        // A spread of a variable (or any computed props object) cannot be judged by a lint
+        // rule; the CSP and review are the guard there.
+        ...["style", "dangerouslySetInnerHTML"].flatMap((prop) => [
+          {
+            selector: `CallExpression[callee.name='createElement'] ObjectExpression > Property[key.name='${prop}']`,
+            message: `No ${prop} through createElement: the console's CSP forbids inline styles; never set HTML.`,
+          },
+          {
+            selector: `CallExpression[callee.property.name='createElement'] ObjectExpression > Property[key.name='${prop}']`,
+            message: `No ${prop} through createElement: the console's CSP forbids inline styles; never set HTML.`,
+          },
+          {
+            selector: `JSXSpreadAttribute > ObjectExpression > Property[key.name='${prop}']`,
+            message: `No ${prop} through a JSX spread: the console's CSP forbids inline styles; never set HTML.`,
+          },
+        ]),
+      ],
+      "no-restricted-properties": [
+        "error",
+        ...["window", "globalThis", "self"].flatMap((object) =>
+          ["localStorage", "sessionStorage"].map((property) => ({
+            object,
+            property,
+            message: "Use src/app/theme.ts; nothing else is stored in the browser.",
+          })),
+        ),
       ],
       "no-restricted-globals": [
         "error",

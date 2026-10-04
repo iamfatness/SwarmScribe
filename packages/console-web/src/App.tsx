@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { startActivityTracking } from "./app/activity";
 import { FleetProvider } from "./app/fleet";
 import { RouterProvider, matchPath, useLocation, useNavigate } from "./app/router";
+import { isRouted } from "./app/routes";
 import { SessionProvider, useSession } from "./app/session";
 import { Layout, type NavItem } from "./components/Layout";
 import { AdminAdminsPage } from "./pages/admin/AdminAdminsPage";
@@ -43,6 +44,8 @@ function Redirect({ to }: { to: string }) {
 
 function SignedInPage() {
   const { pathname } = useLocation();
+  // A route exists only if its first segment is in app/routePrefixes.json.
+  if (!isRouted(pathname)) return <NotFoundPage />;
   if (pathname === "/") return <FleetPage />;
   const drill = matchPath("/leaders/:name/:tab", pathname);
   if (drill !== null) return <LeaderPage name={drill.name as string} tab={drill.tab as string} />;
@@ -70,7 +73,7 @@ function SignedIn() {
 function Routes() {
   const { pathname } = useLocation();
   // Outside SessionProvider: nothing here may need a session or poll the fleet.
-  if (pathname === "/sign-in") return <SignInPage />;
+  if (pathname === "/sign-in" && isRouted(pathname)) return <SignInPage />;
   return (
     <SessionProvider>
       <SignedIn />

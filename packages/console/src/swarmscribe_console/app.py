@@ -21,6 +21,7 @@ from swarmscribe_leader.db.session import make_engine, make_sessionmaker
 from .api import admin as admin_api
 from .api import auth as auth_api
 from .api import errors as api_errors
+from .api import fleet as fleet_api
 from .api import session as session_api
 from .api.guard import assert_guarded
 from .api.security import SecurityHeaders
@@ -198,5 +199,6 @@ def create_app(
     app.include_router(auth_api.router)  # /auth/*: before a session exists, so no Person guard
     app.include_router(session_api.router)
     app.include_router(admin_api.router)
+    app.include_router(fleet_api.router)
     assert_guarded(app.routes)  # a route added without the CSRF dependency fails the build
     return app

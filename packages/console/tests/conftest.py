@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import base64  # noqa: E402
+import copy  # noqa: E402
 import hashlib  # noqa: E402
 import json  # noqa: E402
 import secrets  # noqa: E402
@@ -28,6 +29,7 @@ from console_testkit import (  # noqa: E402
     GOOGLE_SECRET,
     MASTER_KEY,
     PUBLIC_URL,
+    STATUS,
     TEST_KEY,
     FakeLeader,
     recreate,
@@ -45,6 +47,7 @@ from swarmscribe_console.db.models import (  # noqa: E402
     ConsoleAdmin,
     Leader,
     RoleGrant,
+    Snapshot,
 )
 from swarmscribe_console.leader_client import LeaderClient  # noqa: E402
 from swarmscribe_console.leaders import sealing_context  # noqa: E402
@@ -229,6 +232,21 @@ class Factory:
                 credential=self.keys.seal_credential(sealing_context(name, base_url), credential),
                 credential_updated_by="t",
                 added_by="t",
+            )
+        )
+
+    async def snapshot(
+        self, leader, *, taken_at, reachable=True, outcome="ok", status=None
+    ) -> Snapshot:
+        if status is None and reachable:
+            status = copy.deepcopy(STATUS)
+        return await self._save(
+            Snapshot(
+                leader_id=leader.id,
+                taken_at=taken_at,
+                reachable=reachable,
+                outcome=outcome,
+                status=status,
             )
         )
 

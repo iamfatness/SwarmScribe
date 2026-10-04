@@ -23,8 +23,8 @@ async def test_migrations_produce_exactly_the_models(engine):
 
 
 async def test_database_is_at_the_head_revision(engine):
-    assert head_revision() == "0005"
-    assert await current_revision(engine) == "0005"
+    assert head_revision() == "0006"
+    assert await current_revision(engine) == "0006"
 
 
 async def test_the_claim_index_serves_priority_descending(engine):
@@ -353,3 +353,108 @@ async def test_console_names_are_unique_ignoring_case_in_the_database(sessionmak
         with pytest.raises(IntegrityError):
             await session.execute(text(insert.format(name="FLEET", fill="b")))
         await session.rollback()
+
+
+async def test_a_follower_may_name_the_pool_token_it_registered_with(engine):
+    async with engine.connect() as conn:
+        columns = dict(
+            (
+                await conn.execute(
+                    text(
+                        "select table_name || '.' || column_name, is_nullable "
+                        "from information_schema.columns where (table_name, column_name) in "
+                        "(('followers', 'pool_token_id'), ('jobs', 'links_issued_at'), "
+                        "('pool_tokens', 'token_hash'))"
+                    )
+                )
+            ).all()
+        )
+        index = await conn.scalar(
+            text("select indexdef from pg_indexes where indexname = 'ix_followers_pool_token'")
+        )
+    assert columns == {
+        "followers.pool_token_id": "YES",
+        "jobs.links_issued_at": "YES",
+        "pool_tokens.token_hash": "NO",
+    }
+    assert "(pool_token_id, state)" in index
+
+
+async def test_pool_token_names_and_hashes_are_unique_in_the_database(sessionmaker):
+    insert = (
+        "insert into pool_tokens (id, name, token_hash, pool, created_by, registrations)"
+        " values (gen_random_uuid(), '{name}', repeat('{fill}', 64), 'gpu', 'test', 0)"
+    )
+    async with sessionmaker() as session:
+        await session.execute(text(insert.format(name="k8s", fill="a")))
+        with pytest.raises(IntegrityError):
+            await session.execute(text(insert.format(name="K8S", fill="b")))
+        await session.rollback()
+    async with sessionmaker() as session:
+        await session.execute(text(insert.format(name="k8s", fill="a")))
+        with pytest.raises(IntegrityError):
+            await session.execute(text(insert.format(name="other", fill="a")))
+        await session.rollback()
+
+
+MIGRATE_0006_SCRIPT = """
+import asyncio, sys
+import asyncpg
+from alembic import command
+from swarmscribe_leader.db.migrate import alembic_config, upgrade
+url = sys.argv[1]
+
+async def one(query):
+    conn = await asyncpg.connect(url)
+    try:
+        return await conn.fetchval(query)
+    finally:
+        await conn.close()
+
+upgrade(url)
+command.downgrade(alembic_config(url), "0005")
+assert asyncio.run(one("select to_regclass('public.pool_tokens')::text")) is None, "table left"
+assert asyncio.run(one(
+    "select count(*) from information_schema.columns where "
+    "(table_name, column_name) in (('followers', 'pool_token_id'), ('jobs', 'links_issued_at'))"
+)) == 0, "columns left"
+assert asyncio.run(one("select to_regclass('public.ix_followers_pool_token')::text")) is None
+# A follower that exists before 0006 must come through it with no pool token.
+asyncio.run(one(
+    "insert into followers (id, pool, capabilities, credential_hash, state, last_seen_at)"
+    " values (gen_random_uuid(), 'default', '{}', repeat('c', 64), 'active', now())"
+    " returning 1"
+))
+command.upgrade(alembic_config(url), "head")
+assert asyncio.run(one("select count(*) from followers where pool_token_id is null")) == 1
+"""
+
+
+def test_0006_downgrades_to_0005_and_upgrades_again(database_url):
+    # A separate database and process: the shared test database must stay at head.
+    name = "swarmscribe_migrate_roundtrip_0006"
+    url = urlunsplit(urlsplit(database_url)._replace(path="/" + name))
+    asyncio.run(_recreate(database_url, name))
+    try:
+        run = subprocess.run(
+            [sys.executable, "-c", MIGRATE_0006_SCRIPT, url], capture_output=True, timeout=120
+        )
+        assert run.returncode == 0, run.stderr.decode()[-2000:]
+
+        async def state() -> tuple[str, str | None, str | None]:
+            conn = await asyncpg.connect(url)
+            try:
+                return (
+                    await conn.fetchval("select version_num from alembic_version"),
+                    await conn.fetchval("select to_regclass('public.pool_tokens')::text"),
+                    await conn.fetchval(
+                        "select indexname from pg_indexes"
+                        " where indexname = 'ix_followers_pool_token'"
+                    ),
+                )
+            finally:
+                await conn.close()
+
+        assert asyncio.run(state()) == (head_revision(), "pool_tokens", "ix_followers_pool_token")
+    finally:
+        asyncio.run(_recreate(database_url, name, drop_only=True))

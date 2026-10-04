@@ -108,6 +108,15 @@ describe("FleetPage", () => {
     expect(within(region).getByRole("table", { name: /Leaders/ })).toBeInTheDocument();
   });
 
+  it("keeps the refresh time out of every live region", async () => {
+    withHistory(mockFetch().on("GET /api/fleet", reply(200, [EU])), "eu-1");
+    renderFleet();
+    const updated = await screen.findByText(/^Updated /);
+    expect(updated.closest("[aria-live], [role='status'], [role='alert'], [role='log']")).toBeNull();
+    // The count stays in a polite live region: it changes when the filter does.
+    expect(screen.getByText("1 leader").closest("[role='status'], [aria-live='polite']")).not.toBeNull();
+  });
+
   it("keeps the table when one leader history request fails", async () => {
     const mock = mockFetch().on("GET /api/fleet", reply(200, [EU, US]));
     mock.on("GET /api/leaders/eu-1/history?hours=24", reply(200, history()));

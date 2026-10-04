@@ -108,7 +108,7 @@ export function Sparkline({ points, now, name }: { points: HistoryPoint[]; now: 
         <circle key={`${p.x},${p.y}`} className="sparkline-dot" cx={p.x} cy={p.y} r={1.5} />
       ))}
       {g.down.map((dx) => (
-        <rect key={dx} className="sparkline-down" x={dx - 0.75} y={HEIGHT - PAD} width={1.5} height={PAD} />
+        <rect key={dx} className="sparkline-down" x={dx - 1.5} y={HEIGHT - PAD} width={3} height={PAD} />
       ))}
     </svg>
   );

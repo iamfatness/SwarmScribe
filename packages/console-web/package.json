@@ -5,7 +5,7 @@
   "description": "SwarmScribe fleet console web app (served by swarmscribe-console)",
   "type": "module",
   "engines": {
-    "node": ">=24 <25"
+    "node": ">=24.15 <25"
   },
   "scripts": {
     "build": "vite build && node scripts/check-dist.mjs",

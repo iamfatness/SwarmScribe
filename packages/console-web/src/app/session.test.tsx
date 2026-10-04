@@ -58,6 +58,21 @@ describe("SessionProvider", () => {
     expect(mock.callsTo("POST /api/session/logout")[0]?.headers["X-CSRF-Token"]).toBe(SESSION.csrf_token);
   });
 
+  it("does not navigate twice when the logout itself ends the session", async () => {
+    mockFetch().on("GET /api/session", reply(200, SESSION)).on("POST /api/session/logout", reply(401, { code: "unauthenticated" }));
+    const goToSignedOut = vi.spyOn(navigation, "goToSignedOut").mockImplementation(() => undefined);
+    vi.spyOn(navigation, "goToSignIn").mockImplementation(() => undefined);
+    vi.spyOn(navigation, "sessionEnded").mockReturnValue(true);
+    render(
+      <SessionProvider>
+        <Who />
+      </SessionProvider>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "Sign out" }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(goToSignedOut).not.toHaveBeenCalled();
+  });
+
   it("offers a retry when the console is down", async () => {
     let n = 0;
     mockFetch().on("GET /api/session", () =>

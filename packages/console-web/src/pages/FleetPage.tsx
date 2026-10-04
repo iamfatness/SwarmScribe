@@ -142,12 +142,16 @@ export function FleetPage() {
         <h1>Fleet</h1>
         <LabelFilter leaders={data} value={label} />
       </div>
-      <p className="muted" aria-live="polite">
+      <p className="muted" role="status">
         {shown.length === data.length
           ? `${data.length} ${data.length === 1 ? "leader" : "leaders"}`
           : `${shown.length} of ${data.length} leaders`}
-        {updatedAt !== null && ` · updated ${formatTime(new Date(updatedAt).toISOString(), now)}`}
       </p>
+      {updatedAt !== null && (
+        <p className="muted">
+          Updated {formatTime(new Date(updatedAt).toISOString(), now)}
+        </p>
+      )}
       {error !== null && (
         <p className="notice" role="alert">
           Could not refresh the fleet: {describeError(error).title} Showing the last figures.

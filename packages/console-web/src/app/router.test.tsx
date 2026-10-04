@@ -54,11 +54,23 @@ describe("router", () => {
       </RouterProvider>,
     );
     const link = screen.getByRole("link", { name: "Jobs" });
-    for (const modifier of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { altKey: true }]) {
-      // fireEvent.click returns false when something called preventDefault.
-      expect(fireEvent.click(link, modifier)).toBe(true);
+    // Record whether the router claimed the click, then cancel it ourselves so jsdom does
+    // not try (and complain) to navigate. This listener runs after React's.
+    const claimed: boolean[] = [];
+    const record = (event: Event) => {
+      claimed.push(event.defaultPrevented);
+      event.preventDefault();
+    };
+    document.addEventListener("click", record);
+    try {
+      for (const modifier of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { altKey: true }]) {
+        fireEvent.click(link, modifier);
+      }
+      fireEvent.click(link, { button: 1 });
+    } finally {
+      document.removeEventListener("click", record);
     }
-    expect(fireEvent.click(link, { button: 1 })).toBe(true);
+    expect(claimed).toEqual([false, false, false, false, false]);
     expect(screen.getByText("at /")).toBeInTheDocument();
   });
 });

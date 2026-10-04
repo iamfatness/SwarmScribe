@@ -38,6 +38,12 @@ export function setUnauthenticatedHandler(handler: () => void): void {
   onUnauthenticated = handler;
 }
 
+/** Tests only: forget the CSRF token and the 401 handler. */
+export function resetClientForTests(): void {
+  csrfToken = null;
+  onUnauthenticated = () => undefined;
+}
+
 export function isAbort(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
 }

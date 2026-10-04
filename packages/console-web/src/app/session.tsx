@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import { api, setCsrfToken, setUnauthenticatedHandler } from "../api/client";
 import type { SessionInfo } from "../api/types";
 import { ErrorPanel } from "../components/ErrorPanel";
-import { goToSignIn, goToSignedOut } from "./navigation";
+import { goToSignIn, goToSignedOut, sessionEnded } from "./navigation";
 
 interface SessionValue {
   session: SessionInfo;
@@ -53,7 +53,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // offers the way back; rethrowing here would only be an unhandled rejection.
     } finally {
       setCsrfToken(null);
-      goToSignedOut();
+      // A 401 from the logout already sent the person to sign in; do not abort that.
+      if (!sessionEnded()) goToSignedOut();
     }
   }, []);
 

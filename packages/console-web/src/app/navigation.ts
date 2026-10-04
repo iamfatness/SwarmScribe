@@ -7,6 +7,8 @@
 // eslint-disable-next-line no-control-regex -- matching control characters is the point
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
 
+const DOT_SEGMENT = /(?:^|\/)\.\.?(?:\/|\?|#|$)/;
+
 const LOCAL_BASE = "https://console.invalid";
 
 /** A path on this console to come back to after sign-in, or "/". */
@@ -17,7 +19,8 @@ export function safeReturnTo(value: string | null): string {
     !value.startsWith("/") ||
     value.startsWith("//") ||
     value.includes("\\") ||
-    CONTROL.test(value)
+    CONTROL.test(value) ||
+    DOT_SEGMENT.test(value)
   ) {
     return "/";
   }

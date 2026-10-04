@@ -491,7 +491,9 @@ uv run pytest -m smoke   # downloads tiny.en and runs the real model
 uv run ruff check .
 ```
 
-The web app (Node 24):
+The web app (Node 24.15 or later in the 24 line; jsdom's dependencies need it, and
+`.npmrc` sets `engine-strict`, so `npm ci` refuses an older Node. Upgrade Node
+rather than relaxing that):
 
 ```
 cd packages/console-web

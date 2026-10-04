@@ -386,6 +386,16 @@ td.num {
   color: var(--muted);
 }
 
+td,
+th {
+  overflow-wrap: anywhere;
+}
+
+.cell-note,
+.cell-list {
+  max-width: 28rem;
+}
+
 .cell-note {
   display: block;
   font-size: 0.8125rem;

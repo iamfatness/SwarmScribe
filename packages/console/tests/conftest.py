@@ -29,6 +29,7 @@ from console_testkit import (  # noqa: E402
     MASTER_KEY,
     PUBLIC_URL,
     TEST_KEY,
+    FakeLeader,
     recreate,
     with_database,
 )
@@ -45,6 +46,7 @@ from swarmscribe_console.db.models import (  # noqa: E402
     Leader,
     RoleGrant,
 )
+from swarmscribe_console.leader_client import LeaderClient  # noqa: E402
 from swarmscribe_console.leaders import sealing_context  # noqa: E402
 from swarmscribe_console.sessions import SESSION_COOKIE, create_session  # noqa: E402
 from swarmscribe_leader.auth.roles import RoleLookupFailed  # noqa: E402
@@ -409,3 +411,15 @@ def graph():
 @pytest.fixture
 def google_groups():
     return FakeGoogleGroups()
+
+
+@pytest.fixture
+def fake_leader():
+    return FakeLeader()
+
+
+@pytest.fixture
+async def leader_client(fake_leader):
+    made = LeaderClient(transport=fake_leader.transport)
+    yield made
+    await made.aclose()

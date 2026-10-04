@@ -66,6 +66,16 @@ class Settings(BaseSettings):
     session_idle_seconds: int = Field(default=3600, gt=0)
     login_attempt_seconds: int = Field(default=600, gt=0)
 
+    # The poller and the proxy (fleet console spec 5.3, 5.4).
+    poll_interval_seconds: float = Field(default=15.0, gt=0)
+    poll_timeout_seconds: float = Field(default=5.0, gt=0)
+    poll_tick_seconds: float = Field(default=1.0, gt=0)
+    poll_concurrency: int = Field(default=8, gt=0)
+    unreachable_after_failures: int = Field(default=3, gt=0)
+    history_hours: int = Field(default=24, gt=0, le=24 * 7)
+    prune_interval_seconds: float = Field(default=3600.0, gt=0)
+    proxy_timeout_seconds: float = Field(default=10.0, gt=0)
+
     @field_validator("database_url")
     @classmethod
     def _database_url_is_set(cls, value: SecretStr) -> SecretStr:

@@ -138,11 +138,20 @@ export function validateLocation(form: LocationForm): LocationErrors {
     const right = labelProblem(form.right);
     if (left !== null) errors.left = left;
     if (right !== null) errors.right = right;
-    if (left === null && right === null && form.left.toLowerCase() === form.right.toLowerCase()) {
+    if (left === null && right === null && fold(form.left) === fold(form.right)) {
       errors.right = "The two labels must differ, ignoring upper and lower case.";
     }
   }
   return errors;
+}
+
+/**
+ * An approximation of Python's casefold, for the labels-differ rule: NFKC, lower case, and
+ * the one common full fold lower-casing misses (sharp s to ss). It is not exact: the leader is
+ * the authority and can still refuse a pair this accepts.
+ */
+function fold(text: string): string {
+  return text.normalize("NFKC").toLowerCase().replaceAll("\u00df", "ss");
 }
 
 /**

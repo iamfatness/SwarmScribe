@@ -1,6 +1,17 @@
-// Looks for a string in the React state the app holds right now: every mounted component's
-// props and hook state. Used to prove a secret did not outlive its dialog. The DOM, and what
-// a closure captured, are checked elsewhere; this reaches what React itself keeps.
+// Looks for a string in the props and hook state of every component React has mounted right
+// now, to show a secret did not outlive its dialog.
+//
+// What it can prove: the string is in no mounted component's props or hook state (nested
+// plain objects, arrays and linked hook state included).
+// What it cannot see: closures (a function's captured variables), DOM nodes and refs (the
+// page's HTML is checked separately), Map and Set contents, module-level variables, and
+// React's alternate (previous-render) fibers. A pass is evidence, not a proof of absence.
+// It throws, rather than quietly answering "not found", if a structure is deeper than it will
+// search.
+
+const MAX_DEPTH = 500;
+/** Fiber and element links that lead to the rest of the tree or the DOM, not to state. */
+const SKIPPED = new Set(["return", "alternate", "stateNode", "_owner", "_store"]);
 
 interface FiberLike {
   child: FiberLike | null;
@@ -11,10 +22,13 @@ interface FiberLike {
 
 function holds(value: unknown, needle: string, seen: Set<object>, depth: number): boolean {
   if (typeof value === "string") return value.includes(needle);
-  if (value === null || typeof value !== "object" || depth > 12) return false;
+  if (value === null || typeof value !== "object") return false;
   if (value instanceof Node || value instanceof Window || seen.has(value)) return false;
+  if (depth > MAX_DEPTH) throw new Error("reactStateHolds: structure too deep to search");
   seen.add(value);
-  return Object.values(value).some((inner) => holds(inner, needle, seen, depth + 1));
+  return Object.entries(value).some(
+    ([key, inner]) => !SKIPPED.has(key) && holds(inner, needle, seen, depth + 1),
+  );
 }
 
 function walk(fiber: FiberLike | null, needle: string, seen: Set<object>): boolean {

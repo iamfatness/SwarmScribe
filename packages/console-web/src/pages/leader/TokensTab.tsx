@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { api, leaderPath } from "../../api/client";
 import { can } from "../../api/roles";
 import type { TokenCreated, TokenIn, TokenOut } from "../../api/types";
@@ -46,6 +46,11 @@ function validateToken(pool: string, days: string, uses: string): TokenErrors {
   return errors;
 }
 
+/** A held Enter repeats: only its first press may submit, or it would mint tokens. */
+function ignoreRepeatedEnter(event: KeyboardEvent<HTMLInputElement>) {
+  if (event.key === "Enter" && event.repeat) event.preventDefault();
+}
+
 function NumberField({
   label,
   field,
@@ -78,6 +83,7 @@ function NumberField({
           aria-required
           aria-invalid={error === undefined ? undefined : true}
           aria-describedby={error === undefined ? undefined : errorId}
+          onKeyDown={ignoreRepeatedEnter}
           onChange={(event) => onChange(event.target.value)}
         />
       </label>
@@ -108,8 +114,15 @@ function CreateTokenDialog({
   const poolId = useId();
   const poolErrorId = useId();
 
+  // While the request is in flight the dialog cannot be dismissed: a create that was
+  // "cancelled" would still happen, and its token must be shown, never lost.
+  const dismiss = () => {
+    if (!action.busy) action.close();
+  };
+
   const submit = (event: FormEvent) => {
     event.preventDefault();
+    if (action.busy) return;
     const found = validateToken(pool, days, uses);
     setErrors(found);
     const first = FIELD_ORDER.find((field) => found[field] !== undefined);
@@ -131,7 +144,7 @@ function CreateTokenDialog({
   };
 
   return (
-    <Dialog title={`Create a join token for ${leaderName}`} onClose={action.close}>
+    <Dialog title={`Create a join token for ${leaderName}`} onClose={dismiss}>
       <form ref={formRef} className="form-grid" noValidate onSubmit={submit}>
         <div>
           <label className="field" htmlFor={poolId}>
@@ -144,6 +157,7 @@ function CreateTokenDialog({
             aria-required
             aria-invalid={errors.pool === undefined ? undefined : true}
             aria-describedby={errors.pool === undefined ? undefined : poolErrorId}
+            onKeyDown={ignoreRepeatedEnter}
             onChange={(event) => setPool(event.target.value)}
           />
           {errors.pool !== undefined && (
@@ -172,7 +186,12 @@ function CreateTokenDialog({
         />
         {action.error !== null && <ErrorPanel error={action.error} />}
         <div className="dialog-buttons">
-          <button type="button" className="button" onClick={action.close}>
+          <button
+            type="button"
+            className="button"
+            aria-disabled={action.busy || undefined}
+            onClick={dismiss}
+          >
             Cancel
           </button>
           <button
@@ -191,8 +210,8 @@ function CreateTokenDialog({
 /**
  * The join token's plaintext, shown once. It lives only in this dialog's props: the parent
  * drops it when the dialog closes, and nothing writes it to the URL, storage, the title or a
- * log. The dialog cannot be dismissed by accident: the first Escape before the token is
- * copied asks and stays open; "I have stored it" is where focus starts.
+ * log. It cannot be dismissed by accident: until the token is copied, Escape and "I have
+ * stored it" both ask first and close on the second go; focus starts on the token itself.
  */
 export function TokenCreatedDialog({
   created,
@@ -203,14 +222,14 @@ export function TokenCreatedDialog({
 }) {
   const [copied, setCopied] = useState<"no" | "yes" | "failed">("no");
   const [asked, setAsked] = useState(false);
-  const storedRef = useRef<HTMLButtonElement>(null);
   const tokenRef = useRef<HTMLInputElement>(null);
   const warningId = useId();
 
-  // Dialog focuses its first control when it opens; this runs after it (a parent's effect
-  // follows its child's) and moves focus to the safe, explicit choice.
+  // Focus starts on the token, selected: a stray Enter then does nothing, and a copy by hand
+  // is one keystroke. (Dialog focuses its first control; this runs after it.)
   useEffect(() => {
-    storedRef.current?.focus();
+    tokenRef.current?.focus();
+    tokenRef.current?.select();
   }, []);
 
   const copy = async () => {
@@ -233,10 +252,11 @@ export function TokenCreatedDialog({
   let status = "";
   if (copied === "yes") status = "Copied to the clipboard.";
   else if (copied === "failed") status = "Copying failed: select the token and copy it.";
-  else if (asked) {
-    status =
-      "The token is not shown again. Press Escape again to close, or choose I have stored it.";
-  }
+  // The question is its own announcement, shown beside a failure text, never replaced by it.
+  const question = asked
+    ? "The token is not shown again. To close without copying it, press Escape again or " +
+      "choose I have stored it again."
+    : "";
 
   return (
     <Dialog title="Join token created" onClose={requestClose} describedBy={warningId}>
@@ -260,16 +280,36 @@ export function TokenCreatedDialog({
       <p className="action-notice" role="status">
         {status}
       </p>
+      <p className="action-notice" role="status">
+        {question}
+      </p>
       <div className="dialog-buttons">
         <button type="button" className="button" onClick={() => void copy()}>
           Copy token
         </button>
-        <button ref={storedRef} type="button" className="button button-primary" onClick={onClose}>
+        <button type="button" className="button button-primary" onClick={requestClose}>
           I have stored it
         </button>
       </div>
     </Dialog>
   );
+}
+
+/**
+ * Shows created tokens one at a time, oldest first. Each gets its own dialog (keyed by the
+ * token id, so its "copied" state starts fresh), and a token that arrives while another is
+ * showing waits its turn: none is ever dropped or overwritten.
+ */
+export function TokenReveal({
+  queue,
+  onDismiss,
+}: {
+  queue: TokenCreated[];
+  onDismiss: (token: TokenCreated) => void;
+}) {
+  const head = queue[0];
+  if (head === undefined) return null;
+  return <TokenCreatedDialog key={head.id} created={head} onClose={() => onDismiss(head)} />;
 }
 
 function tokenState(token: TokenOut, now: number): string {
@@ -282,8 +322,9 @@ function tokenState(token: TokenOut, now: number): string {
 function TokenList({ leader }: TabProps) {
   const read = useLeaderRead<TokenOut[]>(leader.name, "tokens");
   const [creating, setCreating] = useState(false);
-  // The id of the token just made, never its plaintext: that is `created`'s alone, below.
-  const [created, setCreated] = useState<TokenCreated | null>(null);
+  // Tokens just made, waiting to be shown once each. The plaintext lives here and in the
+  // dialog's props only, and leaves with the dismissal.
+  const [created, setCreated] = useState<TokenCreated[]>([]);
   const [revoking, setRevoking] = useState<TokenOut | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -359,20 +400,20 @@ function TokenList({ leader }: TabProps) {
             // One render: the form goes and the one-time dialog comes, focus returning to
             // the Create button first so the one-time dialog's own return target is right.
             setCreating(false);
-            setCreated(token);
+            setCreated((queue) =>
+              queue.some((t) => t.id === token.id) ? queue : [...queue, token],
+            );
           }}
         />
       )}
-      {created !== null && (
-        <TokenCreatedDialog
-          created={created}
-          onClose={() => {
-            setNotice(`Join token ${shortId(created.id)} is created.`);
-            setCreated(null);
-            read.refresh();
-          }}
-        />
-      )}
+      <TokenReveal
+        queue={created}
+        onDismiss={(token) => {
+          setNotice(`Join token ${shortId(token.id)} is created.`);
+          setCreated((queue) => queue.filter((t) => t.id !== token.id));
+          read.refresh();
+        }}
+      />
       {revoking !== null && (
         <ConfirmDialog
           title={`Revoke join token ${shortId(revoking.id)}?`}

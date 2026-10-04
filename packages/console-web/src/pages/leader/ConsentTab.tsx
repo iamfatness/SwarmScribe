@@ -16,6 +16,11 @@ export function ConsentTab({ leader }: TabProps) {
       <ReadState read={read} what="the consent report">
         {(report) => (
           <>
+            {report.truncated && (
+              <p className="notice">
+                The report is cut short; the leader holds more flagged transcripts.
+              </p>
+            )}
             <h3>By location</h3>
             {report.locations.length === 0 ? (
               <p>This leader has no locations.</p>

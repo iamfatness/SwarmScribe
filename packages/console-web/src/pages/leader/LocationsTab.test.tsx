@@ -122,6 +122,8 @@ describe("location form rules", () => {
     ["a".repeat(41), "Right", "left"],
     ["Left", "Li\nne", "right"],
     ["Host", "HOST", "right"],
+    ["Straße", "STRASSE", "right"],
+    ["ﬁn", "FIN", "right"],
   ])("refuses the labels %j and %j", (left, right, field) => {
     expect(Object.keys(validateLocation({ ...split, left, right }))).toEqual([field]);
   });

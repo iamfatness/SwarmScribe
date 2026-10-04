@@ -28,7 +28,8 @@ describe("consent tab", () => {
       "intake10120",
     );
     expect(screen.getByText("intake: transcripts/b.json")).toBeInTheDocument();
-    expect(screen.getByText(/The report is cut short/)).toBeInTheDocument();
+    // Above the tables, where it is seen first, and below them.
+    expect(screen.getAllByText(/The report is cut short/)).toHaveLength(2);
     // Only the report was read, once, with no query the console does not need.
     expect(mock.callsTo(REPORT)).toHaveLength(1);
   });

@@ -279,7 +279,7 @@ describe("locations tab", () => {
     expect(name).toHaveAttribute("aria-invalid", "true");
     expect(root).toHaveAttribute("aria-invalid", "true");
     expect(name).toHaveAccessibleDescription(/Start with a letter or digit/);
-    expect(root).toHaveAccessibleDescription(/absolute/);
+    expect(root).toHaveAccessibleDescription(/absolute folder path.*C:\\recordings/);
     expect(within(dialog).getAllByRole("alert")).toHaveLength(2);
     expect(name).toHaveFocus();
     expect(within(dialog).getByRole("textbox", { name: "Pool" })).not.toHaveAttribute(

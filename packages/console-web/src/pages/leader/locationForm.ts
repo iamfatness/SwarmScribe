@@ -64,7 +64,7 @@ const NAME_MESSAGE =
   "Start with a letter or digit, then use only letters, digits, dots, underscores and hyphens, " +
   "up to 100 characters.";
 const ROOT_MESSAGE =
-  "Enter an absolute folder path on the leader, such as /srv/intake or C:\recordings " +
+  "Enter an absolute folder path on the leader, such as /srv/intake or C:\\recordings " +
   "(up to 1000 characters).";
 const PREFIX_MESSAGE =
   "Leave empty, or enter a relative folder ending in one /, such as incoming/ " +

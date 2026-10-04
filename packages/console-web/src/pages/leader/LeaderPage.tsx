@@ -7,6 +7,7 @@ import { HealthBadge } from "../../components/HealthBadge";
 import { formatTime } from "../../lib/format";
 import { NotFoundPage } from "../NotFoundPage";
 import { JobsTab } from "./JobsTab";
+import { LocationsTab } from "./LocationsTab";
 import { PoolsTab } from "./PoolsTab";
 import { TABS, leaderUrl, type TabId } from "./tabs";
 
@@ -16,6 +17,8 @@ function TabContent({ tab, leader }: { tab: TabId; leader: FleetLeader }) {
       return <PoolsTab leader={leader} />;
     case "jobs":
       return <JobsTab leader={leader} />;
+    case "locations":
+      return <LocationsTab leader={leader} />;
   }
 }
 

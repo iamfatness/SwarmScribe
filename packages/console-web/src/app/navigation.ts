@@ -36,7 +36,33 @@ export function signInUrl(returnTo: string): string {
   return back === "/" ? "/sign-in" : `/sign-in?return_to=${encodeURIComponent(back)}`;
 }
 
+// A 401 ends the session for good: the first one latches, so concurrent callers navigate
+// once, and every poll stops (usePoll asks sessionEnded()). The latch lives until the page
+// is replaced, which is what the full-page load does.
+let ended = false;
+
+export function sessionEnded(): boolean {
+  return ended;
+}
+
+/** Tests only: clear the latch. */
+export function resetSessionEndedForTests(): void {
+  ended = false;
+}
+
+function onSignInPage(): boolean {
+  const { pathname } = window.location;
+  return pathname === "/sign-in" || pathname.startsWith("/sign-in/");
+}
+
+/**
+ * Sends the person to sign in with a full-page load, once. On the sign-in page itself there
+ * is nowhere to go (a reload would loop): the page shows its normal content.
+ */
 export function goToSignIn(): void {
+  if (ended) return;
+  ended = true;
+  if (onSignInPage()) return;
   window.location.assign(signInUrl(window.location.pathname + window.location.search));
 }
 

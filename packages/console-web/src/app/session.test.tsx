@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
 import { fail, mockFetch, reply } from "../test/fetchMock";
 import { SESSION } from "../test/fixtures";
@@ -115,8 +115,29 @@ describe("safeReturnTo", () => {
 });
 
 describe("goToSignIn", () => {
+  beforeEach(() => {
+    navigation.resetSessionEndedForTests();
+  });
   afterEach(() => {
     vi.unstubAllGlobals();
+    navigation.resetSessionEndedForTests();
+  });
+
+  it("navigates once however many 401s arrive", () => {
+    const assign = vi.fn();
+    vi.stubGlobal("location", { pathname: "/leaders/eu-1/jobs", search: "", assign });
+    navigation.goToSignIn();
+    navigation.goToSignIn();
+    expect(assign).toHaveBeenCalledTimes(1);
+    expect(navigation.sessionEnded()).toBe(true);
+  });
+
+  it("does not reload when already on the sign-in page", () => {
+    const assign = vi.fn();
+    vi.stubGlobal("location", { pathname: "/sign-in", search: "?return_to=%2F", assign });
+    navigation.goToSignIn();
+    expect(assign).not.toHaveBeenCalled();
+    expect(navigation.sessionEnded()).toBe(true);
   });
 
   it("does a full-page load of /sign-in carrying only a local return_to", () => {

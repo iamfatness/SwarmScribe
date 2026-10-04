@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useEffectEvent, useState } from "react";
-import { isAbort } from "../api/client";
+import { ApiError, isAbort } from "../api/client";
 import { isIdle, onResume } from "./activity";
+import { sessionEnded } from "./navigation";
 
 export interface PollState<T> {
   data: T | undefined;
@@ -46,11 +47,16 @@ export function usePoll<T>(
     let timer: ReturnType<typeof setTimeout> | undefined;
     let stopped = false;
     let first = true;
+    let inFlight = false;
 
+    // Exactly one timer at a time, and never once the poll is over.
     const schedule = () => {
+      clearTimeout(timer);
       if (!stopped && intervalMs !== null) timer = setTimeout(() => void run(), intervalMs);
     };
     const run = async () => {
+      // Never overlap requests: a resume during a load is covered by that load's reschedule.
+      if (stopped || inFlight || sessionEnded()) return;
       clearTimeout(timer);
       const paused = document.visibilityState === "hidden" || isIdle();
       if (paused && !first) {
@@ -58,6 +64,7 @@ export function usePoll<T>(
         return;
       }
       first = false;
+      inFlight = true;
       try {
         const data = await loadNow(controller.signal);
         if (stopped) return;
@@ -71,6 +78,13 @@ export function usePoll<T>(
           loading: false,
           updatedAt: prev.key === key ? prev.updatedAt : null,
         }));
+        // A 401 is terminal: the session is over, so this poll never fires again.
+        if (error instanceof ApiError && error.status === 401) {
+          stopped = true;
+          return;
+        }
+      } finally {
+        inFlight = false;
       }
       schedule();
     };

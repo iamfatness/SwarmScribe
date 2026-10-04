@@ -99,6 +99,8 @@ export function Link({ to, onClick, children, ...rest }: LinkProps) {
   const handle = (event: MouseEvent<HTMLAnchorElement>) => {
     onClick?.(event);
     if (
+      (rest.target !== undefined && rest.target !== "_self") ||
+      rest.download !== undefined ||
       event.defaultPrevented ||
       event.button !== 0 ||
       event.metaKey ||

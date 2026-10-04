@@ -16,8 +16,12 @@ function storage(): Storage | null {
 }
 
 export function readTheme(): ThemeChoice {
-  const value = storage()?.getItem(THEME_KEY);
-  return value === "light" || value === "dark" ? value : "system";
+  try {
+    const value = storage()?.getItem(THEME_KEY);
+    return value === "light" || value === "dark" ? value : "system";
+  } catch {
+    return "system";
+  }
 }
 
 export function applyTheme(choice: ThemeChoice): void {

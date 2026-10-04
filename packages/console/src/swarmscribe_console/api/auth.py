@@ -32,7 +32,6 @@ from ..oidc import (
 from ..principals import principals_for
 from ..sessions import (
     LOGIN_COOKIE,
-    SESSION_COOKIE,
     clear_login_cookie,
     clear_session_cookie,
     create_session,
@@ -43,7 +42,7 @@ from ..sessions import (
     set_login_cookie,
     set_session_cookie,
 )
-from .deps import _session_cookie, settings_of
+from .deps import session_cookie, settings_of
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth")
@@ -109,7 +108,7 @@ async def login(request: Request, provider: str, return_to: str | None = None) -
         raise NotFound("no such sign-in provider", code="unknown_provider")
     settings = settings_of(request)
     now = utcnow()
-    brought, ambiguous = _session_cookie(request)
+    brought, ambiguous = session_cookie(request)
     # A sign-in never builds on a session the browser already holds: end it now (fixation),
     # and remember its hash so the callback ends it too if it is still there.
     prior = hash_secret(brought) if is_token(brought) else None
@@ -221,7 +220,7 @@ async def _complete(request: Request) -> Response:
                 "Ask a console administrator for one.",
             )
         # Never adopt a session id the browser brought with it (session fixation).
-        await end_session(session, request.cookies.get(SESSION_COOKIE))
+        await end_session(session, session_cookie(request)[0])
         await end_session_by_hash(session, attempt.prior_session_hash)
         await prune_expired(session, now=now, idle=idle)
         session_id = await create_session(

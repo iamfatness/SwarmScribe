@@ -494,13 +494,66 @@ async def test_an_authorization_code_works_once(app, idp):
         )
 
 
-async def test_a_token_for_the_other_provider_is_refused(client, idp, operators, sessionmaker):
-    """Started at Entra ID, answered with a valid Google token."""
+async def test_a_valid_token_of_the_other_provider_is_refused(
+    client, app, idp, factory, sessionmaker
+):
+    """Started at Entra ID, answered with a perfectly valid Google token for the same nonce.
+    The token endpoint is replaced so the answer reaches the console's own provider check."""
+    await factory.grant("viewer", "all", "email", "person@example.org")
     started = await client.get("/auth/login", params={"provider": "entra"})
-    callback = idp.authorize(started.headers["location"], groups=[GROUPS["operator"]])
-    code = dict(httpx.URL(callback).params)["code"]
-    idp.codes[code]["provider"] = "google"
-    assert (await client.get(callback)).status_code in (401, 502)
+    params = dict(httpx.URL(started.headers["location"]).params)
+    google_token = idp.id_token("google", nonce=params["nonce"])
+
+    def token_endpoint(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"id_token": google_token})
+
+    app.state.idp_transport = httpx.MockTransport(token_endpoint)
+    answer = await client.get(f"/auth/callback?code=abc&state={params['state']}")
+    assert answer.status_code == 401
+    assert await _sessions(sessionmaker) == []
+
+
+async def test_a_non_ascii_email_that_lowercases_to_ascii_gets_no_email_principal(
+    client, idp, factory, sessionmaker
+):
+    """U+212A (Kelvin sign) lowercases to "k". The leader's verifier folds the email before
+    the console sees it, so the console must judge the raw claim."""
+    await factory.grant("viewer", "all", "email", "kelvin@example.org")
+    await factory.grant("viewer", "all", "domain", "example.org")
+    answer = await sign_in(
+        client, idp, provider="google", email="Kelvin@example.org", hd="example.org"
+    )
+    assert answer.status_code == 403
+    assert cookie_attributes(answer, SESSION_COOKIE) is None
+    assert await _sessions(sessionmaker) == []
+
+
+async def test_a_non_ascii_email_is_not_looked_up_in_google_groups(
+    client, idp, factory, google_groups, sessionmaker
+):
+    google_groups.groups["kelvin@example.org"] = {"operators@example.org"}
+    await factory.grant("operator", "all", "google_group", "operators@example.org")
+    answer = await sign_in(client, idp, provider="google", email="Kelvin@example.org")
+    assert answer.status_code == 403
+    assert await _sessions(sessionmaker) == []
+
+
+async def test_the_ascii_spelling_of_that_email_does_sign_in(client, idp, factory):
+    await factory.grant("viewer", "all", "email", "kelvin@example.org")
+    answer = await sign_in(
+        client, idp, provider="google", email="Kelvin@Example.org", hd="example.org"
+    )
+    assert answer.status_code == 200
+
+
+async def test_a_google_group_outage_fails_closed(
+    client, idp, factory, google_groups, sessionmaker
+):
+    await factory.grant("viewer", "all", "domain", "example.org")  # would admit without groups
+    google_groups.failing = True
+    answer = await sign_in(client, idp, provider="google", hd="example.org")
+    assert answer.status_code == 503
+    assert cookie_attributes(answer, SESSION_COOKIE) is None
     assert await _sessions(sessionmaker) == []
 
 
@@ -553,7 +606,7 @@ async def test_principals_are_lowercase_ascii_whatever_the_provider_sends():
         GOOGLE_ISSUER,
         "s",
         "Person@Example.ORG",
-        {"hd": "Example.ORG", "email_verified": True},
+        {"hd": "Example.ORG", "email": "Person@Example.ORG", "email_verified": True},
     )
     found = await principals_for(google, graph=None, google_groups=Groups())
     assert found == {
@@ -563,8 +616,6 @@ async def test_principals_are_lowercase_ascii_whatever_the_provider_sends():
     }
     assert all(p.isascii() and p == p.lower() for p in found)  # Kelvin sign never becomes "k"
 
-    lookalike = Identity("google", GOOGLE_ISSUER, "s", "p@Kexample.org", {"hd": "example.org"})
-    assert await principals_for(lookalike, graph=None, google_groups=None) == frozenset()
 
 
 # --- fixation: the session the browser already had ---------------------------------------

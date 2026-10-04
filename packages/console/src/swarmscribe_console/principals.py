@@ -10,8 +10,8 @@ Entra ID emails are not principals; the leader does not map them either.
 
 Principals are lowercase ASCII, always: grants are matched by exact string (grants.py does not
 normalise), so a principal that is not in that form can only fail closed. Text that is not
-ASCII is dropped before lowercasing, because some lowercase to ASCII (U+212A KELVIN SIGN
-becomes "k") and would impersonate an ASCII name.
+ASCII is refused before lowercasing, on the raw claim, because some lowercase to ASCII
+(U+212A KELVIN SIGN becomes "k") and would impersonate an ASCII name.
 
 This module re-implements two private helpers of the leader's swarmscribe_leader.auth.roles,
 so that the leader's rules apply here without importing its underscore names. Keep them in
@@ -79,15 +79,23 @@ async def principals_for(
         found |= {p for p in (_entra_group(group) for group in groups) if p}
         return frozenset(found)
 
-    email = identity.email
+    # The RAW email claim decides, not identity.email: the leader's verifier has already
+    # lowercased that, and lowercasing maps some non-ASCII letters to ASCII (U+212A KELVIN SIGN
+    # becomes "k"), so the ASCII test would see an impersonating address as plain ASCII. A
+    # non-ASCII email yields no email, domain or group-by-email principal; the person may
+    # still sign in through the principals that remain (none, for Google, so a 403).
+    raw = claims.get("email")
+    email = raw.lower() if isinstance(raw, str) and raw.isascii() else None
     if email and google_groups is not None:
+        # Group names come back from the directory already lowercased upstream; the leader's
+        # client does that, so they cannot be re-checked here.
         found |= {
             f"google_group:{group.lower()}"
             for group in await google_groups.group_emails(email)
             if group.isascii()
         }
-    if email and email.isascii():
-        address = email.lower()
+    if email:
+        address = email
         local, at, domain = address.partition("@")
         if local and at and domain and "@" not in domain:
             hosted = _hosted_domain(claims)

@@ -34,7 +34,7 @@ def keys_of(request: Request) -> ConsoleKeys:
     return request.app.state.keys
 
 
-def _session_cookie(request: Request) -> tuple[str | None, bool]:
+def session_cookie(request: Request) -> tuple[str | None, bool]:
     """The session cookie, and whether the request is ambiguous: two cookies of that name (a
     sibling-subdomain or injected duplicate) are refused, never guessed between."""
     seen = [
@@ -47,7 +47,7 @@ def _session_cookie(request: Request) -> tuple[str | None, bool]:
 
 
 async def signed_in(request: Request) -> SignedIn:
-    cookie, ambiguous = _session_cookie(request)
+    cookie, ambiguous = session_cookie(request)
     if ambiguous:
         raise Unauthenticated("sign in to the console first", clear_cookie=True)
     idle = timedelta(seconds=settings_of(request).session_idle_seconds)

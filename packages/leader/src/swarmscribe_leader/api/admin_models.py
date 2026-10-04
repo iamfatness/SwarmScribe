@@ -55,10 +55,20 @@ class LocationStatus(BaseModel):
     consented: int
 
 
+class PoolFollowers(BaseModel):
+    pool: str
+    active: int = 0
+    draining: int = 0
+    revoked: int = 0
+    gone: int = 0
+
+
 class Status(BaseModel):
     jobs: dict[str, int]
     pools: list[PoolQueue]
     followers: dict[str, int]
+    # Added for the fleet console's poller; additive, so older clients ignore it.
+    follower_pools: list[PoolFollowers] = Field(default_factory=list)
     completed_last_hour: int
     failed_attempts_last_day: int
     locations: list[LocationStatus]

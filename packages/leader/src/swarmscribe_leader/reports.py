@@ -105,11 +105,19 @@ async def status_summary(session: AsyncSession) -> dict[str, Any]:
         )
     ).all():
         pools.setdefault(pool, {"pool": pool, "queued": 0, "leased": 0})[state] = count
+    # One aggregate over (pool, state) gives both the totals and the per-pool counts.
     followers = dict.fromkeys(FOLLOWER_STATES, 0)
-    for state, count in (
-        await session.execute(select(Follower.state, func.count()).group_by(Follower.state))
+    follower_pools: dict[str, dict[str, Any]] = {}
+    for pool, state, count in (
+        await session.execute(
+            select(Follower.pool, Follower.state, func.count()).group_by(
+                Follower.pool, Follower.state
+            )
+        )
     ).all():
-        followers[state] = count
+        followers[state] = followers.get(state, 0) + count
+        row = follower_pools.setdefault(pool, {"pool": pool, **dict.fromkeys(FOLLOWER_STATES, 0)})
+        row[state] = row.get(state, 0) + count
     completed_last_hour = await session.scalar(
         select(func.count())
         .select_from(Job)
@@ -142,6 +150,7 @@ async def status_summary(session: AsyncSession) -> dict[str, Any]:
         "jobs": jobs,
         "pools": [pools[name] for name in sorted(pools)],
         "followers": followers,
+        "follower_pools": [follower_pools[name] for name in sorted(follower_pools)],
         "completed_last_hour": completed_last_hour or 0,
         "failed_attempts_last_day": failed_attempts or 0,
         "locations": [

@@ -5,7 +5,7 @@ import uuid
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import event, select, update
 from sqlalchemy.exc import IntegrityError
 from swarmscribe_leader.auth.consoles import create_console
 from swarmscribe_leader.auth.followers import create_join_token
@@ -1328,3 +1328,51 @@ async def test_a_console_meets_each_routes_role_boundary_like_a_person(
             assert (refused.status_code, refused.json()["code"]) == (403, "forbidden")
     allowed = await admin_client.request(method, path, headers=delegated(full, role), json=body)
     assert allowed.status_code < 400, allowed.text
+
+
+# --- followers by pool in the status ------------------------------------------------------
+
+
+async def test_status_counts_followers_by_pool_and_state(admin_client, idp, factory):
+    for pool, state in [
+        ("default", "active"),
+        ("default", "active"),
+        ("default", "draining"),
+        ("gpu", "active"),
+        ("gpu", "gone"),
+        ("gpu", "revoked"),
+    ]:
+        await factory.follower(pool=pool, state=state)
+    body = await get(admin_client, idp, "/v1/admin/status")
+    assert body["follower_pools"] == [
+        {"pool": "default", "active": 2, "draining": 1, "revoked": 0, "gone": 0},
+        {"pool": "gpu", "active": 1, "draining": 0, "revoked": 1, "gone": 1},
+    ]
+    # the totals existing clients read are unchanged
+    assert body["followers"] == {"active": 3, "draining": 1, "revoked": 1, "gone": 1}
+
+
+async def test_status_without_followers_has_no_follower_pools(admin_client, idp):
+    body = await get(admin_client, idp, "/v1/admin/status")
+    assert body["follower_pools"] == []
+    assert body["followers"] == {"active": 0, "draining": 0, "revoked": 0, "gone": 0}
+
+
+async def test_status_reads_followers_with_one_query_however_many_pools(
+    admin_app, admin_client, idp, factory
+):
+    for n in range(6):
+        await factory.follower(pool=f"pool-{n}", state="active" if n % 2 else "draining")
+    statements: list[str] = []
+
+    def record(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    engine = admin_app.state.engine.sync_engine
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        body = await get(admin_client, idp, "/v1/admin/status")
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    assert len(body["follower_pools"]) == 6
+    assert len([s for s in statements if "FROM followers" in s]) == 1

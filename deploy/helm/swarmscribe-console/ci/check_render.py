@@ -10,14 +10,20 @@ renders it with values that must be refused. `--only core,migrate` runs some sec
 
 import argparse
 import ipaddress
+import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import yaml
 
 CHART = Path(__file__).resolve().parents[1]
 VALUES = CHART / "ci" / "test-values.yaml"
+WEB = CHART.parents[2] / "packages" / "console-web"
+# What the console serves besides the web app's pages (packages/console/src/.../api/*.py:
+# APIRouter prefixes /api and /auth; the web build's assets folder is read from vite.config.ts).
+BACKEND_PREFIXES = ("/api", "/auth")
 NAME = "console-swarmscribe-console"
 SECRET_NAMES = {
     "SWARMSCRIBE_CONSOLE_DATABASE_URL",
@@ -238,6 +244,35 @@ def routes(entry: dict, request_path: str) -> bool:
     return got[: len(wanted)] == wanted
 
 
+def web_routes() -> list[str]:
+    """Concrete example paths for every route the web app answers, read from the router's
+    route table (packages/console-web/src/App.tsx: `pathname === "..."` and `matchPath("...")`),
+    plus the backend prefixes and the web build's assets folder."""
+    source = (WEB / "src" / "App.tsx").read_text(encoding="utf-8")
+    literals = re.findall(r'(?:pathname === |matchPath\()"(/[^"]*)"', source)
+    literals += re.findall(r'<Route[^>]*path="(/[^"]*)"', source)
+    if len(literals) < 5:
+        raise SystemExit("could not read the web app's routes from App.tsx: update check_render.py")
+    assets = re.search(r'assetsDir:\s*"([^"]+)"', (WEB / "vite.config.ts").read_text("utf-8"))
+    if assets is None:
+        raise SystemExit("could not read assetsDir from vite.config.ts: update check_render.py")
+    paths = [re.sub(r":\w+", "x", literal) for literal in literals]
+    return sorted({*paths, *BACKEND_PREFIXES, f"/{assets.group(1)}/index-0123456789abcdef.js"})
+
+
+def check_paths(entries: list[dict]) -> list[str]:
+    """Every route is matched by an ingress path; the probe endpoints never are."""
+    problems = []
+    for route in web_routes():
+        if not any(routes(entry, route) for entry in entries):
+            problems.append(f"Ingress: no ingress.paths entry routes {route} (a web app route)")
+    for probe in ("/healthz", "/healthz/", "/readyz", "/readyz/"):
+        for entry in entries:
+            if routes(entry, probe):
+                problems.append(f"Ingress: {entry['path']} ({entry['pathType']}) routes {probe}")
+    return problems
+
+
 def check_ingress(docs: list[dict]) -> list[str]:
     problems: list[str] = []
     ingress = one(docs, "Ingress")
@@ -245,13 +280,8 @@ def check_ingress(docs: list[dict]) -> list[str]:
         problems.append("Ingress: TLS is not for the public URL's host")
     if ingress["spec"]["rules"][0]["host"] != "console.example.org":
         problems.append("Ingress: the host is not the public URL's")
-    for probe in ("/healthz", "/healthz/", "/readyz", "/readyz/"):
-        for rule in ingress["spec"]["rules"]:
-            for entry in rule["http"]["paths"]:
-                if routes(entry, probe):
-                    problems.append(
-                        f"Ingress: {entry['path']} ({entry['pathType']}) routes {probe}"
-                    )
+    for rule in ingress["spec"]["rules"]:
+        problems += check_paths(rule["http"]["paths"])
     limit = "nginx.ingress.kubernetes.io/limit-rpm"
     if limit in ingress["metadata"].get("annotations", {}):
         problems.append("Ingress: the sign-in annotations are on the whole console")
@@ -263,6 +293,14 @@ def check_ingress(docs: list[dict]) -> list[str]:
         problems.append("sign-in Ingress: its annotations are missing")
     if sign_in["spec"]["tls"] != ingress["spec"]["tls"]:
         problems.append("sign-in Ingress: its TLS differs from the console's")
+    # The drift check must be able to fail: drop /admin from the list and it has to notice.
+    shortened = {"ingress": {"paths": [{"path": "/", "pathType": "Exact"}]}}
+    with tempfile.TemporaryDirectory() as folder:
+        values = Path(folder) / "paths.yaml"
+        values.write_text(yaml.safe_dump(shortened), encoding="utf-8")
+        thin = one(render("-f", str(values)), "Ingress")
+    if not check_paths(thin["spec"]["rules"][0]["http"]["paths"]):
+        problems.append("the route drift check passes when ingress.paths lacks the web routes")
     refused(problems, "an Ingress without TLS", "ingress.tls.secretName=")
     if "Ingress" in kinds(render("--set", "ingress.enabled=false")):
         problems.append("a disabled Ingress is still rendered")

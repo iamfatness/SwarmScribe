@@ -1,0 +1,69 @@
+{{- if .Values.ingress.enabled }}
+{{- $host := include "swarmscribe-console.host" . }}
+{{- $service := include "swarmscribe-console.fullname" . }}
+# Explicit paths, never a Prefix "/": that would also publish /healthz and /readyz.
+# ci/check_render.py keeps ingress.paths in step with the web app's routes.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $service }}
+  labels:
+    {{- include "swarmscribe-console.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  tls:
+    - hosts: [{{ $host | quote }}]
+      secretName: {{ .Values.ingress.tls.secretName }}
+  rules:
+    - host: {{ $host | quote }}
+      http:
+        paths:
+          {{- range .Values.ingress.paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ $service }}
+                port:
+                  name: http
+          {{- end }}
+{{- if .Values.ingress.signIn.enabled }}
+---
+# Exactly /auth/login, so the annotations here (a per-client rate limit) apply to starting
+# a sign-in and to nothing else. An Exact path wins over the Prefix /auth in the Ingress above.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $service }}-sign-in
+  labels:
+    {{- include "swarmscribe-console.labels" . | nindent 4 }}
+  {{- with (merge (dict) .Values.ingress.signIn.annotations .Values.ingress.annotations) }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  tls:
+    - hosts: [{{ $host | quote }}]
+      secretName: {{ .Values.ingress.tls.secretName }}
+  rules:
+    - host: {{ $host | quote }}
+      http:
+        paths:
+          - path: /auth/login
+            pathType: Exact
+            backend:
+              service:
+                name: {{ $service }}
+                port:
+                  name: http
+{{- end }}
+{{- end }}

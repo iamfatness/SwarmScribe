@@ -15,7 +15,8 @@ Design: [`docs/superpowers/specs/2026-10-02-swarmscribe-architecture-design.md`]
 | `swarmscribe-engine` — single-file transcriber | Built |
 | `swarmscribe-leader` — catalogue, consent, jobs, admin API and `swarmscribe-admin` | Built (local storage); cloud storage and vocabulary next |
 | `swarmscribe-follower` | Not started |
-| Helm chart | Not started |
+| `swarmscribe-console` — fleet console: backend, web app, image and Helm chart (`deploy/helm/swarmscribe-console`) | Built |
+| Helm chart for the leader and followers | Not started |
 
 ## Transcribe one file
 
@@ -496,10 +497,10 @@ down. The console refuses a leader URL that:
 
 Private addresses are allowed, so the console can reach leaders on a LAN. These
 checks read only the registered text; a DNS name can still resolve to any
-address later. Add the same blocks to the console host's egress policy: deny
-its traffic to loopback, link-local and metadata addresses (`169.254.169.254`,
-`fd00:ec2::254`, `100.100.100.200`) and allow only the leaders' networks (the
-poller's egress policy itself is C4's).
+address later. So the same destinations must be refused when the connection is
+made: the Helm chart's NetworkPolicy does that on Kubernetes, and "Deploy the
+fleet console", "Egress", says what it covers, what it cannot, and what to do
+on other hosts.
 
 ### Console image
 
@@ -581,6 +582,313 @@ from a CA the test makes for itself (`run_e2e.py certs`), which the containers t
 through `SSL_CERT_FILE` (it replaces the public roots there, which is what the test wants:
 only the stand-in is reached). The leaders serve TLS from the same CA, and the console
 trusts it for them through `SWARMSCRIBE_CONSOLE_LEADER_CA_FILE`.
+
+## Deploy the fleet console
+
+One console serves one organisation and any number of leaders. It needs:
+
+- **Its own Postgres, version 14 or later** (the history view uses `date_bin`). Never a
+  leader's database.
+- **The image, built and loaded** where the cluster can pull it ("The image" below).
+- **A Secret, created beforehand,** that holds the database URL, the console key and the
+  identity provider's client secret ("Kubernetes, with the Helm chart", step 1). The chart
+  never creates it, and the migration hook reads it before anything else exists, so it
+  must be there before `helm install`.
+- **An identity provider**: an Entra ID web app registration, a Google OAuth web client,
+  or both, with `<public URL>/auth/callback` as a redirect URI.
+- **HTTPS to every leader** it will manage. Leaders need nothing inbound from the console
+  beyond their normal admin API, and never connect to it.
+- **TLS in front of it.** The public URL is `https://` and the cookies are `Secure`.
+
+### The image
+
+`docker/console.Dockerfile` (section "Console image" above) builds `swarmscribe-console`.
+No image is published yet, so the chart has no working default for `image.repository` and
+`image.tag`: both are required, and the render fails saying so. Build the image and put it
+where the cluster can pull it, or load it into the cluster. Publishing an image is a
+follow-up.
+
+```
+docker build -t swarmscribe-console:0.1.0 -f docker/console.Dockerfile .
+# a local cluster:        kind load docker-image swarmscribe-console:0.1.0
+#                         (or: minikube image load swarmscribe-console:0.1.0)
+# a registry of your own: docker tag swarmscribe-console:0.1.0 registry.example.org/swarmscribe-console:0.1.0
+#                         docker push registry.example.org/swarmscribe-console:0.1.0
+```
+
+Use `image.pullPolicy: Never` (or `IfNotPresent`) for a loaded image. The image needs no
+writable path, so the chart mounts no `/tmp`.
+
+### Kubernetes, with the Helm chart
+
+The chart is `deploy/helm/swarmscribe-console` (the console only; the leader's chart is a
+separate piece of work). CI lints and renders it with Helm 4.3.0. It was also installed
+once on a kind cluster (Kubernetes 1.34) with a throwaway Postgres: the migration hook ran
+and finished before any console pod started, the pods became ready, `helm upgrade` ran the
+hook again and rolled the pods, and a stopped database made `/readyz` answer 503 without
+restarting a pod. That cluster's network plugin does not enforce NetworkPolicy, so the
+policy below was shown to apply, not to block.
+
+1. Create the Secret. The chart never creates one: a values file and Helm's release history
+   are not a place for the console key. The values below are placeholders.
+
+   ```
+   kubectl -n fleet create secret generic swarmscribe-console \
+     --from-literal=database-url='postgresql://console:...@db.internal:5432/swarmscribe_console' \
+     --from-literal=console-key="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')" \
+     --from-literal=entra-client-secret='...'
+   ```
+
+   A Google sign-in adds `google-client-secret` (and `google-service-account`, the service
+   account's JSON key, when Google Groups are used). Keep a copy of the console key
+   somewhere safe. It seals every leader credential; without it each one has to be created
+   again on its leader and entered again. The key comes from the environment only: there
+   is no KMS integration and no command that re-seals under a new key.
+
+2. Write the values.
+
+   ```yaml
+   image:
+     repository: swarmscribe-console   # or your registry's name for it
+     tag: "0.1.0"
+     pullPolicy: IfNotPresent
+   publicUrl: https://console.example.org
+   secrets:
+     existingSecret: swarmscribe-console
+   oidc:
+     entra:
+       enabled: true
+       tenantId: 00000000-0000-0000-0000-000000000000
+       clientId: 11111111-1111-1111-1111-111111111111
+   ingress:
+     className: nginx
+     tls:
+       secretName: console-tls
+   networkPolicy:
+     egress:
+       postgres:
+         peers:
+           - ipBlock:
+               cidr: 10.20.30.40/32
+   ```
+
+   For Google, replace the `entra` block with `oidc.google.enabled: true` and
+   `oidc.google.clientId` (optionally `hostedDomain`).
+
+3. Install. The migration runs first, as a hook; the console pods start after it.
+
+   ```
+   helm upgrade --install console deploy/helm/swarmscribe-console -n fleet -f values.yaml
+   ```
+
+4. Add the first console administrator, with the command that fits the sign-in provider
+   ("Which principals a sign-in yields" above). The release is called `console` here, so
+   the Deployment is `console-swarmscribe-console`.
+
+   With Entra ID, a group's object id (Entra gives group ids only, never an email, and an
+   Entra-only console refuses `email`):
+
+   ```
+   kubectl -n fleet exec deploy/console-swarmscribe-console -- \
+     swarmscribe-console admins add entra_group <group-object-id>
+   ```
+
+   With Google, an email or a Workspace domain:
+
+   ```
+   kubectl -n fleet exec deploy/console-swarmscribe-console -- \
+     swarmscribe-console admins add email you@example.org
+   ```
+
+5. On each leader, a leader administrator creates a credential for the console
+   (`swarmscribe-admin console create --name fleet --max-role operator`; "Leaders in the
+   console" above says when `admin` is needed). A console administrator then registers the
+   leader with it.
+
+What the chart installs:
+
+| Object | What it is |
+|---|---|
+| Deployment | `replicaCount` console pods (default 2) running `serve`: non-root (10001), read-only root filesystem, no capabilities, no service-account token; startup and liveness probes on `/healthz`, readiness on `/readyz`; requests 100m CPU and 256Mi |
+| Job (hook) | `swarmscribe-console migrate`, before install and before every upgrade |
+| Service | port 80 to the pods' 8080 |
+| Ingress | the host of `publicUrl`, with TLS from `ingress.tls.secretName` (required) |
+| Ingress (optional) | exactly `/auth/login`, with its own annotations: `ingress.signIn` |
+| ConfigMap | the settings that are not secret |
+| PodDisruptionBudget | `maxUnavailable: 1`, when there is more than one replica |
+| NetworkPolicy | what the pods may reach and be reached from: "Egress" below |
+| ServiceAccount | one with no token mounted; the console never calls the Kubernetes API |
+
+Values:
+
+| Value | Setting or meaning |
+|---|---|
+| `publicUrl` | `SWARMSCRIBE_CONSOLE_PUBLIC_URL`, and the Ingress host. Required. `https://<host>`, no port, no path |
+| `image.repository`, `image.tag` | the image. Both required (`image.digest` wins over the tag) |
+| `secrets.existingSecret` | the Secret's name. Required. `secrets.keys.*` name its keys: `database-url`, `console-key`, `entra-client-secret`, `google-client-secret`, `google-service-account` |
+| `oidc.entra.enabled`, `.tenantId`, `.clientId` | Entra ID sign-in (`SWARMSCRIBE_CONSOLE_ENTRA_*`) |
+| `oidc.google.enabled`, `.clientId`, `.hostedDomain`, `.serviceAccount` | Google sign-in (`SWARMSCRIBE_CONSOLE_GOOGLE_*`); `serviceAccount: true` reads the Google Groups key from the Secret |
+| `ingress.tls.secretName` | the TLS Secret of the Ingress. Required while the Ingress is enabled |
+| `networkPolicy.egress.postgres.peers` | where Postgres is. Required while the NetworkPolicy is enabled |
+| `settings` | any other `SWARMSCRIBE_CONSOLE_*` setting that is not a secret, without the prefix: `POLL_CONCURRENCY`, `SESSION_IDLE_SECONDS`, `LOGIN_ATTEMPTS_MAX`, ... |
+| `leaderCa.existingConfigMap`, `.key` | CA certificates for leaders on a private CA (`SWARMSCRIBE_CONSOLE_LEADER_CA_FILE`) |
+| `port` | the port in the pod: the container port, `SWARMSCRIBE_CONSOLE_PORT`, and what the Service and NetworkPolicy follow |
+| `replicaCount`, `resources`, `podDisruptionBudget` | scale and availability |
+| `ingress.*`, `networkPolicy.*`, `migrate.*` | described in `values.yaml` |
+
+`helm template` fails, saying why, when `publicUrl`, the image, the Secret, a sign-in
+provider, the Ingress's TLS secret or the Postgres peer of the NetworkPolicy is missing, and
+when a secret is put under `settings`.
+
+### Database connections
+
+Each replica pools `2 * POLL_CONCURRENCY + 2` connections and may open 10 more for web
+requests: 18 pooled and up to 28 at the default concurrency of 8. With two replicas that
+is up to 56, plus one for the migration job. Size Postgres's `max_connections` for it
+(and for Postgres's own reserved connections). Behind a pooler such as PgBouncer, the
+poller's advisory locks need session pooling.
+
+### Probes, the Ingress and a database outage
+
+The probes are `httpGet` (GET). Startup and liveness use `/healthz`, which never touches
+the database; readiness uses `/readyz` with a 5 second timeout (the console's own database
+check gives up at 3). The console also answers HEAD like GET and 405 to any other method,
+and redirects `/healthz/` and `/readyz/` to the canonical path. The Ingress lists explicit
+paths (`ingress.paths`) and does not route `/healthz` or `/readyz`: `/readyz` tells an
+anonymous caller whether the database is up. A route added to the web app needs a new
+entry in `ingress.paths`, for example `- {path: /reports, pathType: Prefix}`; the render
+check (`deploy/helm/swarmscribe-console/ci/check_render.py`) reads the web app's routes
+and fails when one is not covered.
+
+During a database outage the console stays alive (liveness does not use the database), its
+pods go unready, and the log stays short on purpose: the poller logs one line per 30
+seconds per cause and `/readyz` logs one line, at most every 30 seconds, saying whether it
+cannot query the database or the migrations are not current. Before C4a's limit this was
+about 1,500 lines a minute per replica. The pods are not restarted, and are ready again
+once the database answers.
+
+### Egress
+
+The console sends its leader credentials to whatever a leader's URL resolves to. It
+refuses a URL that names a loopback, link-local, metadata or reserved address ("Deployment
+note: egress" above), but a DNS name is only checked as text, so the network must refuse
+the same destinations when the connection is made. The chart's NetworkPolicy allows, from
+the console pods:
+
+- DNS, to `networkPolicy.egress.dns.peers` (kube-dns by default);
+- Postgres, to `networkPolicy.egress.postgres.peers` on port 5432;
+- TCP 443 to anywhere **except** `0.0.0.0/8`, `127.0.0.0/8`, `169.254.0.0/16` (link-local:
+  the AWS, Azure and Google metadata services, whatever name was used to reach them),
+  `100.100.100.200` (Alibaba Cloud metadata), `168.63.129.16` (the Azure platform
+  address), `224.0.0.0/4` and `240.0.0.0/4`; and for IPv6 `::/8` (loopback, IPv4-mapped,
+  NAT64), `2001::/32` (Teredo), `2002::/16` (6to4), `fd00:ec2::254` (AWS metadata),
+  `fe80::/10`, `fec0::/10` and `ff00::/8`. This one rule serves both the leaders and the
+  identity providers.
+
+Private addresses stay reachable, because leaders usually live on them. If every leader is
+outside the cluster, add the cluster's pod and service ranges to
+`networkPolicy.egress.https.extraExcept`. If leaders listen on another port, add it to
+`networkPolicy.egress.https.ports`.
+
+What a NetworkPolicy cannot do, so that nobody relies on it for more:
+
+- It does nothing unless the cluster's network plugin enforces NetworkPolicy (Calico,
+  Cilium and most managed clusters' policy add-ons do; kind's default network plugin does
+  not, so a local test shows the object and not the blocking).
+- It cannot name a DNS host. Identity providers cannot be pinned to their names, and the
+  metadata *names* the console refuses are blocked only through the addresses they resolve
+  to. To allow only the leaders' networks, narrow `networkPolicy.egress.https.cidrs` to
+  them and send identity-provider calls through a proxy (`extraEnv` with `HTTPS_PROXY`,
+  and the proxy under `networkPolicy.egress.extra`): calls to leaders never use a proxy.
+- It cannot block loopback inside the pod. The console is the only container there, so
+  nothing but the console itself listens on it; do not add a sidecar that trusts
+  loopback callers.
+- NodeLocal DNSCache listens on a link-local address (`169.254.20.10`). Add it as an
+  `ipBlock` under `networkPolicy.egress.dns.peers`.
+- On a first install the migration Job runs before this policy exists. If the namespace
+  denies egress by default, allow the Job's pod
+  (`app.kubernetes.io/component: migrate`) to reach Postgres yourself.
+
+Outside Kubernetes, put the same list in the host's firewall or the cloud's security
+group: deny the console's outbound traffic to the ranges above, and allow only Postgres,
+DNS, the leaders and the identity providers.
+
+### Limiting sign-in attempts
+
+Starting a sign-in (`/auth/login`) needs no session and stores a row until the person comes
+back from the identity provider, or for ten minutes. Two things bound it:
+
+- **In the console:** at most `SWARMSCRIBE_CONSOLE_LOGIN_ATTEMPTS_MAX` sign-ins are pending
+  (default 10000). Beyond that the oldest are dropped, so a flood evicts itself and a
+  person who signs in promptly still finishes. The console logs one warning a minute while
+  it is dropping.
+- **At the ingress:** a per-client rate limit, which only the ingress can do (the console
+  does not see the client's address). `ingress.signIn.enabled` adds an Ingress for exactly
+  `/auth/login` that carries its own annotations, so the limit does not slow the rest of
+  the console. The annotations are your ingress controller's, not the chart's.
+
+A worked example for Traefik, which is maintained and widely used (ingress-nginx, the other
+common choice, is being retired and will get no further fixes). The annotation and the
+Middleware below are Traefik's names, not the chart's. Create the Middleware in the
+release's namespace, then name it in the annotation as `<namespace>-<name>@kubernetescrd`:
+
+```yaml
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: sign-in-limit
+  namespace: fleet
+spec:
+  rateLimit:
+    average: 30      # requests ...
+    period: 1m       # ... per minute, per client
+    burst: 10
+    # Behind a cloud load balancer the client is its forwarded address, not the peer:
+    # sourceCriterion: {ipStrategy: {depth: 1}}
+```
+
+```yaml
+ingress:
+  signIn:
+    enabled: true
+    annotations:
+      traefik.ingress.kubernetes.io/router.middlewares: fleet-sign-in-limit@kubernetescrd
+```
+
+The chart renders the Ingress with that annotation and nothing else; the Traefik side
+(that the CRDs are installed, and what its counter keys on) was not run here. For
+ingress-nginx the same limit is one annotation on `ingress.signIn.annotations`,
+`nginx.ingress.kubernetes.io/limit-rpm: "30"`.
+
+### Leaders on a private CA
+
+Calls to leaders verify the leader's certificate against the public roots and never read
+`SSL_CERT_FILE`. For leaders whose certificates come from your own CA, put the CA
+certificates (PEM) in a ConfigMap and name it in `leaderCa.existingConfigMap`; outside
+Kubernetes, set `SWARMSCRIBE_CONSOLE_LEADER_CA_FILE` to the file. They are trusted in
+addition to the public roots, and for leader calls only. The file is read at start: restart
+the pods after rotating it.
+
+Do not set `SSL_CERT_FILE` (through `extraEnv`) for this. Calls to the identity providers
+read it, and it REPLACES the public roots for those calls: a file that holds only your CA
+stops sign-in at the real Entra ID or Google. If you must set it, make it a full bundle
+(the public roots plus your CA).
+
+### Upgrades
+
+`helm upgrade` runs the migration, then replaces the pods one at a time
+(`maxUnavailable: 0`). The migration is a pre-upgrade hook, so it runs while the old pods
+are still serving: they keep serving on the migrated schema until they are replaced, and
+`/readyz` stays 200 when the database is ahead. Every migration must therefore stay
+compatible with the previous release (add a column now, drop the old one in a later
+release); a migration that breaks the previous version breaks the live pods for the length
+of the upgrade.
+
+A console never *starts* on a database that is ahead of it, and there is no downgrade
+command: after a migration, a rollback of the image alone leaves pods that refuse to start,
+so roll forward again. A Job that succeeds is removed; one that fails is kept, the upgrade
+fails, and `kubectl -n fleet logs job/console-swarmscribe-console-migrate` says why. A changed setting restarts the pods (the
+Deployment carries a checksum of the ConfigMap).
 
 ## Develop
 

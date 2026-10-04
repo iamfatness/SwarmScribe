@@ -132,6 +132,11 @@ def console_labels(docs: list[dict]) -> dict:
 
 def check_core(docs: list[dict]) -> list[str]:
     problems: list[str] = []
+    # Found on a real install: a long exec line in NOTES.txt printed a run of spaces where
+    # the line continuation was meant to be.
+    notes = (CHART / "templates" / "NOTES.txt").read_text()
+    if re.search(r"\S {4,}\S", notes):
+        problems.append("NOTES.txt: a run of spaces inside a line (a broken line continuation?)")
     deployment = one(docs, "Deployment")
     if deployment["spec"]["replicas"] != 2:
         problems.append("Deployment: the default is not 2 replicas")

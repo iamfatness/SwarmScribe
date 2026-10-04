@@ -16,6 +16,7 @@ import {
   useLeaderRead,
   type TabProps,
 } from "./common";
+import { useRowFocus } from "./rowFocus";
 
 const DAY_S = 86_400;
 /** The leader's NAME_PATTERN (admin_models.py), for the browser's own check. */
@@ -144,7 +145,11 @@ function CreateTokenDialog({
   };
 
   return (
-    <Dialog title={`Create a join token for ${leaderName}`} onClose={dismiss}>
+    <Dialog
+      title={`Create a join token for ${leaderName}`}
+      onClose={dismiss}
+      dismissable={!action.busy}
+    >
       <form ref={formRef} className="form-grid" noValidate onSubmit={submit}>
         <div>
           <label className="field" htmlFor={poolId}>
@@ -327,9 +332,10 @@ function TokenList({ leader }: TabProps) {
   const [created, setCreated] = useState<TokenCreated[]>([]);
   const [revoking, setRevoking] = useState<TokenOut | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const rows = useRowFocus(read, setNotice);
 
   return (
-    <>
+    <div {...rows.props}>
       <div className="section-head">
         <ActionButton held={leader.role} action="tokens.create" onClick={() => setCreating(true)}>
           Create join token
@@ -346,7 +352,7 @@ function TokenList({ leader }: TabProps) {
             <p>No join tokens.</p>
           ) : (
             <div className="table-scroll" role="region" aria-label="Join token list" tabIndex={0}>
-              <table>
+              <table className="medium">
                 <thead>
                   <tr>
                     <th scope="col">Token</th>
@@ -360,17 +366,17 @@ function TokenList({ leader }: TabProps) {
                 </thead>
                 <tbody>
                   {tokens.map((token) => (
-                    <tr key={token.id}>
+                    <tr key={token.id} data-row={token.id}>
                       <th scope="row">
                         <code>{shortId(token.id)}</code>
                       </th>
-                      <td>{token.pool}</td>
-                      <td>{tokenState(token, now)}</td>
+                      <td className="nowrap">{token.pool}</td>
+                      <td className="nowrap">{tokenState(token, now)}</td>
                       <td className="num">
                         {token.uses} of {token.max_uses}
                       </td>
                       <td>{formatTime(token.expires_at)}</td>
-                      <td>{token.created_by}</td>
+                      <td className="long">{token.created_by}</td>
                       <td className="actions">
                         {!token.revoked && (
                           <ActionButton
@@ -423,12 +429,11 @@ function TokenList({ leader }: TabProps) {
           onConfirm={async () => {
             setNotice(null);
             await api.post(leaderPath(leader.name, `tokens/${revoking.id}/revoke`));
-            setNotice(`Join token ${shortId(revoking.id)} is revoked.`);
-            read.refresh();
+            rows.done(`Join token ${shortId(revoking.id)} is revoked.`);
           }}
         />
       )}
-    </>
+    </div>
   );
 }
 

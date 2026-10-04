@@ -22,8 +22,11 @@ test("an operator retries a failed job and cancels a queued one with the keyboar
   await tabTo(page, /^Retry job /);
   await page.keyboard.press("Enter");
   await expect(page.getByText(/^Job \w{8} is queued again\.$/)).toBeVisible();
+  // The Retry button went with the row's state; the focus must not fall back to the page top.
+  await expect
+    .poll(() => page.evaluate(() => document.activeElement?.closest("[role='region']")?.getAttribute("aria-label")))
+    .toBe("Job list");
 
-  await page.getByRole("combobox", { name: "State" }).focus();
   await tabTo(page, /^Cancel job /);
   await page.keyboard.press("Enter");
   const dialog = page.getByRole("alertdialog", { name: /^Cancel job \w{8}\?$/ });
@@ -54,7 +57,7 @@ test("the job filter narrows by state and survives a reload", async ({ page }) =
   await signIn(page, "viewer", "/leaders/eu-1/jobs");
   await page.getByRole("combobox", { name: "State" }).selectOption("failed");
   await expect(page).toHaveURL("/leaders/eu-1/jobs?state=failed");
-  await expect(page.getByRole("region", { name: "Jobs" }).getByRole("row")).toHaveCount(2);
+  await expect(page.getByRole("region", { name: "Job list" }).getByRole("row")).toHaveCount(2);
   await page.reload();
   await expect(page.getByRole("combobox", { name: "State" })).toHaveValue("failed");
 });

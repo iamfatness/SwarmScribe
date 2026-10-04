@@ -8,6 +8,7 @@ import { formatTime } from "../../lib/format";
 import { ActionNotice, ReadState } from "../leader/common";
 import { AdminFrame, useAdminList } from "./AdminFrame";
 import { PrincipalFields } from "./PrincipalFields";
+import { useRowFocus } from "../leader/rowFocus";
 
 const noop = () => undefined;
 
@@ -84,12 +85,14 @@ function GrantsContent() {
   const read = useAdminList<GrantOut>("/api/admin/grants");
   const [removing, setRemoving] = useState<GrantOut | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const rows = useRowFocus(read, setNotice);
 
   return (
-    <>
+    <div {...rows.props}>
       <p className="muted">
-        A person's role on a leader is the highest grant whose scope matches it. Changes apply at
-        their next sign-in.
+        A person's role on a leader is the highest grant whose scope matches it. Adding or removing a
+        grant applies at once. A person's group membership is read at sign-in, so a change to it
+        applies at their next sign-in.
       </p>
       <ActionNotice message={notice} />
       <ReadState read={read} what="grants">
@@ -98,7 +101,7 @@ function GrantsContent() {
             <p>No grants.</p>
           ) : (
             <div className="table-scroll" role="region" aria-label="Grants" tabIndex={0}>
-              <table>
+              <table className="medium">
                 <thead>
                   <tr>
                     <th scope="col">Principal</th>
@@ -110,12 +113,12 @@ function GrantsContent() {
                 </thead>
                 <tbody>
                   {grants.map((grant) => (
-                    <tr key={grant.id}>
-                      <th scope="row" className="mono">
+                    <tr key={grant.id} data-row={grant.id}>
+                      <th scope="row" className="mono long">
                         {grant.principal_kind}:{grant.principal}
                       </th>
-                      <td>{grant.role}</td>
-                      <td className="mono">{grant.scope}</td>
+                      <td className="nowrap">{grant.role}</td>
+                      <td className="mono long">{grant.scope}</td>
                       <td>
                         {formatTime(grant.created_at)} by {grant.created_by}
                       </td>
@@ -148,17 +151,16 @@ function GrantsContent() {
       {removing !== null && (
         <ConfirmDialog
           title="Remove this grant?"
-          message={`${removing.principal_kind}:${removing.principal} loses ${removing.role} on ${removing.scope} at their next sign-in.`}
+          message={`${removing.principal_kind}:${removing.principal} loses ${removing.role} on ${removing.scope} at once. Group membership is read at sign-in.`}
           confirmLabel="Remove grant"
           onClose={() => setRemoving(null)}
           onConfirm={async () => {
             await api.del(`/api/admin/grants/${encodeURIComponent(removing.id)}`);
-            setNotice("Grant removed.");
-            read.refresh();
+            rows.done("Grant removed.");
           }}
         />
       )}
-    </>
+    </div>
   );
 }
 

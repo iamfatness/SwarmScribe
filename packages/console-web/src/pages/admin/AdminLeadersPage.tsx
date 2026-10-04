@@ -16,6 +16,7 @@ import {
   useAdminList,
   withSecret,
 } from "./AdminFrame";
+import { useRowFocus } from "../leader/rowFocus";
 
 const LABELS_HELP =
   "One key=value per line, such as region=eu. Keys are lowercase letters, digits and . _ - ; " +
@@ -352,6 +353,7 @@ function LeadersContent() {
   const read = useAdminList<LeaderOut>("/api/admin/leaders");
   const [open, setOpen] = useState<Open>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const rows = useRowFocus(read, setNotice);
   const close = () => setOpen(null);
   const done = (message: string) => {
     setNotice(message);
@@ -359,7 +361,7 @@ function LeadersContent() {
   };
 
   return (
-    <>
+    <div {...rows.props}>
       <div className="section-head">
         <button
           type="button"
@@ -376,7 +378,7 @@ function LeadersContent() {
             <p>No leaders are registered.</p>
           ) : (
             <div className="table-scroll" role="region" aria-label="Registered leaders" tabIndex={0}>
-              <table>
+              <table className="wide">
                 <thead>
                   <tr>
                     <th scope="col">Leader</th>
@@ -389,11 +391,11 @@ function LeadersContent() {
                 </thead>
                 <tbody>
                   {leaders.map((leader) => (
-                    <tr key={leader.name}>
+                    <tr key={leader.name} data-row={leader.name}>
                       <th scope="row">{leader.name}</th>
-                      <td className="mono">{leader.base_url}</td>
-                      <td className="mono">{labelsText(leader.labels) || "–"}</td>
-                      <td>{leader.enabled ? "Yes" : "No"}</td>
+                      <td className="mono long">{leader.base_url}</td>
+                      <td className="mono long">{labelsText(leader.labels) || "–"}</td>
+                      <td className="nowrap">{leader.enabled ? "Yes" : "No"}</td>
                       <td>
                         {leader.credential_revoked ? (
                           <span className="badge badge-bad">Revoked by the leader</span>
@@ -463,11 +465,11 @@ function LeadersContent() {
           onClose={close}
           onConfirm={async () => {
             await api.del(leaderApi(open.leader.name));
-            done(`Leader ${open.leader.name} is removed.`);
+            rows.done(`Leader ${open.leader.name} is removed.`);
           }}
         />
       )}
-    </>
+    </div>
   );
 }
 

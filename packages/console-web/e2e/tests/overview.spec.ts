@@ -60,3 +60,54 @@ test("the overview works from the keyboard alone", async ({ page }) => {
   await page.keyboard.press("ArrowDown");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 });
+
+const TABLE_PAGES = [
+  "/",
+  "/leaders/eu-1/jobs",
+  "/leaders/eu-1/pools",
+  "/leaders/eu-1/locations",
+  "/leaders/eu-1/consent",
+  "/leaders/eu-1/tokens",
+  "/admin/leaders",
+  "/admin/grants",
+  "/admin/admins",
+];
+
+test("no table breaks a word across lines, and the page never scrolls sideways at tablet width", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 768, height: 1024 });
+  await signIn(page, "admin");
+  for (const path of TABLE_PAGES) {
+    await page.goto(path);
+    await expect(page.getByRole("table").first()).toBeVisible();
+    const found = await page.evaluate(() => {
+      const broken: string[] = [];
+      for (const cell of document.querySelectorAll("th, td")) {
+        // Columns that opt in to breaking anywhere (.long) are the only ones allowed to.
+        if (cell.classList.contains("long") || cell.querySelector(".long")) continue;
+        const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
+        for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+          const text = node.textContent ?? "";
+          for (const match of text.matchAll(/\S+/g)) {
+            const range = document.createRange();
+            range.setStart(node, match.index);
+            range.setEnd(node, match.index + match[0].length);
+            // A word that wraps in the middle has client rects on more than one line.
+            const tops = new Set(Array.from(range.getClientRects()).map((r) => Math.round(r.top)));
+            if (tops.size > 1) broken.push(`${cell.tagName} "${match[0]}"`);
+          }
+        }
+      }
+      for (const head of document.querySelectorAll("thead th")) {
+        const wraps = getComputedStyle(head).whiteSpace;
+        if (wraps !== "nowrap" && !head.closest(".fleet-table")) broken.push(`header ${head.textContent} is ${wraps}`);
+      }
+      return broken;
+    });
+    expect(found, path).toEqual([]);
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    expect(overflow, path).toBeLessThanOrEqual(0);
+  }
+});
+

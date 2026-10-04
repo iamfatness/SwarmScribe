@@ -17,6 +17,7 @@ import {
   useLeaderRead,
   type TabProps,
 } from "./common";
+import { useRowFocus } from "./rowFocus";
 import { leaderUrl } from "./tabs";
 
 export const JOB_STATES: JobState[] = ["queued", "leased", "completed", "failed", "cancelled"];
@@ -124,6 +125,7 @@ export function JobsTab({ leader }: TabProps) {
   const [cancelling, setCancelling] = useState<JobOut | null>(null);
   const [prioritising, setPrioritising] = useState<JobOut | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const rows = useRowFocus(read, setNotice);
   const locations = (leader.snapshot?.status.locations ?? []).map((l) => l.name).sort();
   const filtered = Boolean(state || location);
 
@@ -135,13 +137,12 @@ export function JobsTab({ leader }: TabProps) {
   const onRetry = async (job: JobOut) => {
     setNotice(null);
     if (await retry.run(() => api.post(leaderPath(leader.name, `jobs/${job.id}/retry`)))) {
-      setNotice(`Job ${shortId(job.id)} is queued again.`);
-      read.refresh();
+      rows.done(`Job ${shortId(job.id)} is queued again.`);
     }
   };
 
   return (
-    <>
+    <div {...rows.props}>
       <div className="filters">
         <label className="field-inline">
           State
@@ -190,8 +191,8 @@ export function JobsTab({ leader }: TabProps) {
               {jobs.length >= JOB_LIMIT && (
                 <p className="muted">Showing the newest {JOB_LIMIT} jobs. Filter to narrow them.</p>
               )}
-              <div className="table-scroll" role="region" aria-label="Jobs" tabIndex={0}>
-                <table>
+              <div className="table-scroll" role="region" aria-label="Job list" tabIndex={0}>
+                <table className="wide">
                   <thead>
                     <tr>
                       <th scope="col">Job</th>
@@ -207,21 +208,21 @@ export function JobsTab({ leader }: TabProps) {
                   </thead>
                   <tbody>
                     {jobs.map((job) => (
-                      <tr key={job.id}>
+                      <tr key={job.id} data-row={job.id}>
                         <th scope="row">
                           <code>{shortId(job.id)}</code>
                         </th>
-                        <td>{job.state}</td>
-                        <td>
+                        <td className="nowrap">{job.state}</td>
+                        <td className="long">
                           {job.location}: <span className="mono">{job.key}</span>
                         </td>
-                        <td>{job.pool}</td>
-                        <td className="num">{job.priority}</td>
-                        <td className="num">
+                        <td className="nowrap">{job.pool}</td>
+                        <td className="num nowrap">{job.priority}</td>
+                        <td className="num nowrap">
                           {job.attempts} of {job.max_attempts}
                         </td>
-                        <td>{formatTime(job.created_at)}</td>
-                        <td>{detail(job)}</td>
+                        <td className="nowrap">{formatTime(job.created_at)}</td>
+                        <td className="long">{detail(job)}</td>
                         <td className="actions">
                           {RETRYABLE.has(job.state) && (
                             <ActionButton
@@ -274,8 +275,7 @@ export function JobsTab({ leader }: TabProps) {
           onConfirm={async () => {
             setNotice(null);
             await api.post(leaderPath(leader.name, `jobs/${cancelling.id}/cancel`));
-            setNotice(`Job ${shortId(cancelling.id)} is cancelled.`);
-            read.refresh();
+            rows.done(`Job ${shortId(cancelling.id)} is cancelled.`);
           }}
         />
       )}
@@ -285,11 +285,10 @@ export function JobsTab({ leader }: TabProps) {
           job={prioritising}
           onClose={() => setPrioritising(null)}
           onDone={() => {
-            setNotice(`Priority of job ${shortId(prioritising.id)} is set.`);
-            read.refresh();
+            rows.done(`Priority of job ${shortId(prioritising.id)} is set.`);
           }}
         />
       )}
-    </>
+    </div>
   );
 }

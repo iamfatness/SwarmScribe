@@ -17,6 +17,7 @@ export function Dialog({
   children,
   role = "dialog",
   describedBy,
+  dismissable = true,
 }: {
   title: string;
   onClose: () => void;
@@ -24,16 +25,41 @@ export function Dialog({
   role?: "dialog" | "alertdialog";
   /** The id of the element that describes the dialog, when it has one. */
   describedBy?: string;
+  /**
+   * False while the dialog must stay: it then cannot be closed by Escape, however often it is
+   * pressed. Chromium closes a dialog natively on a later Escape even when `cancel` is
+   * prevented, so a `close` that nobody asked for reopens it at once, its state intact.
+   */
+  dismissable?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
+  const stays = useRef(!dismissable);
+  useEffect(() => {
+    stays.current = !dismissable;
+  }, [dismissable]);
 
   useEffect(() => {
     const dialog = ref.current;
     if (dialog === null) return;
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    let leaving = false;
+    let inside: HTMLElement | null = null;
+    const remember = (event: FocusEvent) => {
+      if (event.target instanceof HTMLElement) inside = event.target;
+    };
+    const reopen = () => {
+      if (leaving || !stays.current || !dialog.isConnected) return;
+      dialog.showModal();
+      if (inside !== null && inside.isConnected && dialog.contains(inside)) inside.focus();
+    };
+    dialog.addEventListener("focusin", remember);
+    dialog.addEventListener("close", reopen);
     if (!dialog.open) dialog.showModal();
     return () => {
+      leaving = true;
+      dialog.removeEventListener("focusin", remember);
+      dialog.removeEventListener("close", reopen);
       if (dialog.open) dialog.close();
       if (opener !== null && opener.isConnected) opener.focus();
       else document.getElementById("main")?.focus();
@@ -48,9 +74,11 @@ export function Dialog({
       aria-modal="true"
       aria-labelledby={titleId}
       aria-describedby={describedBy}
+      // closedby="none" (where supported) keeps Escape from closing it at all.
+      {...(dismissable ? {} : { closedby: "none" })}
       onCancel={(event) => {
         event.preventDefault();
-        onClose();
+        if (dismissable) onClose();
       }}
     >
       <h2 id={titleId} className="dialog-title">

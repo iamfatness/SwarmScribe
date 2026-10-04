@@ -165,3 +165,62 @@ test("the create dialog cannot be dismissed while its request is in flight, and 
   await expect(shown.getByRole("textbox", { name: "Join token" })).toHaveValue(/^sst_/);
   await expect(form).toHaveCount(0);
 });
+
+test("Escape pressed again and again cannot close the create dialog mid-request", async ({ page }) => {
+  await signIn(page, "admin", "/leaders/eu-1/tokens");
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(TOKEN_POST, async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    await gate;
+    return route.continue();
+  });
+  const form = await openCreate(page);
+  await form.getByRole("button", { name: "Create token" }).click();
+  await expect(form.getByRole("button", { name: "Create token" })).toHaveAttribute("aria-disabled", "true");
+  for (let i = 0; i < 5; i += 1) {
+    await page.keyboard.press("Escape");
+    // Chromium force-closes a dialog on a later Escape; the dialog must come straight back.
+    await expect.poll(() => form.evaluate((el: HTMLDialogElement) => el.open)).toBe(true);
+  }
+  await expect(form).toBeVisible();
+
+  release();
+  const shown = page.getByRole("dialog", { name: "Join token created" });
+  await expect(shown.getByRole("textbox", { name: "Join token" })).toHaveValue(/^sst_/);
+  await expect(form).toHaveCount(0);
+});
+
+test("a slow create that fails shows its error and Create works again", async ({ page }) => {
+  await signIn(page, "admin", "/leaders/eu-1/tokens");
+  let fail = true;
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(TOKEN_POST, async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    if (!fail) return route.continue();
+    await gate;
+    return route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ code: "leader_unreachable", message: "leader eu-1 cannot be reached" }),
+    });
+  });
+  const form = await openCreate(page);
+  await form.getByRole("button", { name: "Create token" }).click();
+  for (let i = 0; i < 5; i += 1) await page.keyboard.press("Escape");
+  release();
+  await expect(form).toBeVisible();
+  await expect(form.getByText("The leader cannot be reached right now.")).toBeVisible();
+  await expect(form.getByRole("button", { name: "Create token" })).not.toHaveAttribute("aria-disabled", "true");
+
+  fail = false;
+  await form.getByRole("button", { name: "Create token" }).click();
+  const shown = page.getByRole("dialog", { name: "Join token created" });
+  await expect(shown.getByRole("textbox", { name: "Join token" })).toHaveValue(/^sst_/);
+});
+

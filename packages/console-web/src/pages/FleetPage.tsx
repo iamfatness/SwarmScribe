@@ -168,7 +168,7 @@ export function FleetPage() {
         <p>No leader has the label {label}.</p>
       ) : (
         <div className="table-scroll" role="region" aria-label="Leaders" tabIndex={0}>
-          <table className="fleet-table">
+          <table className="fleet-table wide">
             <caption className="visually-hidden">
               Leaders with their health, queue, throughput, followers and scan errors
             </caption>

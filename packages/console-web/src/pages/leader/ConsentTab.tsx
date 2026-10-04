@@ -31,7 +31,7 @@ export function ConsentTab({ leader }: TabProps) {
                 aria-label="Consent by location"
                 tabIndex={0}
               >
-                <table>
+                <table className="medium">
                   <thead>
                     <tr>
                       <th scope="col">Location</th>
@@ -65,7 +65,7 @@ export function ConsentTab({ leader }: TabProps) {
                 aria-label="Transcripts to review"
                 tabIndex={0}
               >
-                <table>
+                <table className="medium">
                   <thead>
                     <tr>
                       <th scope="col">Job</th>
@@ -80,11 +80,11 @@ export function ConsentTab({ leader }: TabProps) {
                         <th scope="row">
                           <code>{shortId(row.job_id)}</code>
                         </th>
-                        <td>
+                        <td className="long">
                           {row.location}: <span className="mono">{row.key}</span>
                         </td>
                         <td>{row.completed_at ? formatTime(row.completed_at) : "–"}</td>
-                        <td>
+                        <td className="long">
                           <ul className="cell-list">
                             {row.outputs.map((output) => (
                               <li key={output} className="mono">

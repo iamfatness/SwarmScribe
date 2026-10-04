@@ -7,6 +7,7 @@ import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { ErrorPanel } from "../../components/ErrorPanel";
 import { formatCount, formatTime } from "../../lib/format";
 import { ActionNotice, ReadState, RefreshButton, shortId, useLeaderRead, type TabProps } from "./common";
+import { useRowFocus } from "./rowFocus";
 
 function PoolTable({ leader }: TabProps) {
   const status = leader.snapshot?.status;
@@ -18,7 +19,7 @@ function PoolTable({ leader }: TabProps) {
     <>
       <p className="muted">From the poll at {formatTime(leader.snapshot?.taken_at ?? "")}.</p>
       <div className="table-scroll" role="region" aria-label="Pools" tabIndex={0}>
-        <table>
+        <table className="medium">
           <thead>
             <tr>
               <th scope="col">Pool</th>
@@ -58,18 +59,18 @@ export function PoolsTab({ leader }: TabProps) {
   const drain = useAction();
   const [revoking, setRevoking] = useState<FollowerOut | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const rows = useRowFocus(read, setNotice);
 
   const onDrain = async (follower: FollowerOut) => {
     setNotice(null);
     const ok = await drain.run(() => api.post(leaderPath(leader.name, `followers/${follower.id}/drain`)));
     if (ok) {
-      setNotice(`Follower ${shortId(follower.id)} is draining.`);
-      read.refresh();
+      rows.done(`Follower ${shortId(follower.id)} is draining.`);
     }
   };
 
   return (
-    <>
+    <div {...rows.props}>
       <h3>Pools</h3>
       <PoolTable leader={leader} />
       <div className="section-head">
@@ -84,7 +85,7 @@ export function PoolsTab({ leader }: TabProps) {
             <p>No followers have joined this leader.</p>
           ) : (
             <div className="table-scroll" role="region" aria-label="Followers" tabIndex={0}>
-              <table>
+              <table className="medium">
                 <thead>
                   <tr>
                     <th scope="col">Follower</th>
@@ -98,13 +99,13 @@ export function PoolsTab({ leader }: TabProps) {
                 </thead>
                 <tbody>
                   {followers.map((follower) => (
-                    <tr key={follower.id}>
+                    <tr key={follower.id} data-row={follower.id}>
                       <th scope="row">
                         <code>{shortId(follower.id)}</code>
                       </th>
-                      <td>{follower.pool}</td>
-                      <td>{follower.state}</td>
-                      <td>{follower.device ?? "–"}</td>
+                      <td className="nowrap">{follower.pool}</td>
+                      <td className="nowrap">{follower.state}</td>
+                      <td className="nowrap">{follower.device ?? "–"}</td>
                       <td className="num">{formatCount(follower.leases)}</td>
                       <td>{formatTime(follower.last_seen_at)}</td>
                       <td className="actions">
@@ -149,13 +150,12 @@ export function PoolsTab({ leader }: TabProps) {
             const answer = await api.post<FollowerRevoked>(
               leaderPath(leader.name, `followers/${revoking.id}/revoke`),
             );
-            setNotice(
+            rows.done(
               `Follower ${shortId(revoking.id)} is revoked; ${answer.released} leased jobs went back to the queue.`,
             );
-            read.refresh();
           }}
         />
       )}
-    </>
+    </div>
   );
 }

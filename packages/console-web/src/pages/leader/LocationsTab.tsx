@@ -9,6 +9,7 @@ import { Dialog } from "../../components/Dialog";
 import { ErrorPanel } from "../../components/ErrorPanel";
 import { formatDuration, formatTime } from "../../lib/format";
 import { ActionNotice, ReadState, RefreshButton, useLeaderRead, type TabProps } from "./common";
+import { useRowFocus } from "./rowFocus";
 import {
   EMPTY_FORM,
   FIELD_ORDER,
@@ -253,6 +254,7 @@ export function LocationsTab({ leader }: TabProps) {
   const [adding, setAdding] = useState(false);
   const [disabling, setDisabling] = useState<LocationOut | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const rows = useRowFocus(read, setNotice);
 
   const path = (location: LocationOut, verb: "enable" | "disable" | "ingest") =>
     leaderPath(leader.name, `locations/${encodeURIComponent(location.name)}/${verb}`);
@@ -260,13 +262,12 @@ export function LocationsTab({ leader }: TabProps) {
   const post = async (location: LocationOut, verb: "enable" | "ingest", done: string) => {
     setNotice(null);
     if (await action.run(() => api.post(path(location, verb)))) {
-      setNotice(done);
-      read.refresh();
+      rows.done(done);
     }
   };
 
   return (
-    <>
+    <div {...rows.props}>
       <div className="section-head">
         <ActionButton held={leader.role} action="locations.add" onClick={() => setAdding(true)}>
           Add location
@@ -280,8 +281,8 @@ export function LocationsTab({ leader }: TabProps) {
           locations.length === 0 ? (
             <p>This leader has no locations.</p>
           ) : (
-            <div className="table-scroll" role="region" aria-label="Locations" tabIndex={0}>
-              <table>
+            <div className="table-scroll" role="region" aria-label="Location list" tabIndex={0}>
+              <table className="wide">
                 <thead>
                   <tr>
                     <th scope="col">Location</th>
@@ -297,20 +298,20 @@ export function LocationsTab({ leader }: TabProps) {
                 </thead>
                 <tbody>
                   {locations.map((location) => (
-                    <tr key={location.id}>
+                    <tr key={location.id} data-row={location.id}>
                       <th scope="row">{location.name}</th>
-                      <td>
+                      <td className="long">
                         <span className="mono">{location.root ?? "–"}</span>
                         {location.input_prefix !== "" && (
                           <span className="cell-note">Input prefix {location.input_prefix}</span>
                         )}
                       </td>
-                      <td>{location.pool}</td>
-                      <td>{location.required_device}</td>
+                      <td className="nowrap">{location.pool}</td>
+                      <td className="nowrap">{location.required_device}</td>
                       <td>{channels(location)}</td>
                       <td>{formatDuration(location.scan_interval_s)}</td>
-                      <td>{location.enabled ? "Yes" : "No"}</td>
-                      <td>
+                      <td className="nowrap">{location.enabled ? "Yes" : "No"}</td>
+                      <td className="long">
                         {location.last_scan_at ? formatTime(location.last_scan_at) : "Never"}
                         {location.scan_requested && (
                           <span className="cell-note">Scan requested</span>
@@ -391,11 +392,10 @@ export function LocationsTab({ leader }: TabProps) {
           onConfirm={async () => {
             setNotice(null);
             await api.post(path(disabling, "disable"));
-            setNotice(`${disabling.name} is disabled.`);
-            read.refresh();
+            rows.done(`${disabling.name} is disabled.`);
           }}
         />
       )}
-    </>
+    </div>
   );
 }

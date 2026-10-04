@@ -8,6 +8,7 @@ import { formatTime } from "../../lib/format";
 import { ActionNotice, ReadState } from "../leader/common";
 import { AdminFrame, useAdminList } from "./AdminFrame";
 import { PrincipalFields } from "./PrincipalFields";
+import { useRowFocus } from "../leader/rowFocus";
 
 const noop = () => undefined;
 
@@ -56,9 +57,10 @@ function AdminsContent() {
   const read = useAdminList<ConsoleAdminOut>("/api/admin/console-admins");
   const [removing, setRemoving] = useState<ConsoleAdminOut | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const rows = useRowFocus(read, setNotice);
 
   return (
-    <>
+    <div {...rows.props}>
       <p className="muted">
         Console administrators manage leaders and grants. That gives them no role on any leader
         unless a grant does.
@@ -72,7 +74,7 @@ function AdminsContent() {
             aria-label="Console administrators"
             tabIndex={0}
           >
-            <table>
+            <table className="medium">
               <thead>
                 <tr>
                   <th scope="col">Principal</th>
@@ -82,8 +84,8 @@ function AdminsContent() {
               </thead>
               <tbody>
                 {admins.map((admin) => (
-                  <tr key={admin.id}>
-                    <th scope="row" className="mono">
+                  <tr key={admin.id} data-row={admin.id}>
+                    <th scope="row" className="mono long">
                       {admin.principal_kind}:{admin.principal}
                     </th>
                     <td>
@@ -120,12 +122,11 @@ function AdminsContent() {
           onClose={() => setRemoving(null)}
           onConfirm={async () => {
             await api.del(`/api/admin/console-admins/${encodeURIComponent(removing.id)}`);
-            setNotice("Console administrator removed.");
-            read.refresh();
+            rows.done("Console administrator removed.");
           }}
         />
       )}
-    </>
+    </div>
   );
 }
 

@@ -18,7 +18,13 @@ git pull
 git switch -c fleet-console-c3b
 ```
 
-Before Task 1, in `packages/console-web`: `npm ci`, then `npm test` (60 tests pass), `npm run typecheck`, `npm run lint`, `npm run build`, `npm run e2e` (12 pass).
+**Node floor.** Node 24.15 or later in the 24 line (`engines` is `>=24.15 <25`, `.npmrc` sets `engine-strict=true`, and jsdom's dependencies need 24.15). On an older Node `npm ci` stops with `EBADENGINE`: upgrade Node; do not relax `engine-strict`.
+
+Before Task 1, in `packages/console-web`: `npm ci`, then `npm test` (**118 tests in 12 files** pass: C3a's final total), `npm run typecheck`, `npm run lint`, `npm run build`, `npm run e2e` (12 pass).
+
+**Test-count rule.** Every "Expected: PASS — N tests in M files" below is *the previous total + this task's new tests*, starting from 118 in 12 files. If a count differs, compare against the previous task's total plus the number of tests the task adds (named in its Expected line); a difference means a test was dropped or duplicated, not that the number is stale. Running tally: Task 1 +4 (122, 13 files); Task 2 +4 (126, 15); Task 3 +7 (133, 16); Task 4 +3 (136, 17); Task 5 +3 (139, 19); Task 6 +9 (148, 20).
+
+**Test isolation.** C3a's `src/test/setup.ts` resets, after every test, the session-ended latch, the 401 handler, the CSRF token and the last-input time, as well as the DOM and the address. A test that answers a 401 or fakes the clock therefore cannot stop a later test's polls. Do not add per-file resets for these; if `setup.ts` lacks one of the four, add it there first.
 
 ## Global Constraints
 
@@ -560,7 +566,7 @@ td.actions {
 - [ ] **Step 5: Run everything and commit**
 
 Run: `npm test`
-Expected: PASS — 64 tests in 10 files.
+Expected: PASS — 122 tests in 13 files (118 + 4 new in `ActionButton.test.tsx`).
 
 Run: `npm run typecheck` then `npm run lint`
 Expected: both exit 0 with no output.
@@ -620,9 +626,11 @@ export function renderApp(
 `packages/console-web/src/pages/leader/LeaderPage.test.tsx`:
 
 ```tsx
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { reply } from "../../test/fetchMock";
+import { history } from "../../test/fixtures";
 import { renderApp } from "../../test/renderApp";
 
 describe("leader drill-down", () => {
@@ -641,6 +649,15 @@ describe("leader drill-down", () => {
   it("says a leader the person cannot see is not visible to them", async () => {
     renderApp("/leaders/secret-1/pools");
     expect(await screen.findByText(/This leader is not visible to you/)).toBeInTheDocument();
+  });
+
+  it("moves focus to the leader's heading when the page changes from the fleet to a leader", async () => {
+    renderApp("/")
+      .on("GET /api/leaders/eu-1/history?hours=24", reply(200, history()))
+      .on("GET /api/leaders/eu-1/followers", reply(200, []));
+    await userEvent.click(await screen.findByRole("link", { name: "eu-1" }));
+    const heading = await screen.findByRole("heading", { level: 1, name: "eu-1" });
+    await waitFor(() => expect(heading).toHaveFocus());
   });
 });
 ```
@@ -691,7 +708,7 @@ describe("pools and followers tab", () => {
 ```
 
 Run: `npx vitest run src/pages/leader`
-Expected: FAIL — both files fail (the app has no leader route yet: "Unable to find … eu-1" / "Pools").
+Expected: FAIL — both files fail (the app has no leader route yet: "Unable to find … eu-1" / "Pools"). This task adds 4 tests: 3 in `LeaderPage.test.tsx` (the header and tabs, a leader not visible, focus moving to the `h1` when the page changes) and 1 in `PoolsTab.test.tsx`.
 
 - [ ] **Step 2: Write the tab list and the shared tab pieces**
 
@@ -1056,33 +1073,38 @@ export function LeaderPage({ name, tab }: { name: string; tab: string }) {
 
 - [ ] **Step 5: Route to it and link to it**
 
-Replace `packages/console-web/src/App.tsx` with:
+Edit `packages/console-web/src/App.tsx` **in place**; do not replace the file (C3a's comments, the `/sign-in` branch outside `SessionProvider` and `startActivityTracking` must survive, and `shell.test.tsx` must keep passing). Four edits:
+
+1. Replace the line `import { RouterProvider, useLocation } from "./app/router";` with `import { RouterProvider, matchPath, useLocation, useNavigate } from "./app/router";`, and add `import { LeaderPage } from "./pages/leader/LeaderPage";` and `import { leaderUrl } from "./pages/leader/tabs";` between the `./pages/FleetPage` and `./pages/NotFoundPage` imports.
+2. Replace the `NAV` constant with:
 
 ```tsx
-import { useEffect } from "react";
-import { startActivityTracking } from "./app/activity";
-import { FleetProvider } from "./app/fleet";
-import { RouterProvider, matchPath, useLocation, useNavigate } from "./app/router";
-import { SessionProvider } from "./app/session";
-import { Layout, type NavItem } from "./components/Layout";
-import { FleetPage } from "./pages/FleetPage";
-import { LeaderPage } from "./pages/leader/LeaderPage";
-import { leaderUrl } from "./pages/leader/tabs";
-import { NotFoundPage } from "./pages/NotFoundPage";
-import { SignInPage } from "./pages/SignInPage";
-
 const FLEET: NavItem = {
   to: "/",
   label: "Fleet",
   match: (pathname) => pathname === "/" || pathname.startsWith("/leaders/"),
 };
 
+/**
+ * The page a path belongs to, for moving focus: switching tabs inside one leader's
+ * drill-down stays on the page (focus stays on the tab link that was activated); going
+ * from the fleet to a leader, or from one leader to another, changes the page.
+ */
+function pageOf(pathname: string): string {
+  const leader = matchPath("/leaders/:name/:tab", pathname) ?? matchPath("/leaders/:name", pathname);
+  return leader === null ? pathname : `/leaders/${leader.name as string}`;
+}
+
 function Redirect({ to }: { to: string }) {
   const navigate = useNavigate();
   useEffect(() => navigate(to, { replace: true }), [navigate, to]);
   return null;
 }
+```
 
+3. Replace the body of `SignedInPage` with:
+
+```tsx
 function SignedInPage() {
   const { pathname } = useLocation();
   if (pathname === "/") return <FleetPage />;
@@ -1092,36 +1114,39 @@ function SignedInPage() {
   if (bare !== null) return <Redirect to={leaderUrl(bare.name as string)} />;
   return <NotFoundPage />;
 }
-
-function SignedIn() {
-  return (
-    <FleetProvider>
-      <Layout nav={[FLEET]}>
-        <SignedInPage />
-      </Layout>
-    </FleetProvider>
-  );
-}
-
-function Routes() {
-  const { pathname } = useLocation();
-  if (pathname === "/sign-in") return <SignInPage />;
-  return (
-    <SessionProvider>
-      <SignedIn />
-    </SessionProvider>
-  );
-}
-
-export function App() {
-  useEffect(() => startActivityTracking(), []);
-  return (
-    <RouterProvider>
-      <Routes />
-    </RouterProvider>
-  );
-}
 ```
+
+4. In `Routes`, replace `<Layout nav={NAV}>` with `<Layout nav={[FLEET]} pageOf={pageOf}>`.
+
+**Focus on a tab switch (decision).** C3a's `Layout` moves focus to the page's `h1` on every path change. With each tab its own path, that would pull focus off the tab link a keyboard user just activated and show the `h1`'s focus ring on every tab change. A tab switch keeps focus where it is (on the tab link, which then carries `aria-current="page"`); the move to the `h1` happens only when the *page* changes. `Layout` takes an optional `pageOf(pathname)` that names the page a path belongs to (default: the path itself, which is C3a's behaviour), and its effect depends on that name, not on the path. The `/leaders/<name>` redirect to the first tab does not change the page either.
+
+In `packages/console-web/src/components/Layout.tsx`, replace
+
+```tsx
+export function Layout({ nav, children }: { nav: NavItem[]; children: ReactNode }) {
+  const { session, signOut } = useSession();
+  const { pathname } = useLocation();
+```
+
+with
+
+```tsx
+export function Layout({
+  nav,
+  pageOf = (pathname) => pathname,
+  children,
+}: {
+  nav: NavItem[];
+  /** Names the page a path belongs to; focus moves only when this changes (not on a tab switch). */
+  pageOf?: (pathname: string) => string;
+  children: ReactNode;
+}) {
+  const { session, signOut } = useSession();
+  const { pathname } = useLocation();
+  const page = pageOf(pathname);
+```
+
+and replace the effect's dependency list `}, [pathname]);` with `}, [page]);`. (`pathname` is still used below for the nav's `aria-current`.) The two tests for this are in Step 1 of this task (focus moves when the page changes) and Task 3, Step 3b (focus stays on a tab switch).
 
 In `packages/console-web/src/pages/FleetPage.tsx`, replace
 
@@ -1150,7 +1175,7 @@ and in the same file's imports replace `import { useNavigate, useSearchParam } f
 - [ ] **Step 6: Run everything and commit**
 
 Run: `npm test`
-Expected: PASS — 67 tests in 12 files (the C3a overview tests still pass: a row header's name still contains the leader's name).
+Expected: PASS — 126 tests in 15 files (122 + 4 new: 3 in `LeaderPage.test.tsx`, 1 in `PoolsTab.test.tsx`; `shell.test.tsx` and the C3a overview tests still pass: a row header's name still contains the leader's name).
 
 Run: `npm run typecheck` then `npm run lint`
 Expected: both exit 0 with no output.
@@ -1597,10 +1622,30 @@ with
   }
 ```
 
+- [ ] **Step 3b: Test that a tab switch keeps focus on the tab link**
+
+Append this test inside the `describe` of `packages/console-web/src/pages/leader/LeaderPage.test.tsx` (the `userEvent`, `waitFor`, `within`, `history` and `reply` imports are already there from Task 2):
+
+```tsx
+  it("keeps focus on the tab link when only the tab changes", async () => {
+    renderApp("/leaders/eu-1/pools")
+      .on("GET /api/leaders/eu-1/followers", reply(200, []))
+      .on("GET /api/leaders/eu-1/jobs", reply(200, []));
+    const tabs = await screen.findByRole("navigation", { name: "eu-1 sections" });
+    const jobs = within(tabs).getByRole("link", { name: "Jobs" });
+    await userEvent.click(jobs);
+    await waitFor(() => expect(jobs).toHaveAttribute("aria-current", "page"));
+    expect(jobs).toHaveFocus();
+    expect(screen.getByRole("heading", { level: 1, name: "eu-1" })).not.toHaveFocus();
+  });
+```
+
+Register the exact jobs route the real `JobsTab` requests (Step 2 above, including its query string) in place of `GET /api/leaders/eu-1/jobs` if they differ. Run `npx vitest run src/pages/leader/LeaderPage.test.tsx`: it passes here, and fails (focus on the `h1`) if `Layout` is not given `pageOf`. Include the file in this task's commit.
+
 - [ ] **Step 4: Run everything and commit**
 
 Run: `npm test`
-Expected: PASS — 73 tests in 13 files.
+Expected: PASS — 133 tests in 16 files (126 + 7 new: 6 in `JobsTab.test.tsx`, 1 in `LeaderPage.test.tsx`).
 
 Run: `npm run typecheck` then `npm run lint`
 Expected: both exit 0 with no output. (If the type-check reports "Function lacks ending return statement" in `TabContent`, a `TABS` entry has no `case`.)
@@ -2070,7 +2115,7 @@ add
 - [ ] **Step 4: Run everything and commit**
 
 Run: `npm test`
-Expected: PASS — 76 tests in 14 files.
+Expected: PASS — 136 tests in 17 files (133 + 3 new in `LocationsTab.test.tsx`).
 
 Run: `npm run typecheck` then `npm run lint`
 Expected: both exit 0 with no output.
@@ -2130,6 +2175,7 @@ describe("join tokens tab", () => {
   });
 
   it("shows a new token's plaintext once and drops it when the dialog closes", async () => {
+    const storageWrites = vi.spyOn(Storage.prototype, "setItem");
     const created: TokenCreated = {
       id: "55555555-5555-4555-8555-555555555555",
       token: "sst_plaintext-secret-value",
@@ -2169,9 +2215,9 @@ describe("join tokens tab", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(document.body.innerHTML).not.toContain("sst_plaintext-secret-value");
     expect(window.location.href).not.toContain("sst_plaintext");
-    expect(JSON.stringify({ ...window.localStorage, ...window.sessionStorage })).not.toContain(
-      "sst_plaintext",
-    );
+    // C3a's lint bans window.localStorage and sessionStorage in src/, tests included, so
+    // watch every write through a spy on the prototype instead (set before the flow starts).
+    expect(JSON.stringify(storageWrites.mock.calls)).not.toContain("sst_plaintext");
     expect(await screen.findByText("Join token 55555555 is created.")).toBeInTheDocument();
     expect(mock.callsTo("GET /api/leaders/eu-1/tokens").length).toBeGreaterThanOrEqual(2);
   });
@@ -2608,7 +2654,7 @@ add
 - [ ] **Step 5: Run everything and commit**
 
 Run: `npm test`
-Expected: PASS — 79 tests in 16 files.
+Expected: PASS — 139 tests in 19 files (136 + 3 new in `TokensTab.test.tsx` and `ConsentTab.test.tsx`).
 
 Run: `npm run typecheck` then `npm run lint`
 Expected: both exit 0 with no output.
@@ -3627,83 +3673,40 @@ export function AdminAdminsPage() {
 
 - [ ] **Step 5: Route to the pages**
 
-Replace `packages/console-web/src/App.tsx` with:
+Edit `packages/console-web/src/App.tsx` **in place** (it holds Task 2's edits); do not replace the file, and keep `shell.test.tsx` passing. Four edits:
+
+1. Change `import { SessionProvider } from "./app/session";` to `import { SessionProvider, useSession } from "./app/session";`, and add the three admin page imports (`./pages/admin/AdminAdminsPage`, `./pages/admin/AdminGrantsPage`, `./pages/admin/AdminLeadersPage`) before the `./pages/FleetPage` import.
+2. After the `FLEET` constant add:
 
 ```tsx
-import { useEffect } from "react";
-import { startActivityTracking } from "./app/activity";
-import { FleetProvider } from "./app/fleet";
-import { RouterProvider, matchPath, useLocation, useNavigate } from "./app/router";
-import { SessionProvider, useSession } from "./app/session";
-import { Layout, type NavItem } from "./components/Layout";
-import { AdminAdminsPage } from "./pages/admin/AdminAdminsPage";
-import { AdminGrantsPage } from "./pages/admin/AdminGrantsPage";
-import { AdminLeadersPage } from "./pages/admin/AdminLeadersPage";
-import { FleetPage } from "./pages/FleetPage";
-import { LeaderPage } from "./pages/leader/LeaderPage";
-import { leaderUrl } from "./pages/leader/tabs";
-import { NotFoundPage } from "./pages/NotFoundPage";
-import { SignInPage } from "./pages/SignInPage";
-
-const FLEET: NavItem = {
-  to: "/",
-  label: "Fleet",
-  match: (pathname) => pathname === "/" || pathname.startsWith("/leaders/"),
-};
 const ADMIN: NavItem = {
   to: "/admin/leaders",
   label: "Administration",
   match: (pathname) => pathname.startsWith("/admin"),
 };
+```
 
-function Redirect({ to }: { to: string }) {
-  const navigate = useNavigate();
-  useEffect(() => navigate(to, { replace: true }), [navigate, to]);
-  return null;
-}
+3. In `SignedInPage`, before `return <NotFoundPage />;` add:
 
-function SignedInPage() {
-  const { pathname } = useLocation();
-  if (pathname === "/") return <FleetPage />;
-  const drill = matchPath("/leaders/:name/:tab", pathname);
-  if (drill !== null) return <LeaderPage name={drill.name as string} tab={drill.tab as string} />;
-  const bare = matchPath("/leaders/:name", pathname);
-  if (bare !== null) return <Redirect to={leaderUrl(bare.name as string)} />;
+```tsx
   if (pathname === "/admin") return <Redirect to="/admin/leaders" />;
   if (pathname === "/admin/leaders") return <AdminLeadersPage />;
   if (pathname === "/admin/grants") return <AdminGrantsPage />;
   if (pathname === "/admin/admins") return <AdminAdminsPage />;
-  return <NotFoundPage />;
-}
+```
 
+4. Add a component that picks the navigation, and use it in `Routes` inside the `SessionProvider` branch (`<SessionProvider><SignedIn /></SessionProvider>`), replacing the inline `FleetProvider`/`Layout` block; the `/sign-in` branch stays outside it, as in C3a:
+
+```tsx
 function SignedIn() {
   const { session } = useSession();
   const nav = session.console_admin ? [FLEET, ADMIN] : [FLEET];
   return (
     <FleetProvider>
-      <Layout nav={nav}>
+      <Layout nav={nav} pageOf={pageOf}>
         <SignedInPage />
       </Layout>
     </FleetProvider>
-  );
-}
-
-function Routes() {
-  const { pathname } = useLocation();
-  if (pathname === "/sign-in") return <SignInPage />;
-  return (
-    <SessionProvider>
-      <SignedIn />
-    </SessionProvider>
-  );
-}
-
-export function App() {
-  useEffect(() => startActivityTracking(), []);
-  return (
-    <RouterProvider>
-      <Routes />
-    </RouterProvider>
   );
 }
 ```
@@ -3711,7 +3714,7 @@ export function App() {
 - [ ] **Step 6: Run everything and commit**
 
 Run: `npm test`
-Expected: PASS — 88 tests in 17 files.
+Expected: PASS — 148 tests in 20 files (139 + 9 new in the administration tests).
 
 Run: `npm run typecheck` then `npm run lint` then `npm run build`
 Expected: all exit 0; the build ends with `dist/ ok: index.html and 2 hashed assets`.
@@ -4097,7 +4100,7 @@ Expected: `30 passed` — 6 in `a11y.spec.ts`, 5 in `admin.spec.ts`, 11 in `dril
 If an axe test fails on `color-contrast`, change the token in `src/styles.css` (both theme blocks), never a per-component override. If a test cannot find a row-action button, check the button's `aria-label`: the tests look buttons up by their full accessible name.
 
 Run: `npm run typecheck` then `npm run lint` then `npm test`
-Expected: all pass (88 unit and component tests).
+Expected: all pass (148 unit and component tests: the Task 6 total).
 
 - [ ] **Step 5: Run the backend's checks and commit**
 
@@ -4127,10 +4130,10 @@ CI needs no change: C3a's `web` and `web-e2e` jobs run these tests.
 - Spec 9 web app line — component tests for the drill-down (Tasks 2–5) and administration (Task 6); Playwright against the console and two fake leaders (Task 7); axe on every page (Task 7).
 - Spec 1 "nothing else in the console stops working" — Task 3's unreachable-tab test; Task 7's leader-down test operates the other leader.
 
-**Placeholder scan.** No TBD or "similar to" steps. Files that grow across tasks are changed by exact edits: `tabs.ts` and `LeaderPage.tsx` (Tasks 3, 4, 5). `App.tsx` is shown whole both times it changes (Tasks 2, 6).
+**Placeholder scan.** No TBD or "similar to" steps. Files that grow across tasks are changed by exact edits: `tabs.ts` and `LeaderPage.tsx` (Tasks 3, 4, 5). `App.tsx` is edited in place both times it changes (Tasks 2, 6), never replaced.
 
 **Type consistency.** `ActionButton`'s props are `held`, `action`, `onClick`, `danger`, `busy`, `name` in Task 1 and in every use (Tasks 2–5). `useAction().run` returns `Promise<boolean>` and every caller awaits it. `TabProps { leader }` is what `LeaderPage` passes each tab. `useLeaderRead<T>(name, rest)` returns C3a's `PollState<T>`, which `ReadState` and `RefreshButton` take. `leaderUrl(name, tab?)` is used by `App.tsx`, `FleetPage.tsx`, `LeaderPage.tsx` and `JobsTab.tsx` with `TabId` values that exist by then (`"jobs"` from Task 3). `renderApp(path, { fleet, session })` is used with those option names in every test. Request bodies match the models named in Global Constraints: `{ priority }`, `{ pool, expires_in_seconds, max_uses }`, `locationBody(...)`, `LeaderIn`, `LeaderEdit` from `editBody(...)`, `{ credential }`, `GrantIn`, `ConsoleAdminIn`. The tab ids in `tabs.ts` after Task 5 (`pools`, `jobs`, `locations`, `tokens`, `consent`) are the cases of `TabContent` and the paths in `a11y.spec.ts`.
 
 **Review Focus.** Each of the seven lines names its test: the token (`TokensTab.test.tsx`, `drilldown.spec.ts`); confirmation focus (`drilldown.spec.ts` asserts "Close" is focused; `ConfirmDialog` disables while busy); leader refusals (`JobsTab.test.tsx` `not_retryable`, `drilldown.spec.ts` `us-1`); leader down (`JobsTab.test.tsx`, `drilldown.spec.ts`); credentials and labels (`admin.test.tsx`, `admin.spec.ts`); below the role (`ActionButton.test.tsx`, `JobsTab.test.tsx`, `TokensTab.test.tsx`, `admin.test.tsx`); URLs (`drilldown.spec.ts` reload and redirect test).
 
-**How this plan's code was checked.** As C3a: every file was built and run in a scratch copy of the repository on top of C3a's code — type-check and lint clean, 88 unit and component tests passing, and all 30 end-to-end tests passing against the real console backend, including the axe scans of every page and dialog in both themes — and then transcribed into this document. Three small restructurings were made during transcription and were not re-run: `LabelsField` and the `channels()` helper were extracted, and the pool-name pattern became a named constant in `TokensTab.tsx`. The commands in each task are the check.
+**How this plan's code was checked.** As C3a: every file was built and run in a scratch copy of the repository on top of C3a's code — type-check and lint clean, 148 unit and component tests passing (118 from C3a plus this plan's 30), and all 30 end-to-end tests passing against the real console backend, including the axe scans of every page and dialog in both themes — and then transcribed into this document. Three small restructurings were made during transcription and were not re-run: `LabelsField` and the `channels()` helper were extracted, and the pool-name pattern became a named constant in `TokensTab.tsx`. The commands in each task are the check.

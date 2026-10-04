@@ -6,6 +6,7 @@ import { ErrorPanel } from "../../components/ErrorPanel";
 import { HealthBadge } from "../../components/HealthBadge";
 import { formatTime } from "../../lib/format";
 import { NotFoundPage } from "../NotFoundPage";
+import { JobsTab } from "./JobsTab";
 import { PoolsTab } from "./PoolsTab";
 import { TABS, leaderUrl, type TabId } from "./tabs";
 
@@ -13,6 +14,8 @@ function TabContent({ tab, leader }: { tab: TabId; leader: FleetLeader }) {
   switch (tab) {
     case "pools":
       return <PoolsTab leader={leader} />;
+    case "jobs":
+      return <JobsTab leader={leader} />;
   }
 }
 

@@ -586,6 +586,7 @@ td.actions {
   background: var(--bg);
   color: var(--text);
   overscroll-behavior: contain;
+  overflow-wrap: anywhere;
 }
 
 html:has(dialog[open]) {

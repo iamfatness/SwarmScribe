@@ -73,4 +73,16 @@ describe("leader drill-down", () => {
       screen.getByRole("heading", { level: 1, name: "eu-1" }),
     ).toBeInTheDocument();
   });
+
+  it("keeps focus on the tab link when only the tab changes", async () => {
+    renderApp("/leaders/eu-1/pools")
+      .on("GET /api/leaders/eu-1/followers", reply(200, []))
+      .on("GET /api/leaders/eu-1/jobs?limit=100", reply(200, []));
+    const tabs = await screen.findByRole("navigation", { name: "eu-1 sections" });
+    const jobs = within(tabs).getByRole("link", { name: "Jobs" });
+    await userEvent.click(jobs);
+    await waitFor(() => expect(jobs).toHaveAttribute("aria-current", "page"));
+    expect(jobs).toHaveFocus();
+    expect(screen.getByRole("heading", { level: 1, name: "eu-1" })).not.toHaveFocus();
+  });
 });

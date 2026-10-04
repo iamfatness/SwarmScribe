@@ -4,6 +4,7 @@
 
 export const TABS = [
   { id: "pools", label: "Pools and followers" },
+  { id: "jobs", label: "Jobs" },
 ] as const;
 
 export type TabId = (typeof TABS)[number]["id"];

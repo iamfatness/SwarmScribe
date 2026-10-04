@@ -113,3 +113,13 @@ jobs:
           name: playwright-report
           path: packages/console-web/playwright-report
           retention-days: 7
+
+  console-compose-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the console image
+        run: docker build -t swarmscribe-console:e2e -f docker/console.Dockerfile .
+      - name: Check the console image
+        run: bash docker/check-console-image.sh swarmscribe-console:e2e

@@ -5,6 +5,12 @@
 .ruff_cache
 .superpowers
 **/__pycache__
+**/node_modules
+packages/console-web/dist
+packages/console-web/test-results
+packages/console-web/playwright-report
+packages/console-web/blob-report
 e2e/compose/work
+e2e/console-compose/work
 *.env
 **/*.env

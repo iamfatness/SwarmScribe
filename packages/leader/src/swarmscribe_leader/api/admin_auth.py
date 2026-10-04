@@ -131,6 +131,9 @@ def _authorization(request: Request) -> tuple[str, str]:
         raise Unauthorized("send exactly one Authorization header")
     scheme, _, credential = (values[0] if values else "").partition(" ")
     scheme = scheme.lower()
+    if scheme == "console" and not credential.strip():
+        # A console with an empty credential is sent to the console wording, not Bearer's.
+        raise consoles.InvalidConsoleCredential("missing console credential")
     if scheme not in _SCHEMES or not credential.strip():
         raise Unauthorized(
             "sign in with `swarmscribe-admin login` and send the ID token as a Bearer token"
@@ -165,7 +168,7 @@ async def _console_caller(request: Request, credential: str) -> tuple[Admin, dic
         # A revoked console that keeps calling is worth seeing; an unknown one names no one.
         await _audit(
             request,
-            actor=f"console {exc.console}",
+            actor=consoles.console_actor(exc.console),
             action="console.refused",
             detail={"code": "revoked"},
         )
@@ -178,7 +181,10 @@ async def _console_caller(request: Request, credential: str) -> tuple[Admin, dic
     except LeaderError as exc:
         # A known console sent malformed headers: record that it did, never what it sent.
         await _audit(
-            request, actor=f"console {name}", action="console.refused", detail={"code": exc.code}
+            request,
+            actor=consoles.console_actor(name),
+            action="console.refused",
+            detail={"code": exc.code},
         )
         raise
     caller = Admin(

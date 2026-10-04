@@ -56,6 +56,12 @@ class RevokedConsoleCredential(InvalidConsoleCredential):
         self.console = console
 
 
+def console_actor(name: str) -> str:
+    """The audit actor of a console's own refusal (no person is involved): `console <name>`.
+    A request that does name a person is `<person> via console <name>` (DelegatedActor)."""
+    return f"console {name}"
+
+
 def _exists(name: str) -> Conflict:
     return Conflict(
         f"a console named {name!r} already exists; console names are never reused",

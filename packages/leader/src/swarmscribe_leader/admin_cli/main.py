@@ -177,6 +177,11 @@ def print_fields(data: dict[str, Any], out: TextIO) -> None:
         print(f"{_cell(name)}: {_cell(value)}", file=out)
 
 
+def print_whoami(data: dict[str, Any], out: TextIO) -> None:
+    """The caller's fields; `console` only when the caller is a console."""
+    print_fields({k: v for k, v in data.items() if k != "console" or v is not None}, out)
+
+
 def table(columns: Sequence[str]) -> Renderer:
     return lambda data, out: print_table(out, data, columns)
 
@@ -261,7 +266,7 @@ async def dispatch(args: argparse.Namespace, client: LeaderClient) -> tuple[Any,
         return await client.request("POST", path, **kwargs)
 
     if command == "whoami":
-        return await get("/v1/admin/whoami"), print_fields
+        return await get("/v1/admin/whoami"), print_whoami
     if command == "status":
         return await get("/v1/admin/status"), print_status
     if command == "ingest":

@@ -397,6 +397,39 @@ async def test_a_bearer_and_a_console_header_together_are_refused(
     assert await audit_rows(sessionmaker, "whoami.view") == []
 
 
+async def test_two_bearer_headers_are_refused(admin_client, idp, sessionmaker):
+    token = idp.bearer("admin")["Authorization"].encode()
+    response = await admin_client.get(
+        "/v1/admin/whoami", headers=[(b"authorization", token), (b"authorization", token)]
+    )
+    assert (response.status_code, response.json()["message"]) == (
+        401,
+        "send exactly one Authorization header",
+    )
+    assert response.headers["www-authenticate"].startswith("Bearer")
+    assert await audit_rows(sessionmaker, "whoami.view") == []
+
+
+@pytest.mark.parametrize("value", ["Console", "Console ", "Console    ", "console 	 "])
+async def test_an_empty_console_credential_gets_the_console_answer(
+    admin_client, sessionmaker, value
+):
+    response = await admin_client.get(
+        "/v1/admin/whoami", headers=[(b"authorization", value.encode())]
+    )
+    assert (response.status_code, response.json()["code"]) == (401, "unauthorized")
+    assert "console credential" in response.json()["message"]
+    assert "Bearer" not in response.json()["message"]
+    assert response.headers["www-authenticate"] == 'Console error="invalid_token"'
+    assert await audit_rows(sessionmaker, "console.refused") == []
+
+
+def test_the_audit_actor_of_a_console_refusal_is_console_and_its_name():
+    from swarmscribe_leader.auth.consoles import console_actor
+
+    assert console_actor("Fleet") == "console Fleet"
+
+
 async def test_actor_headers_are_ignored_on_a_persons_request(admin_client, idp, sessionmaker):
     headers = {
         **idp.bearer("viewer"),
@@ -563,6 +596,7 @@ def test_a_delegated_actor_is_named_like_the_same_person_signed_in():
         ("admin", "viewer", "viewer"),
         ("operator", "operator", "operator"),
         ("admin", "operator", "operator"),
+        ("operator", "admin", "operator"),
         ("viewer", "admin", "viewer"),
         ("admin", "admin", "admin"),
     ],

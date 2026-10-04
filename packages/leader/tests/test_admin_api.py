@@ -1313,7 +1313,7 @@ def delegated(credential: str, role: str) -> dict[str, str]:
     "method, path, body, role", DELEGABLE, ids=[f"{m} {p}" for m, p, _, _ in DELEGABLE]
 )
 async def test_a_console_meets_each_routes_role_boundary_like_a_person(
-    admin_client, factory, world, method, path, body, role
+    admin_client, factory, sessionmaker, world, method, path, body, role
 ):
     path = path.format(**world)
     if body is not None:
@@ -1326,6 +1326,15 @@ async def test_a_console_meets_each_routes_role_boundary_like_a_person(
         for headers in (delegated(full, below), delegated(capped, "admin")):
             refused = await admin_client.request(method, path, headers=headers, json=body)
             assert (refused.status_code, refused.json()["code"]) == (403, "forbidden")
+    async with sessionmaker() as session:
+        changes = (
+            await session.scalars(
+                select(AuditEntry).where(
+                    AuditEntry.action != "admin.refused", AuditEntry.actor != "test"
+                )
+            )
+        ).all()
+    assert changes == []  # the refused calls changed and recorded nothing else
     allowed = await admin_client.request(method, path, headers=delegated(full, role), json=body)
     assert allowed.status_code < 400, allowed.text
 

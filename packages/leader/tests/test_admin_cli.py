@@ -765,6 +765,47 @@ async def test_console_create_shows_the_credential_once_and_list_never_does(
         assert (await session.get(ConsoleCredential, row.id)).revoked_at is not None
 
 
+async def test_json_console_create_prints_the_credential_once(cli, store, idp):
+    sign_in_as(store, idp, "admin")
+    code, out, err = await cli(
+        "--json", "console", "create", "--name", "fleet", "--max-role", "viewer"
+    )
+    assert code == 0, err
+    credential = json.loads(out)["credential"]
+    assert out.count(credential) == 1
+    assert credential not in err
+
+
+async def test_console_create_leaves_the_credentials_file_untouched(cli, store, idp):
+    sign_in_as(store, idp, "admin")
+    before = store.path.read_bytes()
+    code, out, err = await cli("console", "create", "--name", "fleet", "--max-role", "viewer")
+    assert code == 0, err
+    credential = out.splitlines()[0].rsplit(" ", 1)[1]
+    assert store.path.read_bytes() == before
+    assert credential.encode() not in before
+
+
+async def test_console_create_with_a_bad_name_is_a_one_line_error(cli, store, idp):
+    sign_in_as(store, idp, "admin")
+    code, out, err = await cli("console", "create", "--name", "a b", "--max-role", "viewer")
+    assert (code, out) == (1, "")
+    assert err.count("\n") == 1
+    assert "Traceback" not in err
+
+
+async def test_whoami_shows_the_console_line_only_for_a_console(cli, store, idp):
+    sign_in_as(store, idp, "viewer")
+    code, out, err = await cli("whoami")
+    assert code == 0, err
+    assert "console" not in out
+    from swarmscribe_leader.admin_cli.main import print_whoami
+
+    shown = io.StringIO()
+    print_whoami({"role": "viewer", "console": "fleet"}, shown)
+    assert "console: fleet" in shown.getvalue()
+
+
 async def test_console_create_of_a_taken_name_is_a_one_line_error(cli, store, idp):
     sign_in_as(store, idp, "admin")
     assert (await cli("console", "create", "--name", "fleet", "--max-role", "viewer"))[0] == 0

@@ -83,8 +83,9 @@ def _google_groups(settings: Settings) -> GoogleGroupsClient | None:
 def _pool_size(settings: Settings) -> int:
     # A poll holds its leader's advisory-lock connection for the whole call and takes a second
     # one to read and record, so a round at full concurrency needs twice the concurrency, plus
-    # one for the prune lock. Requests borrow from the overflow (REQUEST_HEADROOM).
-    return 2 * settings.poll_concurrency + 1
+    # two for the prune (its lock connection and its own session). Requests borrow from the
+    # overflow (REQUEST_HEADROOM). Documented in the package README.
+    return 2 * settings.poll_concurrency + 2
 
 
 def create_app(

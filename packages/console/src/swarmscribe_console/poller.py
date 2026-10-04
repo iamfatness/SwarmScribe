@@ -92,10 +92,12 @@ def classify(reply: LeaderReply) -> tuple[str, dict[str, Any] | None]:
         if reply.status != 200:
             return "bad_response", None
         try:
-            if len(json.dumps(reply.body)) > MAX_STATUS_BYTES:
+            # The client does not expose the wire size; UTF-8 bytes of the parsed answer
+            # (ensure_ascii=False, so non-ASCII text is not inflated) stand in for it.
+            if len(json.dumps(reply.body, ensure_ascii=False).encode()) > MAX_STATUS_BYTES:
                 return "bad_response", None
             return "ok", StatusPayload.model_validate(reply.body).model_dump(mode="json")
-        except (ValidationError, ValueError, TypeError):
+        except (ValidationError, ValueError, TypeError, RecursionError):
             return "bad_response", None
     if is_revoked(reply):
         return "credential_revoked", None
@@ -204,6 +206,11 @@ async def poll_leader(
         outcome = "bad_response"
     except ValueError:  # the client's guards refused the stored URL: a failure, not a crash
         outcome = "invalid_target"
+    except Exception as exc:
+        # Anything else (a RecursionError from a deeply nested answer, a transport bug) still
+        # counts as a failure and advances the cadence; only type and frames are logged.
+        log_contained(logger, f"polling leader {name} failed", exc)
+        outcome = "error"
     await _record(sessionmaker, leader_id, base_url, sealed, outcome, payload, now=now)
     return outcome
 
@@ -234,20 +241,30 @@ async def poll_due_leaders(
         ).all()
     limit = asyncio.Semaphore(config.concurrency)
 
-    async def one(leader_id: int) -> str:
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    async def one(index: int, leader_id: int) -> str:
         async with limit:
             outcome = "locked"
+            # The first batch is stamped `now`; a leader that waited for a slot is stamped
+            # with the time it really started, so cadence does not drift by the round's length.
+            batch_now = now if index < config.concurrency else now + timedelta(
+                seconds=loop.time() - started
+            )
 
             async def work() -> None:
                 nonlocal outcome
                 outcome = await poll_leader(
-                    sessionmaker, client, keys, leader_id, now=now, config=config
+                    sessionmaker, client, keys, leader_id, now=batch_now, config=config
                 )
 
             await run_exclusive(engine, POLL_LOCK_BASE + leader_id, work)
             return outcome
 
-    results = await asyncio.gather(*(one(row.id) for row in rows), return_exceptions=True)
+    results = await asyncio.gather(
+        *(one(i, row.id) for i, row in enumerate(rows)), return_exceptions=True
+    )
     outcomes: dict[str, str] = {}
     for row, result in zip(rows, results, strict=True):
         if isinstance(result, BaseException):

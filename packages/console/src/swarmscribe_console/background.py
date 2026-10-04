@@ -1,5 +1,9 @@
-"""Advisory-lock exclusivity for the console's background work. The same pattern as the
-leader's background.run_exclusive, keyed by number so that each leader has its own lock."""
+"""Advisory-lock exclusivity for the console's background work.
+
+This mirrors swarmscribe_leader.background.run_exclusive. The leader's cannot be imported
+here: it takes a NAME and looks the key up in its own LOCK_KEYS table (reaper, scanner), so a
+console key or a per-leader key cannot be passed, and no leader file may change. A test
+(test_background.py) pins that the two behave the same on lock contention."""
 
 from collections.abc import Awaitable, Callable
 

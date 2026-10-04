@@ -524,5 +524,77 @@ async def test_a_failing_background_step_is_contained_and_logs_no_text(
 async def test_the_engine_pool_holds_the_pollers_concurrency_plus_headroom(app):
     pool = app.state.engine.pool
     concurrency = app.state.poller_config.concurrency
-    assert pool.size() >= 2 * concurrency + 1
+    assert pool.size() >= 2 * concurrency + 2
     assert pool._max_overflow >= 10
+
+
+async def test_an_unexpected_exception_is_recorded_as_a_failure_and_cadence_advances(
+    poll, factory, fake_leader, sessionmaker, caplog
+):
+    await factory.leader("eu-1")
+
+    async def explode(_request):
+        raise RuntimeError(SECRET)
+
+    fake_leader.on_request = explode
+    now = utcnow()
+    with caplog.at_level(logging.DEBUG):
+        assert await poll(now) == {"eu-1": "error"}
+    assert "polling leader eu-1 failed: RuntimeError" in caplog.text
+    assert SECRET not in caplog.text
+    leader = await _leader(sessionmaker)
+    assert (leader.consecutive_failures, leader.last_error, leader.last_polled_at) == (
+        1,
+        "error",
+        now,
+    )
+    (snapshot,) = await _snapshots(sessionmaker)
+    assert (snapshot.reachable, snapshot.outcome, snapshot.status) == (False, "error", None)
+    assert await poll(now + timedelta(seconds=5)) == {}  # waits for its normal turn
+    assert len(fake_leader.requests) == 1
+    assert await poll(now + timedelta(seconds=15)) == {"eu-1": "error"}
+    assert (await _leader(sessionmaker)).consecutive_failures == 2
+
+
+async def test_a_deeply_nested_answer_is_a_failure_not_a_crash(
+    poll, factory, fake_leader, sessionmaker
+):
+    await factory.leader("eu-1")
+    fake_leader.replies[("GET", "/v1/admin/status")] = (
+        200,
+        b"[" * 200_000,
+        {"Content-Type": "application/json"},
+    )
+    now = utcnow()
+    assert (await poll(now))["eu-1"] in {"bad_response", "error"}
+    leader = await _leader(sessionmaker)
+    assert (leader.consecutive_failures, leader.last_polled_at) == (1, now)
+    (snapshot,) = await _snapshots(sessionmaker)
+    assert snapshot.status is None
+
+
+async def test_two_replicas_racing_on_a_revoked_leader_audit_it_once(
+    poll, factory, fake_leader, sessionmaker
+):
+    await factory.leader("eu-1")
+    fake_leader.modes[HOST] = "revoked"
+    now = utcnow()
+    await asyncio.gather(poll(now), poll(now))
+    async with sessionmaker() as session:
+        entries = (await session.scalars(select(AuditEntry))).all()
+    assert [e.action for e in entries] == ["leader.credential_revoked"]
+    assert (await _leader(sessionmaker)).credential_revoked_at == now
+
+
+async def test_a_slow_batch_is_stamped_with_the_time_it_started(
+    poll, factory, fake_leader, sessionmaker
+):
+    for name in ("eu-1", "us-1"):
+        await factory.leader(name)
+        fake_leader.modes[f"{name}.leaders.example"] = "slow"
+    fake_leader.delay = 0.3
+    now = utcnow()
+    await poll(now, concurrency=1, timeout=1.0)
+    stamps = sorted(s.taken_at for s in await _snapshots(sessionmaker))
+    assert stamps[0] == now
+    assert stamps[1] - now >= timedelta(seconds=0.25)

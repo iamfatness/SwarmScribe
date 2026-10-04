@@ -1,11 +1,14 @@
 import argparse
+import asyncio
+import logging.config
 import sys
 from collections.abc import Sequence
 
 from pydantic import ValidationError
+from swarmscribe_leader.db.session import make_engine
 
 from .config import Settings
-from .db.migrate import head_revision, upgrade
+from .db.migrate import current_revision, head_revision, is_known_revision, upgrade
 
 LOGGING = {
     "version": 1,
@@ -41,10 +44,36 @@ def _load_settings() -> Settings | None:
         return None
 
 
+async def _schema_problem(settings: Settings) -> str | None:
+    """Why the console must not serve this database, or None when the schema is current."""
+    engine = make_engine(settings.database_url.get_secret_value())
+    try:
+        revision = await current_revision(engine)
+    except Exception as exc:  # refused, unreachable, bad credentials, timeout
+        return f"cannot connect to the database: {type(exc).__name__}"
+    finally:
+        await engine.dispose()
+    expected = head_revision()
+    if revision == expected:
+        return None
+    if revision is not None and not is_known_revision(revision):
+        return (
+            f"database is ahead of this console: it is at revision {revision}, "
+            f"this console expects {expected}; run a newer console"
+        )
+    return (
+        f"database is at revision {revision or 'none'}, expected {expected}; "
+        "run `swarmscribe-console migrate`"
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="swarmscribe-console")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("migrate", help="bring the console database schema up to date")
+    serve = commands.add_parser("serve", help="run the console")
+    serve.add_argument("--host", default="0.0.0.0")
+    serve.add_argument("--port", type=int, default=8080)
     args = parser.parse_args(argv)
     settings = _load_settings()
     if settings is None:
@@ -54,7 +83,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         upgrade(settings.database_url.get_secret_value())
         print(f"database is at revision {head_revision()}")
         return 0
-    return 2
+
+    problem = asyncio.run(_schema_problem(settings))
+    if problem is not None:
+        print(f"error: {problem}", file=sys.stderr)
+        return 2
+
+    logging.config.dictConfig(LOGGING)
+    import uvicorn
+
+    from .app import create_app
+
+    # access_log=False: the sign-in callback's URL carries an authorization code.
+    # log_config=None: keep the logging configured above.
+    uvicorn.run(
+        create_app(settings),
+        host=args.host,
+        port=args.port,
+        proxy_headers=True,
+        access_log=False,
+        log_config=None,
+    )
+    return 0
 
 
 def run() -> None:

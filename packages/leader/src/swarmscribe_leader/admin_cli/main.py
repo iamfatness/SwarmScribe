@@ -135,6 +135,23 @@ def build_parser() -> argparse.ArgumentParser:
         "name"
     )
 
+    pool_tokens = commands.add_parser(
+        "pool-tokens",
+        help="non-expiring tokens for pools whose followers come and go (Kubernetes);"
+        " administrators, signed in as a person",
+    ).add_subparsers(dest="action", required=True)
+    pool_create = pool_tokens.add_parser("create", help="a new pool token (shown once)")
+    pool_create.add_argument("--name", required=True, help="e.g. gpu-pods")
+    pool_create.add_argument("--pool", default="default")
+    pool_tokens.add_parser("list")
+    pool_revoke = pool_tokens.add_parser("revoke", help="refuse further registrations")
+    pool_revoke.add_argument("name")
+    pool_revoke.add_argument(
+        "--revoke-followers",
+        action="store_true",
+        help="also revoke every follower the token registered (for a token that has leaked)",
+    )
+
     consent = commands.add_parser("consent", help="consent overview").add_subparsers(
         dest="action", required=True
     )
@@ -212,6 +229,14 @@ def print_status(data: dict[str, Any], out: TextIO) -> None:
 
 def print_token(data: dict[str, Any], out: TextIO) -> None:
     print(f"join token (shown once; keep it safe): {_cell(data['token'])}", file=out)
+    print_fields({name: value for name, value in data.items() if name != "token"}, out)
+
+
+def print_pool_token(data: dict[str, Any], out: TextIO) -> None:
+    print(
+        f"pool token (store this now; it will not be shown again): {_cell(data['token'])}",
+        file=out,
+    )
     print_fields({name: value for name, value in data.items() if name != "token"}, out)
 
 
@@ -341,6 +366,16 @@ async def dispatch(args: argparse.Namespace, client: LeaderClient) -> tuple[Any,
             columns = ("name", "max_role", "revoked", "revoked_at", "created_by", "created_at")
             return await get("/v1/admin/consoles"), table(columns)
         return await post(f"/v1/admin/consoles/{_seg(args.name)}/revoke"), print_fields
+    if command == "pool-tokens":
+        if action == "create":
+            body = {"name": args.name, "pool": args.pool}
+            return await post("/v1/admin/pool-tokens", body=body), print_pool_token
+        if action == "list":
+            columns = ("name", "pool", "registrations", "last_used_at", "revoked", "created_by")
+            return await get("/v1/admin/pool-tokens"), table(columns)
+        body = {"revoke_followers": True} if args.revoke_followers else None
+        path = f"/v1/admin/pool-tokens/{_seg(args.name)}/revoke"
+        return await post(path, body=body), print_fields
     if command == "consent":
         params = {"limit": args.limit}
         if args.location:

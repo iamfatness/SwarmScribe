@@ -256,3 +256,41 @@ class ConsoleOut(BaseModel):
     revoked_by: str | None
     created_by: str
     created_at: datetime
+
+
+class PoolTokenIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=NAME_PATTERN)
+    pool: str = Field(default="default", pattern=NAME_PATTERN)
+
+
+class PoolTokenCreated(BaseModel):
+    id: str
+    name: str
+    pool: str
+    token: str
+
+
+class PoolTokenOut(BaseModel):
+    id: str
+    name: str
+    pool: str
+    registrations: int
+    last_used_at: datetime | None
+    revoked: bool
+    revoked_at: datetime | None
+    revoked_by: str | None
+    created_by: str
+    created_at: datetime
+
+
+class PoolTokenRevokeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Also revoke every follower the token registered (for a token that has leaked).
+    revoke_followers: bool = Field(default=False, strict=True)
+
+
+class PoolTokenRevoked(PoolTokenOut):
+    followers_revoked: int

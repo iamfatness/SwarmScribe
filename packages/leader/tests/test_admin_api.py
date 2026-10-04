@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import event, extract, func, literal, select, update
 from sqlalchemy.exc import IntegrityError
+from swarmscribe_leader.auth import pool_tokens
 from swarmscribe_leader.auth.consoles import create_console
 from swarmscribe_leader.auth.followers import create_join_token
 from swarmscribe_leader.auth.secrets import hash_secret
@@ -761,6 +762,9 @@ ROUTES = [
     ("GET", "/v1/admin/consoles", None, "admin"),
     ("POST", "/v1/admin/consoles", {"name": "added-console", "max_role": "viewer"}, "admin"),
     ("POST", "/v1/admin/consoles/{console}/revoke", None, "admin"),
+    ("GET", "/v1/admin/pool-tokens", None, "admin"),
+    ("POST", "/v1/admin/pool-tokens", {"name": "added-pool-token"}, "admin"),
+    ("POST", "/v1/admin/pool-tokens/{pool_token}/revoke", None, "admin"),
 ]
 BELOW = {"viewer": None, "operator": "viewer", "admin": "operator"}
 
@@ -774,6 +778,7 @@ async def world(factory, sessionmaker, tmp_path_factory):
     token_id, _ = await join_token(sessionmaker)
     async with sessionmaker() as session:
         await create_console(session, name="fleet", max_role="admin", actor="test")
+        await pool_tokens.create_pool_token(session, name="gpu-pods", pool="gpu", actor="test")
         await session.commit()
     return {
         "name": "here",
@@ -782,6 +787,7 @@ async def world(factory, sessionmaker, tmp_path_factory):
         "follower": follower.id,
         "token": token_id,
         "console": "fleet",
+        "pool_token": "gpu-pods",
         # a folder apart from the factory location's, which would overlap
         "root": str(tmp_path_factory.mktemp("added-root")),
     }
@@ -1297,7 +1303,13 @@ async def test_revoking_an_unknown_console_is_404(admin_client, idp):
 
 # --- a console's delegated requests meet the same role boundary --------------------------
 
-CONSOLE_MANAGEMENT = {"/v1/admin/consoles", "/v1/admin/consoles/{console}/revoke"}
+# People only, never through a console, and so never on the console's allow-list.
+CONSOLE_MANAGEMENT = {
+    "/v1/admin/consoles",
+    "/v1/admin/consoles/{console}/revoke",
+    "/v1/admin/pool-tokens",
+    "/v1/admin/pool-tokens/{pool_token}/revoke",
+}
 DELEGABLE = [route for route in ROUTES if route[1] not in CONSOLE_MANAGEMENT]
 
 
@@ -1470,3 +1482,166 @@ async def test_status_makes_no_extra_job_queries(admin_app, admin_client, idp, f
         event.remove(engine, "before_cursor_execute", record)
     # By state (with the queue age), open jobs by pool, completions (hour and day): as before.
     assert len([s for s in statements if "FROM jobs" in s]) == 3
+
+
+# --- pool tokens (follower spec 12.1) -----------------------------------------------------
+
+
+async def test_a_pool_token_is_shown_once_registers_followers_and_is_never_logged(
+    admin_client, idp, sessionmaker, caplog
+):
+    with caplog.at_level("DEBUG"):
+        body = {"name": "gpu-pods", "pool": "gpu"}
+        response = await post(admin_client, idp, "/v1/admin/pool-tokens", "admin", body)
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert set(created) == {"id", "name", "pool", "token"}
+    assert created["token"] not in caplog.text
+    register = {"join_token": created["token"], "protocol_version": 1, "capabilities": CAPABILITIES}
+    answers = [await admin_client.post("/v1/followers/register", json=register) for _ in range(3)]
+    assert [answer.status_code for answer in answers] == [200, 200, 200]
+    (listed,) = await get(admin_client, idp, "/v1/admin/pool-tokens", role="admin")
+    assert created["token"] not in str(listed)
+    assert (listed["name"], listed["pool"], listed["registrations"], listed["revoked"]) == (
+        "gpu-pods",
+        "gpu",
+        3,
+        False,
+    )
+    assert listed["created_by"] == actor(idp, "admin")
+    (entry,) = await audit_rows(sessionmaker, "pool_token.create")
+    assert created["token"] not in f"{entry.actor} {entry.detail}"
+    assert len(await audit_rows(sessionmaker, "pool_tokens.view")) == 1
+    # Nor does a refusal, a revocation or any audit entry carry it.
+    conflict = await post(admin_client, idp, "/v1/admin/pool-tokens", "admin", {"name": "gpu-pods"})
+    assert conflict.status_code == 409 and created["token"] not in conflict.text
+    revoked = await post(admin_client, idp, "/v1/admin/pool-tokens/gpu-pods/revoke", "admin")
+    assert created["token"] not in revoked.text
+    async with sessionmaker() as session:
+        every = (await session.scalars(select(AuditEntry))).all()
+    assert created["token"] not in " ".join(f"{e.actor} {e.action} {e.detail}" for e in every)
+
+
+async def test_revoking_a_pool_token_stops_registrations_and_can_take_its_followers(
+    admin_client, idp, sessionmaker
+):
+    created = (
+        await post(admin_client, idp, "/v1/admin/pool-tokens", "admin", {"name": "cpu-pods"})
+    ).json()
+    register = {"join_token": created["token"], "protocol_version": 1, "capabilities": CAPABILITIES}
+    credential = (await admin_client.post("/v1/followers/register", json=register)).json()[
+        "credential"
+    ]
+    plain = await post(admin_client, idp, "/v1/admin/pool-tokens/cpu-pods/revoke", "admin")
+    assert (plain.status_code, plain.json()["revoked"], plain.json()["followers_revoked"]) == (
+        200,
+        True,
+        0,
+    )
+    assert (await admin_client.post("/v1/followers/register", json=register)).status_code == 401
+    headers = {"Authorization": f"Bearer {credential}"}
+    assert (await admin_client.post("/v1/jobs/claim", headers=headers)).status_code == 204
+    again = await post(
+        admin_client,
+        idp,
+        "/v1/admin/pool-tokens/cpu-pods/revoke",
+        "admin",
+        {"revoke_followers": True},
+    )
+    assert again.json()["followers_revoked"] == 1
+    assert (await admin_client.post("/v1/jobs/claim", headers=headers)).status_code == 403
+
+
+async def test_revoking_a_pool_token_twice_keeps_the_first_revocation(admin_client, idp):
+    await post(admin_client, idp, "/v1/admin/pool-tokens", "admin", {"name": "cpu-pods"})
+    path = "/v1/admin/pool-tokens/cpu-pods/revoke"
+    first = (await post(admin_client, idp, path, "admin")).json()
+    second = await post(admin_client, idp, path, "admin")
+    assert second.status_code == 200
+    assert second.json() == {**first, "followers_revoked": 0}
+    assert second.json()["revoked_by"] == actor(idp, "admin")
+    # Revoking the followers of an already revoked token still works and keeps its time.
+    third = await post(admin_client, idp, path, "admin", {"revoke_followers": True})
+    assert (third.status_code, third.json()["revoked_at"]) == (200, first["revoked_at"])
+
+
+@pytest.mark.parametrize(
+    ("body", "status", "code"),
+    [
+        ({"name": "bad name"}, 422, "invalid_request"),
+        ({"name": "ok", "pool": "bad pool"}, 422, "invalid_request"),
+        ({"name": "ok", "expires_in_seconds": 60}, 422, "invalid_request"),
+        ({}, 422, "invalid_request"),
+    ],
+)
+async def test_invalid_pool_tokens_are_refused(admin_client, idp, body, status, code):
+    response = await post(admin_client, idp, "/v1/admin/pool-tokens", "admin", body)
+    assert (response.status_code, response.json()["code"]) == (status, code)
+
+
+async def test_a_bad_pool_token_name_gets_the_fixed_422_without_an_echo(
+    admin_client, idp, sessionmaker
+):
+    response = await post(
+        admin_client, idp, "/v1/admin/pool-tokens", "admin", {"name": "evil name forged-line"}
+    )
+    assert (response.status_code, response.json()["code"]) == (422, "invalid_request")
+    assert "evil" not in response.text and "forged" not in response.text
+    assert await audit_rows(sessionmaker, "pool_token.create") == []
+
+
+async def test_pool_token_names_conflict_and_unknown_ones_are_404(admin_client, idp):
+    body = {"name": "gpu-pods"}
+    first = await post(admin_client, idp, "/v1/admin/pool-tokens", "admin", body)
+    assert first.status_code == 201
+    again = await post(admin_client, idp, "/v1/admin/pool-tokens", "admin", body)
+    assert (again.status_code, again.json()["code"]) == (409, "exists")
+    folded = await post(admin_client, idp, "/v1/admin/pool-tokens", "admin", {"name": "GPU-Pods"})
+    assert (folded.status_code, folded.json()["code"]) == (409, "exists")
+    for name in ("no-such", "bad%20name"):
+        gone = await post(admin_client, idp, f"/v1/admin/pool-tokens/{name}/revoke", "admin")
+        assert gone.status_code == 404, name
+    path = "/v1/admin/pool-tokens/gpu-pods/revoke"
+    wrong = await post(admin_client, idp, path, "admin", {"revoke_followers": 1})
+    assert wrong.status_code == 422
+
+
+async def for_people_with_the_role(admin_client, idp, factory, method, path, body, role):
+    """The route refuses the role below, refuses a console whatever its cap and whoever it
+    names, and admits a person holding the role."""
+    if BELOW[role] is not None:
+        refused = await admin_client.request(
+            method, path, headers=idp.bearer(BELOW[role]), json=body
+        )
+        assert (refused.status_code, refused.json()["code"]) == (403, "forbidden")
+    _, credential = await factory.console(name="full", max_role="admin")
+    through_console = await admin_client.request(
+        method, path, headers=delegated(credential, "admin"), json=body
+    )
+    assert (through_console.status_code, through_console.json()["code"]) == (403, "forbidden")
+    allowed = await admin_client.request(method, path, headers=idp.bearer(role), json=body)
+    assert allowed.status_code < 400, allowed.text
+
+
+POOL_TOKEN_ROUTES = [
+    ("GET", "/v1/admin/pool-tokens", None, "admin"),
+    ("POST", "/v1/admin/pool-tokens", {"name": "added-pool-token"}, "admin"),
+    ("POST", "/v1/admin/pool-tokens/gpu-pods/revoke", None, "admin"),
+]
+
+
+@pytest.mark.parametrize(
+    "method, path, body, role",
+    POOL_TOKEN_ROUTES,
+    ids=[f"{m} {p}" for m, p, _, _ in POOL_TOKEN_ROUTES],
+)
+async def test_pool_token_routes_are_for_administrators_signed_in_as_people(
+    admin_client, idp, factory, sessionmaker, method, path, body, role
+):
+    async with sessionmaker() as session:
+        await pool_tokens.create_pool_token(session, name="gpu-pods", pool="gpu", actor="test")
+        await session.commit()
+    # A viewer is refused too (BELOW names only the role directly beneath).
+    viewer = await admin_client.request(method, path, headers=idp.bearer("viewer"), json=body)
+    assert (viewer.status_code, viewer.json()["code"]) == (403, "forbidden")
+    await for_people_with_the_role(admin_client, idp, factory, method, path, body, role)

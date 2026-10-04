@@ -13,6 +13,7 @@ from .db.models import (
     JobAttempt,
     JobResult,
     JoinToken,
+    PoolToken,
     Recording,
     StorageLocation,
 )
@@ -347,3 +348,26 @@ async def consent_report(
         "flagged": flagged,
         "truncated": len(rows) > limit,
     }
+
+
+def pool_token_view(token: PoolToken) -> dict[str, Any]:
+    """A pool token as administrators see it: never the token or its hash."""
+    return {
+        "id": str(token.id),
+        "name": token.name,
+        "pool": token.pool,
+        "registrations": token.registrations,
+        "last_used_at": token.last_used_at,
+        "revoked": token.revoked_at is not None,
+        "revoked_at": token.revoked_at,
+        "revoked_by": token.revoked_by,
+        "created_by": token.created_by,
+        "created_at": token.created_at,
+    }
+
+
+async def list_pool_tokens(session: AsyncSession) -> list[dict[str, Any]]:
+    tokens = (
+        await session.scalars(select(PoolToken).order_by(PoolToken.created_at, PoolToken.id))
+    ).all()
+    return [pool_token_view(token) for token in tokens]

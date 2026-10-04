@@ -117,7 +117,7 @@ def create_app(
     )
     sessionmaker = make_sessionmaker(engine)
     keys = ConsoleKeys(settings.key_bytes())
-    leader_client = LeaderClient(transport=leader_transport)
+    leader_client = LeaderClient(transport=leader_transport, ca_file=settings.leader_ca_file)
     poller_config = PollerConfig.from_settings(settings)
     session_idle = timedelta(seconds=settings.session_idle_seconds)
 

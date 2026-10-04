@@ -13,7 +13,9 @@ JSON is a LeaderBadAnswer (the proxy maps it to 502 bad_gateway). Nothing here l
 import asyncio
 import json
 import re
+import ssl
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
@@ -41,6 +43,7 @@ __all__ = [
     "LeaderTarget",
     "LeaderUnreachable",
     "is_revoked",
+    "leader_tls_context",
     "person_actor",
 ]
 
@@ -133,10 +136,29 @@ class LeaderBadAnswer(Exception):
     """The leader answered more than MAX_BODY_BYTES, or a success that is not JSON."""
 
 
+def leader_tls_context(ca_file: Path | None) -> ssl.SSLContext | None:
+    """How a leader's certificate is verified. None: httpx's default, the public roots it
+    ships with. With `ca_file` (SWARMSCRIBE_CONSOLE_LEADER_CA_FILE): those roots plus the CA
+    certificates in that PEM file, for leaders on a private CA. Verification and host-name
+    checking are never turned off, and the environment (SSL_CERT_FILE) is never read."""
+    if ca_file is None:
+        return None
+    context = httpx.create_ssl_context(trust_env=False)
+    context.load_verify_locations(cafile=str(ca_file))
+    return context
+
+
 class LeaderClient:
-    def __init__(self, transport: httpx.AsyncBaseTransport | None = None):
+    def __init__(
+        self,
+        transport: httpx.AsyncBaseTransport | None = None,
+        *,
+        ca_file: Path | None = None,
+    ):
+        context = leader_tls_context(ca_file)
         self._client = httpx.AsyncClient(
             transport=transport,
+            verify=True if context is None else context,
             follow_redirects=False,
             trust_env=False,
             timeout=httpx.Timeout(None),

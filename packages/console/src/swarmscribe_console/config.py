@@ -6,6 +6,7 @@ SecretStr: never shown in repr, logs or validation errors."""
 import base64
 import binascii
 import json
+import ssl
 import uuid
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,9 @@ class Settings(BaseSettings):
     proxy_timeout_seconds: float = Field(default=10.0, gt=0)
 
     static_dir: Path | None = None  # the built web app (C3): a folder holding index.html
+    # CA certificates (one PEM file) trusted for calls to leaders, in addition to the
+    # public roots: for leaders whose certificates come from a private CA.
+    leader_ca_file: Path | None = None
 
     @field_validator("database_url")
     @classmethod
@@ -85,9 +89,9 @@ class Settings(BaseSettings):
             raise ValueError("database_url is empty; set the console's own database URL")
         return value
 
-    @field_validator("static_dir", mode="before")
+    @field_validator("static_dir", "leader_ca_file", mode="before")
     @classmethod
-    def _blank_static_dir_is_unset(cls, value: Any) -> Any:
+    def _blank_path_is_unset(cls, value: Any) -> Any:
         # Compose/Kubernetes pass an unset variable as an empty string.
         if isinstance(value, str) and not value.strip():
             return None
@@ -98,6 +102,19 @@ class Settings(BaseSettings):
     def _static_dir_holds_the_app(cls, value: Path | None) -> Path | None:
         if value is not None and not (value / "index.html").is_file():
             raise ValueError("static_dir must be a folder holding the web app's index.html")
+        return value
+
+    @field_validator("leader_ca_file")
+    @classmethod
+    def _leader_ca_file_holds_certificates(cls, value: Path | None) -> Path | None:
+        if value is None:
+            return None
+        try:
+            ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(cafile=str(value))
+        except OSError:  # missing, unreadable, or no certificate in it (ssl.SSLError)
+            raise ValueError(
+                "leader_ca_file must be a readable PEM file of CA certificates"
+            ) from None
         return value
 
     @field_validator("public_url")

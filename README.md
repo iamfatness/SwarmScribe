@@ -446,11 +446,17 @@ and up to 28 connections per replica at the default. Size the database's
 `max_connections` for the replicas times that (the reasoning is in
 `packages/console/README.md`).
 
-**Web app.** `SWARMSCRIBE_CONSOLE_STATIC_DIR` points at the built web app (C3):
-a folder holding `index.html`; blank means none. The console serves it under
-its Content Security Policy (scripts and styles from its own origin only, no
-inline). A path that is not a file and has no extension gets `index.html` so the
-app's own routes survive a reload; `/api` and `/auth` never do.
+**Web app.** The web app is `packages/console-web` (React and TypeScript, built
+with Vite). `npm run build` there writes `packages/console-web/dist`; point
+`SWARMSCRIBE_CONSOLE_STATIC_DIR` at that folder (it must hold `index.html`;
+blank means none). The console serves it under its Content Security Policy
+(scripts and styles from its own origin only, no inline). A path that is not a
+file and has no extension gets `index.html` so the app's own routes survive a
+reload; `/api` and `/auth` never do. Every built asset is named
+`<name>-<16 hex characters>.<ext>` and cached for a year; `index.html` is
+revalidated on every load. The overview refreshes every 10 seconds and stops
+refreshing after 55 minutes without input, so the one-hour idle timeout still
+applies to an open tab.
 
 ### Deployment note: egress
 
@@ -484,6 +490,28 @@ uv run pytest            # unit tests
 uv run pytest -m smoke   # downloads tiny.en and runs the real model
 uv run ruff check .
 ```
+
+The web app (Node 24.15 or later in the 24 line; jsdom's dependencies need it, and
+`.npmrc` sets `engine-strict`, so `npm ci` refuses an older Node. Upgrade Node
+rather than relaxing that):
+
+```
+cd packages/console-web
+npm ci
+npm run typecheck && npm run lint && npm test
+npm run build                      # dist/, checked by scripts/check-dist.mjs
+npx playwright install chromium    # once
+npm run e2e                        # starts e2e/harness/serve.py, then Playwright
+```
+
+The end-to-end harness runs the real console on `http://localhost:8900` with an
+in-memory Entra ID and two in-memory leaders (`eu-1`, `us-1`), on
+`SWARMSCRIBE_TEST_DATABASE_URL` or the local pgserver, and a control server on
+`http://127.0.0.1:8901` that only the tests use. `E2E_HARNESS_COMMAND` replaces
+the command Playwright starts it with (CI uses `uv run python …`). While working
+on the app, `npm run watch` rebuilds `dist/` and `npx playwright test --ui`
+drives it; the Vite dev server is not used, because the console's CSP and CSRF
+checks apply only to the built app on the console's own origin.
 
 `av` is pinned below 19 in `packages/engine/pyproject.toml`: faster-whisper
 1.2.1 passes `metadata_errors=` to `av.open`, which av 19 removed. Lift the

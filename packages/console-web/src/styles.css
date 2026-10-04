@@ -1,0 +1,491 @@
+/* SwarmScribe console. Served as a file under the console's CSP (style-src 'self'): no
+   inline styles anywhere. Colours are tokens; every text pair is at least 4.5:1 and every
+   border, focus ring and chart mark at least 3:1, in both themes. */
+
+:root {
+  color-scheme: light;
+  --bg: #ffffff;
+  --surface: #f6f7f9;
+  --surface-2: #eceef2;
+  --text: #1a1d23;
+  --muted: #555d68;
+  --border: #8b93a0;
+  --rule: #d5d9e0;
+  --accent: #8a5300;
+  --accent-on: #ffffff;
+  --focus: #0b57d0;
+  --ok-bg: #e6f4ea;
+  --ok-fg: #0d652d;
+  --warn-bg: #fef3d6;
+  --warn-fg: #7a4a00;
+  --bad-bg: #fde8e8;
+  --bad-fg: #a31515;
+  --muted-bg: #eceef2;
+  --muted-fg: #3f4651;
+  --radius: 6px;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", "Segoe UI Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #10131a;
+    --surface: #171b24;
+    --surface-2: #212734;
+    --text: #e8eaee;
+    --muted: #a4acb9;
+    --border: #5d6779;
+    --rule: #2c3442;
+    --accent: #f2b544;
+    --accent-on: #1a1200;
+    --focus: #8ab4f8;
+    --ok-bg: #12301e;
+    --ok-fg: #7ee2a1;
+    --warn-bg: #3a2a08;
+    --warn-fg: #f6c76b;
+    --bad-bg: #3d1418;
+    --bad-fg: #ff9b9b;
+    --muted-bg: #262c38;
+    --muted-fg: #c5cad3;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #10131a;
+  --surface: #171b24;
+  --surface-2: #212734;
+  --text: #e8eaee;
+  --muted: #a4acb9;
+  --border: #5d6779;
+  --rule: #2c3442;
+  --accent: #f2b544;
+  --accent-on: #1a1200;
+  --focus: #8ab4f8;
+  --ok-bg: #12301e;
+  --ok-fg: #7ee2a1;
+  --warn-bg: #3a2a08;
+  --warn-fg: #f6c76b;
+  --bad-bg: #3d1418;
+  --bad-fg: #ff9b9b;
+  --muted-bg: #262c38;
+  --muted-fg: #c5cad3;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 100%;
+  line-height: 1.5;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+h1 {
+  font-size: 1.6rem;
+  margin: 0 0 0.5rem;
+}
+
+h2 {
+  font-size: 1.25rem;
+  margin: 1.5rem 0 0.5rem;
+}
+
+a {
+  color: var(--accent);
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+main:focus {
+  outline: none;
+}
+
+code,
+.mono {
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ---- Skip link, header, navigation ---- */
+
+.skip-link {
+  position: absolute;
+  left: 0.5rem;
+  top: -3rem;
+  padding: 0.5rem 1rem;
+  background: var(--accent);
+  color: var(--accent-on);
+  z-index: 10;
+}
+
+.skip-link:focus {
+  top: 0.5rem;
+}
+
+.app-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1.5rem;
+  padding: 0.75rem 1.5rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--surface);
+}
+
+.brand {
+  font-weight: 700;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.nav-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.nav-link {
+  color: var(--text);
+  text-decoration: none;
+  padding: 0.25rem 0;
+  border-bottom: 3px solid transparent;
+}
+
+.nav-link[aria-current="page"] {
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+.header-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  margin-left: auto;
+}
+
+.who {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+main {
+  display: block;
+  padding: 1.25rem 1.5rem 3rem;
+  max-width: 100%;
+}
+
+.page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+}
+
+.page-message {
+  padding: 2rem 1.5rem;
+}
+
+/* ---- Controls ---- */
+
+.button {
+  display: inline-block;
+  font: inherit;
+  padding: 0.35rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.button:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.button-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-on);
+}
+
+.button-primary:hover:not(:disabled) {
+  background: var(--accent);
+  filter: brightness(1.1);
+}
+
+.button-danger {
+  border-color: var(--bad-fg);
+  color: var(--bad-fg);
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  border-style: dashed;
+  color: var(--muted);
+  background: var(--surface);
+}
+
+select,
+input,
+textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.3rem 0.5rem;
+}
+
+.theme-select,
+.field-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* ---- Badges, notices, errors ---- */
+
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.badge-ok {
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+}
+
+.badge-warn {
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+}
+
+.badge-bad {
+  background: var(--bad-bg);
+  color: var(--bad-fg);
+}
+
+.badge-muted {
+  background: var(--muted-bg);
+  color: var(--muted-fg);
+}
+
+.notice {
+  margin: 0.75rem 1.5rem;
+  padding: 0.5rem 0.75rem;
+  border-left: 4px solid var(--warn-fg);
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+}
+
+main .notice {
+  margin: 0.75rem 0;
+}
+
+.error-panel {
+  margin: 0.75rem 0;
+  padding: 0.75rem 1rem;
+  border-left: 4px solid var(--bad-fg);
+  background: var(--bad-bg);
+  color: var(--bad-fg);
+}
+
+.error-panel p {
+  margin: 0 0 0.5rem;
+}
+
+.error-title {
+  font-weight: 700;
+}
+
+/* ---- Tables ---- */
+
+.table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th,
+td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+thead th {
+  background: var(--surface);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+tbody th {
+  font-weight: 400;
+}
+
+td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.fleet-table thead th {
+  min-width: 6rem;
+}
+
+.leader-name {
+  font-weight: 700;
+}
+
+.is-stale td {
+  color: var(--muted);
+}
+
+td,
+th {
+  overflow-wrap: anywhere;
+}
+
+.cell-note,
+.cell-list {
+  max-width: 28rem;
+}
+
+.cell-note {
+  display: block;
+  font-size: 0.8125rem;
+  color: var(--muted);
+}
+
+.cell-list {
+  margin: 0;
+  padding-left: 1rem;
+  font-size: 0.875rem;
+}
+
+.labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  list-style: none;
+  margin: 0.25rem 0 0;
+  padding: 0;
+}
+
+.label-chip {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  padding: 0 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--muted-fg);
+  background: var(--muted-bg);
+}
+
+/* ---- Sparkline ---- */
+
+.sparkline {
+  display: block;
+  width: 160px;
+  height: 36px;
+}
+
+.sparkline-axis {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.sparkline-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.sparkline-dot {
+  fill: var(--accent);
+}
+
+.sparkline-down {
+  fill: var(--bad-fg);
+}
+
+/* ---- Sign-in ---- */
+
+.sign-in {
+  max-width: 32rem;
+  margin: 4rem auto;
+  padding: 0 1.5rem;
+}
+
+.provider-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.provider-list .button {
+  display: block;
+  text-align: center;
+  padding: 0.6rem 1rem;
+}
+
+/* ---- Narrow screens (tablet portrait is 768px) ---- */
+
+@media (max-width: 900px) {
+  .app-header,
+  main {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+
+  .header-tools {
+    margin-left: 0;
+  }
+}

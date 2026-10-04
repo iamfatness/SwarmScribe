@@ -5,6 +5,8 @@ export { expect };
 
 /** The harness's control server (e2e/harness/serve.py); never part of the console. */
 export const CONTROL = "http://127.0.0.1:8901";
+/** The console's origin: playwright.config.ts's baseURL. */
+const CONSOLE = "http://localhost:8900";
 export type Persona = "viewer" | "operator" | "admin";
 
 const ENTRA = "https://login.microsoftonline.com/";
@@ -32,16 +34,37 @@ export async function endAllSessions(request: APIRequestContext): Promise<void> 
  * The whole browser sign-in: the console's sign-in page, its redirect to Entra ID (stopped
  * here and answered by the harness for `persona`), and the callback, which refreshes to the
  * page the person asked for.
+ *
+ * The redirect is stopped at the console's own answer, not at Entra ID's address: Playwright
+ * never offers a redirect's second request to a route, so a route on the Entra ID address let
+ * the browser load the real login.microsoftonline.com, whose script then navigated the page
+ * again and at times overtook the callback.
  */
 export async function signIn(page: Page, persona: Persona, path = "/"): Promise<void> {
-  await page.route(`${ENTRA}**`, (route) =>
-    route.fulfill({ status: 200, contentType: "text/html", body: "<p>Microsoft sign-in</p>" }),
-  );
+  const redirect = { status: 0, location: "" };
+  await page.route("**/auth/login?**", async (route) => {
+    const answer = await route.fetch({ maxRedirects: 0 });
+    redirect.status = answer.status();
+    redirect.location = answer.headers()["location"] ?? "";
+    // The browser keeps the console's cookies (the pending sign-in's) and goes no further.
+    const cookies = answer
+      .headersArray()
+      .filter((header) => header.name.toLowerCase() === "set-cookie")
+      .map((header) => header.value);
+    await route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      headers: { "set-cookie": cookies.join("\n") },
+      body: "<p>Microsoft sign-in</p>",
+    });
+  });
   await page.goto(path);
   await expect(page).toHaveURL(/\/sign-in/);
-  const toEntra = page.waitForRequest((request) => request.url().startsWith(ENTRA));
   await page.getByRole("link", { name: "Sign in with Microsoft Entra ID" }).click();
-  const location = (await toEntra).url();
+  await expect(page.getByText("Microsoft sign-in")).toBeVisible();
+  expect(redirect.status).toBe(302);
+  expect(redirect.location.startsWith(ENTRA)).toBe(true);
+  const { location } = redirect;
   const answer = await page.request.post(`${CONTROL}/control/authorize`, { data: { location, persona } });
   expect(answer.ok()).toBe(true);
   const { callback } = (await answer.json()) as { callback: string };
@@ -64,8 +87,9 @@ export async function expectAccessible(page: Page, context: string): Promise<voi
 export const THEMES = ["light", "dark"] as const;
 
 /**
- * Every test fails on a Content Security Policy violation or an uncaught page error, and
- * starts from a freshly reset console.
+ * Every test fails on a Content Security Policy violation, an uncaught page error or a
+ * browser request to anything but the console (the tests must never depend on the
+ * Internet), and starts from a freshly reset console.
  */
 export const test = base.extend<{ guard: undefined }>({
   guard: [
@@ -77,6 +101,12 @@ export const test = base.extend<{ guard: undefined }>({
         }
       });
       page.on("pageerror", (error) => problems.push(`page error: ${error.message}`));
+      page.on("request", (sent) => {
+        const url = new URL(sent.url());
+        if (/^https?:$/.test(url.protocol) && url.origin !== CONSOLE) {
+          problems.push(`the browser asked the network for ${url.origin}${url.pathname}`);
+        }
+      });
       await resetWorld(request);
       await use(undefined);
       expect(problems).toEqual([]);

@@ -46,6 +46,7 @@ def _report(progress: Progress, fraction: float) -> None:
     except BaseException as exc:
         raise _FromProgress(exc) from None
 
+
 SAMPLE_RATE = 16000  # what Whisper models take, and what faster-whisper resamples to
 _CHUNK = 1024 * 1024
 
@@ -146,6 +147,7 @@ class Transcriber:
         self._decode_errors = _default_decode_errors() if decode_errors is None else decode_errors
         self._channel_count = channel_count
         self._decode_stereo = decode_stereo
+        self._running = False
         self._model = model_factory(settings)
 
     def _select_terms(self, terms: Sequence[str]) -> tuple[str, ...]:
@@ -190,7 +192,7 @@ class Transcriber:
     ) -> tuple[list[Segment], float]:
         """One run of the model. Progress is reported as `start` plus this run's `share` of
         the whole (a split recording is two runs of half each)."""
-        raw_segments, info = self._model.transcribe(
+        raw_segments, info = self._model_or_closed().transcribe(
             audio,
             **FIXED_SETTINGS,
             temperature=list(settings.temperatures),
@@ -198,13 +200,19 @@ class Transcriber:
         )
         duration = float(info.duration)
         segments: list[Segment] = []
-        for raw in raw_segments:
-            segment = _convert(raw)
-            if segment.text:
-                segments.append(segment)
-            if progress is not None:
-                done = segment.end / duration if duration > 0 else 0.0
-                _report(progress, start + share * min(1.0, max(0.0, done)))
+        try:
+            for raw in raw_segments:
+                segment = _convert(raw)
+                if segment.text:
+                    segments.append(segment)
+                if progress is not None:
+                    done = segment.end / duration if duration > 0 else 0.0
+                    _report(progress, start + share * min(1.0, max(0.0, done)))
+        finally:
+            # A stopped pass abandons the generator: release what it holds now.
+            closer = getattr(raw_segments, "close", None)
+            if closer is not None:
+                closer()
         return segments, duration
 
     def _model_or_closed(self) -> Any:
@@ -232,7 +240,10 @@ class Transcriber:
 
     def close(self) -> None:
         """Drop the model so that its memory is returned before another one is loaded.
-        The transcriber cannot be used afterwards."""
+        The transcriber cannot be used afterwards. The caller closes between jobs: closing
+        while `transcribe` runs raises RuntimeError and changes nothing."""
+        if self._running:
+            raise RuntimeError("cannot close a transcriber while it is transcribing")
         self._model = None
         gc.collect()
 
@@ -249,6 +260,19 @@ class Transcriber:
         called after every segment with the fraction done; raising from it stops the
         transcription, and the exception reaches the caller as it was raised."""
         self._model_or_closed()
+        self._running = True
+        try:
+            return self._transcribe(path, vocabulary, settings, progress)
+        finally:
+            self._running = False
+
+    def _transcribe(
+        self,
+        path: Path,
+        vocabulary: Vocabulary,
+        settings: TranscribeSettings | None,
+        progress: Progress | None,
+    ) -> Transcript:
         path = Path(path)
         if not path.is_file():
             raise FileNotFoundError(f"recording not found: {path}")
@@ -272,7 +296,7 @@ class Transcriber:
             if progress is not None:
                 _report(progress, 1.0)
         except _FromProgress as stopped:
-            raise stopped.error from None
+            raise stopped.error from stopped.error.__cause__
         except self._decode_errors as exc:
             raise UndecodableAudioError(f"cannot decode {path.name}: {exc}") from exc
         # Corrections never span a segment, so one pass over the merged list equals one per

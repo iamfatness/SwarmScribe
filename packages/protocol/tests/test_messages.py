@@ -215,3 +215,21 @@ def test_the_drain_header_name_and_value_are_fixed():
 
     assert DIRECTIVE_HEADER == "X-SwarmScribe-Directive"
     assert "drain" in get_args(Directive)
+
+
+def test_a_links_url_never_appears_in_a_repr_or_a_validation_error():
+    from swarmscribe_protocol import JobLinks, Link
+
+    secret = "https://storage.example.org/o?sig=SECRETSIG"
+    assert "SECRETSIG" not in repr(Link(url=secret, method="GET"))
+    put = {"url": secret, "method": "PUT"}
+    links = JobLinks.model_validate(
+        {
+            "download_url": {"url": secret, "method": "GET"},
+            "upload_urls": {"txt": put, "srt": put, "segments_json": put},
+        }
+    )
+    assert "SECRETSIG" not in repr(links) and "SECRETSIG" not in str(links)
+    with pytest.raises(ValidationError) as bad:
+        Link.model_validate({"url": secret, "method": "DELETE"})
+    assert "SECRETSIG" not in str(bad.value)

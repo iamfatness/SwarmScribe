@@ -360,3 +360,16 @@ async def test_a_lease_that_expires_on_its_last_attempt_is_audited_as_failed(
         ).all()
     assert (entry.actor, entry.subject_type, entry.subject_id) == ("system", "job", str(job.id))
     assert entry.detail == {"follower": str(holder.id), "attempt": 1, "state": "failed"}
+
+
+async def test_no_follower_is_marked_gone_during_the_startup_grace(sessionmaker, factory):
+    follower, _ = await factory.follower()
+    now = utcnow() + timedelta(hours=1)
+    grace = timedelta(seconds=120)
+    kwargs = {"now": now, "startup_grace": grace}
+    result = await run_reaper(sessionmaker, started_at=now - timedelta(seconds=10), **kwargs)
+    assert result.gone == 0
+    async with sessionmaker() as session:
+        assert (await session.get(Follower, follower.id)).state == "active"
+    result = await run_reaper(sessionmaker, started_at=now - timedelta(seconds=120), **kwargs)
+    assert result.gone == 1

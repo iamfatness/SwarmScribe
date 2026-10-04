@@ -119,6 +119,7 @@ async def _register_with_pool_token(
         follower = Follower(id=uuid.uuid4(), pool=pool_token.pool, pool_token_id=pool_token.id)
         session.add(follower)
     # A reused row's old credential stops working here: its hash is replaced.
+    follower.pool = pool_token.pool
     follower.capabilities = _capabilities(request, pool_token.pool)
     follower.credential_hash = hash_secret(credential)
     follower.state = "active"

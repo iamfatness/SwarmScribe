@@ -17,7 +17,7 @@ from swarmscribe_leader.auth.pool_tokens import (
 from swarmscribe_leader.auth.secrets import hash_secret
 from swarmscribe_leader.clock import utcnow
 from swarmscribe_leader.db.models import AuditEntry, Follower, Job, PoolToken
-from swarmscribe_leader.errors import Conflict, Forbidden, NotFound, Unauthorized
+from swarmscribe_leader.errors import Conflict, Forbidden, LeaderError, NotFound, Unauthorized
 from swarmscribe_leader.jobs import store
 from swarmscribe_leader.jobs.reaper import reap
 from swarmscribe_protocol import Capabilities, RegisterRequest
@@ -368,3 +368,90 @@ async def test_the_pool_comes_from_the_token_not_the_request(sessionmaker):
     plaintext = await pool_token(sessionmaker, pool="gpu")
     follower, _ = await join(sessionmaker, plaintext)  # the request claims pool="ignored"
     assert follower.pool == "gpu" and follower.capabilities["pool"] == "gpu"
+
+
+async def test_a_case_variant_of_an_existing_name_is_refused(sessionmaker):
+    await pool_token(sessionmaker, name="gpu-pods")
+    async with sessionmaker() as session:
+        with pytest.raises(Conflict) as refused:
+            await create_pool_token(session, name="GPU-Pods", pool="gpu", actor="test")
+    assert (refused.value.status, refused.value.code) == (409, "exists")
+
+
+async def test_revoking_with_followers_survives_a_stale_job_call_in_flight(
+    sessionmaker, factory, monkeypatch
+):
+    """The reviewer's deadlock: the revoke held one follower's job while waiting for another
+    follower's row, and that follower's stale heartbeat waited for the job."""
+    # The retry is a safety net; the lock order must make it unnecessary.
+    monkeypatch.setattr(
+        "swarmscribe_leader.auth.pool_tokens._is_lock_conflict", lambda exc: False
+    )
+    plaintext = await pool_token(sessionmaker, pool="default")
+    one, _ = await join(sessionmaker, plaintext)
+    two, _ = await join(sessionmaker, plaintext)
+    low, high = sorted((one.id, two.id))
+    job = await factory.job()
+    async with sessionmaker() as session:
+        holder = await session.get(Follower, low)
+        claimed = await store.claim(session, holder, now=utcnow(), lease_seconds=120)
+        assert claimed is not None
+        await session.commit()
+    lease_id = str(claimed.lease_id)
+
+    async def revoke():
+        async with sessionmaker() as session:
+            result = await revoke_pool_token(
+                session, "gpu-pods", now=utcnow(), actor="admin", revoke_followers=True
+            )
+            await session.commit()
+            return result
+
+    async with sessionmaker() as stale:
+        # The other follower's request is in flight: it holds its own row.
+        busy = await stale.get(Follower, high, with_for_update=True, populate_existing=True)
+        task = asyncio.create_task(revoke())
+        await asyncio.sleep(1)  # the revoke is now waiting for that row
+        with pytest.raises(LeaderError):
+            await store.heartbeat(
+                stale, job.id, lease_id, busy, now=utcnow(), lease_seconds=120
+            )
+        await stale.rollback()
+    _, revoked = await asyncio.wait_for(task, timeout=30)
+    assert revoked == 2
+    async with sessionmaker() as session:
+        assert (await session.scalars(select(PoolToken))).one().revoked_at is not None
+        states = {row.state for row in (await session.scalars(select(Follower))).all()}
+        assert states == {"revoked"}
+        assert (await session.get(Job, job.id)).state == "queued"
+
+
+async def test_a_deadlocked_follower_pass_is_retried_and_the_token_stays_revoked(
+    sessionmaker, monkeypatch
+):
+    from sqlalchemy.exc import DBAPIError
+    from swarmscribe_leader.auth import pool_tokens
+
+    class Deadlock(Exception):
+        sqlstate = "40P01"
+
+    plaintext = await pool_token(sessionmaker)
+    await join(sessionmaker, plaintext)
+    real = pool_tokens._revoke_followers_of
+    calls = []
+
+    async def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise DBAPIError("revoke", {}, Deadlock())
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(pool_tokens, "_revoke_followers_of", flaky)
+    async with sessionmaker() as session:
+        token, revoked = await revoke_pool_token(
+            session, "gpu-pods", now=utcnow(), actor="admin", revoke_followers=True
+        )
+        await session.commit()
+    assert (len(calls), revoked, token.revoked_by) == (2, 1, "admin")
+    async with sessionmaker() as session:
+        assert (await session.scalars(select(PoolToken))).one().revoked_at is not None

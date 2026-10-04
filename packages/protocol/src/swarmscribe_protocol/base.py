@@ -9,4 +9,4 @@ Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 class WireModel(BaseModel):
     """Base for everything that crosses the leader-follower wire."""
 
-    model_config = ConfigDict(frozen=True, protected_namespaces=())
+    model_config = ConfigDict(frozen=True, protected_namespaces=(), hide_input_in_errors=True)

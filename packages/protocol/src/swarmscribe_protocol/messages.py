@@ -16,7 +16,7 @@ FailureCode = Literal["source_changed", "undecodable", "engine_error", "out_of_r
 class Link(WireModel):
     """A short-lived, single-object URL. Identical for every storage backend."""
 
-    url: str
+    url: str = Field(repr=False)  # a capability: never in a log line
     method: Literal["GET", "PUT"]
     headers: dict[str, str] = Field(default_factory=dict)
 

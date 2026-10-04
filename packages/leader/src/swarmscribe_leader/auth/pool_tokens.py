@@ -13,8 +13,8 @@ import re
 import uuid
 from datetime import datetime
 
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func, select
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import audit
@@ -48,7 +48,8 @@ async def create_pool_token(
             "a pool token name starts with a letter or digit and holds only letters, digits,"
             " '.', '_' and '-' (at most 100 characters)"
         )
-    if await session.scalar(select(PoolToken.id).where(PoolToken.name == name)) is not None:
+    existing = select(PoolToken.id).where(func.lower(PoolToken.name) == name.lower())
+    if await session.scalar(existing) is not None:
         raise _exists(name)
     plaintext = new_secret()
     token = PoolToken(
@@ -103,16 +104,19 @@ async def revoke_pool_token(
         token.revoked_by = actor
     revoked = 0
     if revoke_followers:
-        follower_ids = (
-            await session.scalars(
-                select(Follower.id)
-                .where(Follower.pool_token_id == token.id, Follower.state != "revoked")
-                .order_by(Follower.id)
-            )
-        ).all()
-        for follower_id in follower_ids:
-            await revoke_follower(session, follower_id, now=now, actor=actor)
-            revoked += 1
+        # The token's revocation must not depend on the follower pass: commit it first, so
+        # that a pass that has to be retried (or fails) still leaves the token refused.
+        token_id = token.id
+        await session.commit()
+        for attempt in range(_ATTEMPTS):
+            try:
+                revoked = await _revoke_followers_of(session, token_id, now=now, actor=actor)
+                break
+            except DBAPIError as exc:
+                await session.rollback()
+                if not _is_lock_conflict(exc) or attempt == _ATTEMPTS - 1:
+                    raise
+        await session.refresh(token)  # a rollback expired it
     audit.record(
         session,
         actor=actor,
@@ -122,3 +126,37 @@ async def revoke_pool_token(
         detail={"name": token.name, "followers_revoked": revoked},
     )
     return token, revoked
+
+
+_ATTEMPTS = 3
+
+
+def _is_lock_conflict(exc: DBAPIError) -> bool:
+    """A deadlock (40P01) or serialization failure (40001): the transaction can be redone."""
+    orig = exc.orig
+    for candidate in (orig, getattr(orig, "__cause__", None)):
+        code = getattr(candidate, "sqlstate", None) or getattr(candidate, "pgcode", None)
+        if code in ("40P01", "40001"):
+            return True
+    return False
+
+
+async def _revoke_followers_of(
+    session: AsyncSession, token_id: uuid.UUID, *, now: datetime, actor: str
+) -> int:
+    """Lock every follower row of the token first, in id order and in one statement, and only
+    then release leases (which locks job rows). Every other path takes one follower row and
+    then its jobs; holding one follower's jobs while waiting for another follower's row would
+    close a cycle with that follower's own request."""
+    followers = (
+        await session.scalars(
+            select(Follower)
+            .where(Follower.pool_token_id == token_id, Follower.state != "revoked")
+            .order_by(Follower.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    for follower in followers:
+        await revoke_follower(session, follower.id, now=now, actor=actor)
+    return len(followers)

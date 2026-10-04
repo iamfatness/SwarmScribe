@@ -852,3 +852,30 @@ def test_close_releases_the_model():
     del model
     transcriber.close()
     assert ref() is None
+
+
+def test_close_during_a_transcription_is_refused_and_changes_nothing(audio):
+    holder = {}
+
+    def close_midway(_fraction):
+        with pytest.raises(RuntimeError, match="while it is transcribing"):
+            holder["transcriber"].close()
+
+    holder["transcriber"] = make_transcriber(FakeModel(segments=three_segments(), duration=10.0))
+    holder["transcriber"].transcribe(audio, progress=close_midway)  # the pass completes
+    holder["transcriber"].close()  # between jobs it works
+    with pytest.raises(RuntimeError, match="closed"):
+        holder["transcriber"].transcribe(audio)
+
+
+def test_the_callbacks_own_cause_is_preserved(audio):
+    root = ValueError("root")
+
+    def stop(_fraction):
+        raise Stop("enough") from root
+
+    with pytest.raises(Stop) as stopped:
+        make_transcriber(FakeModel(segments=three_segments(), duration=10.0)).transcribe(
+            audio, progress=stop
+        )
+    assert stopped.value.__cause__ is root

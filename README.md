@@ -281,18 +281,42 @@ The fleet console is one web service for many leaders. It has its own Postgres
 | `SWARMSCRIBE_CONSOLE_GOOGLE_CLIENT_ID`, `_GOOGLE_CLIENT_SECRET` | Google OAuth web client (both); optional `_GOOGLE_HOSTED_DOMAIN`, `_GOOGLE_SERVICE_ACCOUNT` (Google Groups) |
 | `SWARMSCRIBE_CONSOLE_SESSION_LIFETIME_SECONDS`, `_SESSION_IDLE_SECONDS`, `_LOGIN_ATTEMPT_SECONDS` | optional: session lifetime (default 28800, 8 hours), idle timeout (3600, 1 hour), how long a started sign-in may take (600) |
 
+Bootstrap the first console administrator with the command that fits your
+sign-in provider (see "Which principals a sign-in yields" below):
+
 ```
 uv run swarmscribe-console migrate
+
+# Entra ID sign-in: a group's object id (Entra gives group ids only, never an email)
+uv run swarmscribe-console admins add entra_group <group-object-id>
+
+# Google sign-in: an email, or a Workspace domain
 uv run swarmscribe-console admins add email you@example.org
+
 uv run swarmscribe-console serve --port 8443
 ```
 
 Sign-in uses the same rules as the leader (section "Administrators: sign-in
 and roles"). A person may sign in only if a grant or a console-administrator
-entry names one of their principals: an Entra group id (`entra_group`), a
-Google group (`google_group`), an email or a domain. Group membership is read
-at sign-in; it applies to an open session at the next sign-in (sessions last
-at most 8 hours, 1 hour idle).
+entry names one of their principals. Group membership is read at sign-in; it
+applies to an open session at the next sign-in (sessions last at most 8 hours,
+1 hour idle).
+
+### Which principals a sign-in yields
+
+A grant or console-administrator entry only matches if the person's sign-in
+produces that kind of principal:
+
+| Provider | Principal kinds a sign-in yields |
+|---|---|
+| Entra ID | `entra_group` (group object ids) **only**. An Entra email is never a principal, so an `email` or `domain` entry can never match an Entra user |
+| Google | `email` and `domain` under the Workspace rules (the token's `hd` claim equals the domain; a gmail.com address is its own email), and `google_group` when `SWARMSCRIBE_CONSOLE_GOOGLE_SERVICE_ACCOUNT` is set |
+
+`swarmscribe-console admins add` knows which providers are configured. It
+refuses a kind that no configured provider can produce (an `email` on an
+Entra-only console would lock everyone out), and warns when a `google_group`
+is added without the service account. A console with both providers accepts
+every kind.
 
 Console administrators manage leaders and grants (under `/api/admin`); that
 gives them no role on any leader. A person's role on a leader is the highest
@@ -306,7 +330,10 @@ the database, which is how the first one is made: whoever can run it holds the
 database, so it is not behind sign-in. It also works when administrators
 already exist (it adds one more; an existing one is refused as "already").
 `swarmscribe-console admins list` prints `<kind>:<principal>` and who added it.
-Both need a migrated database. Everything else is done by a console
+Both need a migrated database **and** the full `SWARMSCRIBE_CONSOLE_*`
+configuration (database URL, public URL, key and at least one identity
+provider, as for `serve`): the command reads the configuration to know which
+principal kinds can match. Everything else is done by a console
 administrator over the API, which needs the session cookie and, on every
 change, the `X-CSRF-Token` header (from `GET /api/session`):
 
@@ -316,24 +343,50 @@ change, the `X-CSRF-Token` header (from `GET /api/session`):
 | `GET`, `POST /api/admin/grants`; `DELETE /api/admin/grants/{grant_id}` | role grants: `{role, scope, principal_kind, principal}`; role is `viewer`, `operator` or `admin` |
 | `GET`, `POST /api/admin/console-admins`; `DELETE /api/admin/console-admins/{admin_id}` | console administrators: `{principal_kind, principal}` |
 
+The leader registry has its own rules. A leader's name is unique ignoring case.
+Changing its `base_url` (`PATCH`) needs the console credential in the same
+request (`422 credential_required` without it), because the credential is
+sealed bound to the name and URL and must not follow an edit to another host;
+a credential sent with an unchanged URL is `422 use_rotate` (replace it alone
+with `PUT .../credential`). A URL change or a rotation clears the revoked mark
+and resets the leader's poll health. Removing a leader also removes the grants
+whose scope is `leader:<that name>` (each is audited), so a leader registered
+later under the same name inherits none; label and `all` grants stay. An
+unknown leader, grant or administrator is always `404 not_found`.
+
 Principals are stored as lowercase ASCII (an Entra group id as a lowercase
 GUID), exactly as sign-in produces them, so `Person@Example.org` and
 `person@example.org` are one principal. A principal has at most one role per
 scope (a second grant is `409 exists`; remove the first). Removing the last
 console administrator is refused with `409 last_admin`, also when two removals
-race. A grant may name a leader that is not registered yet: grants and leaders
-are administered separately, and a scope only matches registered leaders when a
-role is looked up. Every change is written to the audit log.
+race. (The rule counts administrator entries, not administrators who can still
+sign in; the `admins add` command is the way back in.) A grant may name a leader
+that is not registered yet: a scope only matches registered leaders when a role
+is looked up. Every change is written to the audit log.
 
 ### Deployment note: egress
 
-The console refuses leader URLs that are not https or that name loopback,
-link-local, unspecified or multicast addresses, the cloud metadata services
-(including `fd00:ec2::254` and `100.100.100.200` and the names `metadata`,
-`metadata.internal`, `metadata.google.internal`, `instance-data`, `instance-data.ec2.internal`), 6to4,
-Teredo, `fec0::/10` and `0.0.0.0/8`. Private addresses are allowed, so the
-console can reach leaders on a LAN. Add the same blocks to the console host's
-egress policy: the URL check cannot see where a name resolves to later.
+This is the one place the leader-URL rules and the egress policy are written
+down. The console refuses a leader URL that:
+
+- is not `https://`, or carries user info, a query or a fragment, a non-ASCII or
+  non-DNS host, a port outside 1-65535, or a path of anything but plain segments;
+- names a loopback, link-local, unspecified, multicast or reserved address
+  (this includes NAT64 `64:ff9b::/96`), a numeric spelling of an address, an
+  IPv6 address with a zone id, or an IPv4-mapped form of any of those;
+- names `localhost`, a `*.localhost` host, or one of `ip6-localhost`,
+  `ip6-loopback`, `metadata`, `metadata.internal`, `metadata.google.internal`,
+  `instance-data`, `instance-data.ec2.internal`;
+- is in `0.0.0.0/8`, `fec0::/10`, 6to4 (`2002::/16`) or Teredo (`2001::/32`), or is
+  one of the metadata addresses `fd00:ec2::254` (AWS IPv6) and `100.100.100.200`
+  (Alibaba Cloud).
+
+Private addresses are allowed, so the console can reach leaders on a LAN. These
+checks read only the registered text; a DNS name can still resolve to any
+address later. Add the same blocks to the console host's egress policy: deny
+its traffic to loopback, link-local and metadata addresses (`169.254.169.254`,
+`fd00:ec2::254`, `100.100.100.200`) and allow only the leaders' networks (the
+poller's egress policy itself is C4's).
 
 ## Develop
 

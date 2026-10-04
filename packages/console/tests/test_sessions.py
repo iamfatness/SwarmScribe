@@ -454,15 +454,65 @@ async def test_refusals_from_outside_the_routes_carry_the_security_headers(app, 
     assert answer.headers["cache-control"] == "no-store"
 
 
-async def test_an_unhandled_error_is_logged_once_by_type_and_route_only(app, caplog):
+async def test_an_unhandled_error_is_logged_once_with_frames_but_never_its_text(app, caplog):
+    secret = "".join(["secret", "-detail"])  # built here, so no source line spells it
+
     @app.get("/api/boom2")
     async def boom():
-        raise RuntimeError("secret-detail")
+        raise RuntimeError(secret)
 
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=True)
     with caplog.at_level(logging.INFO):
         async with httpx.AsyncClient(transport=transport, base_url="https://console.test") as c:
             assert (await c.get("/api/boom2")).status_code == 500
     lines = [r.getMessage() for r in caplog.records if "unhandled" in r.getMessage()]
-    assert lines == ["unhandled error: RuntimeError at /api/boom2"]
-    assert "secret-detail" not in caplog.text
+    assert len(lines) == 1
+    first, _, frames = lines[0].partition("\n")
+    assert first == "unhandled error: RuntimeError at /api/boom2"
+    assert "in boom" in frames and "raise RuntimeError(secret)" in frames
+    assert secret not in caplog.text
+
+
+async def test_contain_errors_wraps_http_only_so_a_lifespan_failure_reaches_the_server():
+    from swarmscribe_console.app import ContainErrors
+
+    async def failing(scope, receive, send):
+        raise RuntimeError("startup failed")
+
+    wrapped = ContainErrors(failing)
+    with pytest.raises(RuntimeError):
+        await wrapped({"type": "lifespan"}, None, None)
+    with pytest.raises(RuntimeError):
+        await wrapped({"type": "websocket"}, None, None)
+    await wrapped({"type": "http"}, None, None)  # contained (and logged), not raised
+
+
+async def test_the_database_engine_hides_statement_parameters(app):
+    assert app.state.engine.sync_engine.hide_parameters is True
+
+
+def test_a_root_mount_holding_api_routes_is_refused():
+    from starlette.applications import Starlette
+    from starlette.routing import Mount, Route
+    from starlette.staticfiles import StaticFiles
+
+    async def noop(request):
+        return None
+
+    sub = Starlette(routes=[Route("/api/things", noop, methods=["POST"])])
+    root = FastAPI()
+    root.mount("/", sub)
+    with pytest.raises(UnguardedRoute, match=r"Mount at '/' contains the /api route"):
+        assert_guarded(root.routes)
+    nested = Starlette(routes=[Mount("/", routes=[Route("/api/x", noop)])])
+    outer = FastAPI()
+    outer.mount("/", nested)
+    with pytest.raises(UnguardedRoute, match="contains the /api route"):
+        assert_guarded(outer.routes)
+    # Static files at the root hold no routes: fine. So is a mount that is not at the root.
+    static = FastAPI()
+    static.mount("/", StaticFiles(directory=".", check_dir=False))
+    assert_guarded(static.routes)
+    elsewhere = FastAPI()
+    elsewhere.mount("/ui", sub)
+    assert_guarded(elsewhere.routes)

@@ -48,7 +48,7 @@ def _load_settings() -> Settings | None:
 
 async def _schema_problem(settings: Settings) -> str | None:
     """Why the console must not serve this database, or None when the schema is current."""
-    engine = make_engine(settings.database_url.get_secret_value())
+    engine = make_engine(settings.database_url.get_secret_value(), hide_parameters=True)
     try:
         revision = await current_revision(engine)
     except Exception as exc:  # refused, unreachable, bad credentials, timeout
@@ -72,12 +72,49 @@ async def _schema_problem(settings: Settings) -> str | None:
 CLI_ACTOR = "swarmscribe-console cli"
 
 
+def principal_problem(settings: Settings, kind: str) -> tuple[str | None, str | None]:
+    """(refusal, warning) for a principal kind the configured sign-in can never produce.
+
+    Entra ID sign-in yields group object ids only, never an email. Google sign-in yields an
+    email and its domain (under the Workspace rules) and, with a service account, groups. A
+    console administrator whose kind no configured provider produces could never sign in, so
+    that is refused; a Google group without a service account is allowed (it is fixed by
+    configuration later) but warned about."""
+    entra = bool(settings.entra_client_id)
+    google = bool(settings.google_client_id)
+    if kind == "entra_group":
+        if not entra:
+            return (
+                "Entra ID sign-in is not configured, so an entra_group can never match; "
+                "use an email or a domain (Google sign-in is configured)",
+                None,
+            )
+        return None, None
+    if not google:
+        return (
+            f"only Entra ID sign-in is configured, and it yields group ids only, so a {kind} "
+            "can never match; use `admins add entra_group <group-object-id>`",
+            None,
+        )
+    if kind == "google_group" and settings.google_service_account is None:
+        return None, (
+            "warning: Google groups need SWARMSCRIBE_CONSOLE_GOOGLE_SERVICE_ACCOUNT; "
+            "until it is set this google_group cannot match anyone"
+        )
+    return None, None
+
+
 async def _admins(settings: Settings, args: argparse.Namespace) -> int:
-    engine = make_engine(settings.database_url.get_secret_value())
+    engine = make_engine(settings.database_url.get_secret_value(), hide_parameters=True)
     try:
         async with make_sessionmaker(engine)() as session:
             if args.admins_command == "add":
                 try:
+                    grants.normalize_principal(args.kind, args.principal)
+                    refusal, warning = principal_problem(settings, args.kind)
+                    if refusal is not None:
+                        print(f"error: {refusal}", file=sys.stderr)
+                        return 1
                     admin = await grants.add_console_admin(
                         session,
                         principal_kind=args.kind,
@@ -89,6 +126,8 @@ async def _admins(settings: Settings, args: argparse.Namespace) -> int:
                     return 1
                 await session.commit()
                 print(f"console administrator added: {admin.principal_kind}:{admin.principal}")
+                if warning is not None:
+                    print(warning, file=sys.stderr)
                 return 0
             for admin in await grants.list_console_admins(session):
                 print(f"{admin.principal_kind}:{admin.principal}\t{admin.created_by}")
@@ -116,7 +155,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     if args.command == "migrate":
-        upgrade(settings.database_url.get_secret_value())
+        try:
+            upgrade(settings.database_url.get_secret_value())
+        except Exception as exc:  # unreachable, refused, bad credentials, a failed migration
+            # One line, the exception's class only: its text can carry the database URL.
+            print(f"error: cannot migrate the database: {type(exc).__name__}", file=sys.stderr)
+            return 2
         print(f"database is at revision {head_revision()}")
         return 0
 

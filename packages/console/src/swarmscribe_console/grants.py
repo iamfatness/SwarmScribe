@@ -11,7 +11,7 @@ keys cannot contain `=`, so a scope splits at its first `=` and a value may cont
 import logging
 import re
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -31,9 +31,9 @@ LEADER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
 LABEL_KEY = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
 LABEL_VALUE = re.compile(r"[!-~]{1,255}")
 _VISIBLE = re.compile(r"[!-~]+")
-_GUID = re.compile(
-    r"\{?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\}?", re.IGNORECASE
-)
+_GUID_BODY = r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+# Plain, or inside a balanced pair of braces (the registry form); never one brace alone.
+_GUID = re.compile(rf"\{{{_GUID_BODY}\}}|{_GUID_BODY}", re.IGNORECASE)
 MAX_ADDRESS = 254
 _DNS_LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
 _SCOPE_HELP = (
@@ -104,7 +104,7 @@ def normalize_principal(kind: str, value: str) -> str:
         guid = _GUID.fullmatch(text)
         if guid is None:
             raise _bad_principal("an Entra ID group is its object ID (a GUID)")
-        return guid.group(1).lower()
+        return (guid.group(1) or guid.group(2)).lower()
     text = text.lower()
     if kind == "domain":
         text = text.removeprefix("@")
@@ -136,11 +136,21 @@ def _pairs(principals: Iterable[str]) -> list[tuple[str, str]]:
     return sorted(found)
 
 
+def _known_roles(held: Iterable[tuple[str, Any]]) -> Iterator[tuple[str, Any]]:
+    """The one RANK filter: grants whose role the leader's ranking does not know are skipped
+    (with a warning), here and in role_for alike."""
+    for role, scope in held:
+        if role in RANK:
+            yield role, scope
+        else:
+            logger.warning("a stored role grant has an unknown role and was skipped")
+
+
 def role_for(
     held: Iterable[tuple[str, Scope]], leader_name: str, labels: Mapping[str, Any]
 ) -> Role | None:
     return highest(
-        role for role, scope in held if role in RANK and scope.matches(leader_name, labels)
+        role for role, scope in _known_roles(held) if scope.matches(leader_name, labels)
     )
 
 
@@ -160,10 +170,7 @@ async def grants_held(
         )
     ).all()
     held: list[tuple[str, Scope]] = []
-    for role, scope in rows:
-        if role not in RANK:
-            logger.warning("a stored role grant has an unknown role and was skipped")
-            continue
+    for role, scope in _known_roles(rows):
         try:
             held.append((role, parse_scope(scope)))
         except Invalid:
@@ -267,6 +274,36 @@ async def remove_grant(session: AsyncSession, grant_id: uuid.UUID, *, actor: str
             "principal": principal_key(grant.principal_kind, grant.principal),
         },
     )
+
+
+async def remove_grants_for_leader(session: AsyncSession, name: str, *, actor: str) -> int:
+    """Delete the grants whose scope is `leader:<name>` (a leader being removed), in the
+    caller's transaction, auditing each. Label and `all` grants stay: they were never about
+    this leader alone. Returns how many were removed."""
+    rows = (
+        await session.scalars(
+            select(RoleGrant)
+            .where(RoleGrant.scope == f"leader:{name.lower()}")
+            .order_by(RoleGrant.id)
+            .with_for_update()
+        )
+    ).all()
+    for grant in rows:
+        await session.delete(grant)
+        audit.record(
+            session,
+            actor=actor,
+            action="grant.remove",
+            leader=name,
+            target=str(grant.id),
+            detail={
+                "role": grant.role,
+                "scope": grant.scope,
+                "principal": principal_key(grant.principal_kind, grant.principal),
+                "reason": "leader_removed",
+            },
+        )
+    return len(rows)
 
 
 async def list_console_admins(session: AsyncSession) -> list[ConsoleAdmin]:

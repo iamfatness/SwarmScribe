@@ -79,6 +79,11 @@ def test_the_public_url_is_an_https_origin(given, kept):
         "https://user:pw@console.example.org",
         "ftp://console.example.org",
         "https://console.example.org:notaport",
+        "https://console.example.org:0",
+        "https://console.example.org.",
+        "https://console.example.org.:8443",
+        "https://café.example.org",
+        "https://console.example.Korg",
     ],
 )
 def test_other_public_urls_are_refused(bad):
@@ -126,3 +131,9 @@ def test_secrets_are_not_echoed():
     s = settings()
     assert "entra-secret-value" not in repr(s)
     assert KEY not in repr(s)
+
+
+@pytest.mark.parametrize("empty", ["", "   ", "\n"])
+def test_an_empty_database_url_is_refused_at_startup(empty):
+    with pytest.raises(ValidationError, match="database_url is empty"):
+        settings(database_url=empty)

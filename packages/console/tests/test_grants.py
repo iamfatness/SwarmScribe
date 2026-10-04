@@ -351,3 +351,23 @@ async def test_a_stored_unknown_role_is_skipped(sessionmaker):
         held = await grants_held(session, {"email:a@example.org"})
         assert [(role, str(scope)) for role, scope in held] == [("viewer", "leader:x")]
         await session.rollback()
+
+
+@pytest.mark.parametrize(
+    "text", ["{" + GROUP, GROUP + "}", "{{" + GROUP + "}}", "{" + GROUP + "}}"]
+)
+def test_an_unbalanced_brace_around_a_group_id_is_refused(text):
+    with pytest.raises(Invalid):
+        normalize_principal("entra_group", text)
+
+
+def test_a_balanced_brace_or_none_is_one_group_id():
+    assert normalize_principal("entra_group", "{" + GROUP.upper() + "}") == GROUP
+    assert normalize_principal("entra_group", GROUP.upper()) == GROUP
+
+
+def test_a_grant_with_an_unknown_role_is_skipped_by_role_for_too(caplog):
+    held = [("root", parse_scope("all")), ("viewer", parse_scope("leader:eu-1"))]
+    assert role_for(held, "eu-1", {}) == "viewer"
+    assert role_for([("root", parse_scope("all"))], "eu-1", {}) is None
+    assert "unknown role" in caplog.text

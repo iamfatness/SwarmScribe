@@ -335,3 +335,139 @@ def test_the_command_line_refuses_odd_input(admin_database_url, monkeypatch, cap
         assert capsys.readouterr().out == ""
     finally:
         asyncio.run(recreate(admin_database_url, name, drop_only=True))
+
+
+# --- final wave: no echo, malformed JSON, command-line provider rules ------------------------
+
+MALFORMED = {"content": b"{not json", "headers": {"content-type": "application/json"}}
+
+
+async def test_validation_errors_never_echo_field_names_or_values(admin):
+    secret = "SECRETKEY-xyz"
+    unknown_key = await admin.post("/api/admin/grants", json={secret: 1})
+    assert unknown_key.status_code == 422
+    assert secret not in unknown_key.text
+    bad_id = await admin.delete(f"/api/admin/grants/{secret}")
+    assert bad_id.status_code == 422
+    assert secret not in bad_id.text and "`" not in bad_id.json()["message"]
+    nested = await admin.post(
+        "/api/admin/console-admins",
+        json={"principal_kind": "email", "principal": "a@b.org", secret: {secret: secret}},
+    )
+    assert nested.status_code == 422
+    assert secret not in nested.text
+    # The console's own field names may still be named, with fixed text.
+    missing = await admin.post("/api/admin/grants", json={"role": "viewer"})
+    assert missing.json()["message"] == "scope is required; principal_kind is required; " \
+        "principal is required"
+
+
+async def test_a_malformed_json_body_is_csrf_checked_before_it_is_read(
+    client, factory, sessionmaker
+):
+    csrf = await factory.person(client, principals={ADMIN_PRINCIPAL})
+    # No CSRF token: the CSRF refusal, not a 422, and it is audited.
+    answer = await client.post("/api/admin/grants", **MALFORMED)
+    assert (answer.status_code, answer.json()["code"]) == (403, "csrf_failed")
+    refused = [e for e in await _entries(sessionmaker) if e.action == "request.refused"]
+    assert [(e.target, e.outcome) for e in refused] == [("POST /api/admin/grants", "csrf_failed")]
+    # With the token: refused as malformed, with fixed text, and audited.
+    answer = await client.post(
+        "/api/admin/grants",
+        content=MALFORMED["content"],
+        headers={**MALFORMED["headers"], "X-CSRF-Token": csrf},
+    )
+    assert answer.status_code == 422
+    assert answer.json() == {
+        "code": "invalid_request",
+        "message": "the request body is not valid JSON",
+    }
+    assert "not json" not in answer.text
+    refused = [e for e in await _entries(sessionmaker) if e.action == "request.refused"]
+    assert [e.outcome for e in refused] == ["csrf_failed", "invalid_request"]
+
+
+async def test_a_malformed_json_body_from_a_signed_out_caller_is_unauthenticated(client):
+    answer = await client.post("/api/admin/grants", **MALFORMED)
+    assert (answer.status_code, answer.json()["code"]) == (401, "unauthenticated")
+
+
+async def test_a_cross_site_malformed_body_is_refused_as_cross_site(client, factory):
+    csrf = await factory.person(client, principals={ADMIN_PRINCIPAL})
+    answer = await client.post(
+        "/api/admin/grants",
+        content=MALFORMED["content"],
+        headers={**MALFORMED["headers"], "X-CSRF-Token": csrf, "Origin": "https://evil.example"},
+    )
+    assert (answer.status_code, answer.json()["code"]) == (403, "csrf_failed")
+
+
+async def _entries(sessionmaker) -> list[AuditEntry]:
+    async with sessionmaker() as session:
+        return list((await session.scalars(select(AuditEntry).order_by(AuditEntry.id))).all())
+
+
+def _provider_env(monkeypatch, url: str, *, entra: bool, google: bool, service_account=False):
+    console_env(monkeypatch, url)
+    for name in (
+        "GOOGLE_CLIENT_ID",
+        "GOOGLE_CLIENT_SECRET",
+        "GOOGLE_SERVICE_ACCOUNT",
+        "ENTRA_TENANT_ID",
+        "ENTRA_CLIENT_ID",
+        "ENTRA_CLIENT_SECRET",
+    ):
+        monkeypatch.delenv(f"SWARMSCRIBE_CONSOLE_{name}", raising=False)
+    if entra:
+        monkeypatch.setenv("SWARMSCRIBE_CONSOLE_ENTRA_TENANT_ID", GROUPS_TENANT)
+        monkeypatch.setenv("SWARMSCRIBE_CONSOLE_ENTRA_CLIENT_ID", "entra-client")
+        monkeypatch.setenv("SWARMSCRIBE_CONSOLE_ENTRA_CLIENT_SECRET", "entra-secret")
+    if google:
+        monkeypatch.setenv("SWARMSCRIBE_CONSOLE_GOOGLE_CLIENT_ID", "google-client")
+        monkeypatch.setenv("SWARMSCRIBE_CONSOLE_GOOGLE_CLIENT_SECRET", "google-secret")
+    if service_account:
+        monkeypatch.setenv(
+            "SWARMSCRIBE_CONSOLE_GOOGLE_SERVICE_ACCOUNT",
+            '{"client_email": "sa@p.iam.gserviceaccount.com", "private_key": "k"}',
+        )
+
+
+GROUPS_TENANT = "0f0e0d0c-0b0a-4908-8706-050403020100"
+
+
+def test_the_command_line_refuses_a_principal_kind_the_configured_sign_in_cannot_produce(
+    admin_database_url, monkeypatch, capsys
+):
+    name = "swarmscribe_console_cli3"
+    url = with_database(admin_database_url, name)
+    asyncio.run(recreate(admin_database_url, name))
+    try:
+        _provider_env(monkeypatch, url, entra=False, google=True)
+        assert main(["migrate"]) == 0
+        capsys.readouterr()
+        # Entra-only console: an email (or a domain) can never match; a group id can.
+        _provider_env(monkeypatch, url, entra=True, google=False)
+        for kind, value in (("email", "you@example.org"), ("domain", "example.org")):
+            assert main(["admins", "add", kind, value]) == 1
+            err = capsys.readouterr().err
+            assert "group ids only" in err and "admins add entra_group" in err
+        assert main(["admins", "list"]) == 0
+        assert capsys.readouterr().out == ""  # nothing was stored
+        assert main(["admins", "add", "entra_group", GROUPS_TENANT.upper()]) == 0
+        assert f"entra_group:{GROUPS_TENANT}" in capsys.readouterr().out
+        # Google-only console: an entra_group can never match.
+        _provider_env(monkeypatch, url, entra=False, google=True)
+        assert main(["admins", "add", "entra_group", GROUPS_TENANT.replace("0f", "1f")]) == 1
+        assert "Entra ID sign-in is not configured" in capsys.readouterr().err
+        assert main(["admins", "add", "email", "you@example.org"]) == 0
+        capsys.readouterr()
+        # Google groups need the service account: stored, with a warning.
+        assert main(["admins", "add", "google_group", "ops@example.org"]) == 0
+        captured = capsys.readouterr()
+        assert "google_group:ops@example.org" in captured.out
+        assert "GOOGLE_SERVICE_ACCOUNT" in captured.err
+        _provider_env(monkeypatch, url, entra=False, google=True, service_account=True)
+        assert main(["admins", "add", "google_group", "ops2@example.org"]) == 0
+        assert capsys.readouterr().err == ""
+    finally:
+        asyncio.run(recreate(admin_database_url, name, drop_only=True))

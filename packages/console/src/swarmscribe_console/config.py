@@ -66,9 +66,19 @@ class Settings(BaseSettings):
     session_idle_seconds: int = Field(default=3600, gt=0)
     login_attempt_seconds: int = Field(default=600, gt=0)
 
+    @field_validator("database_url")
+    @classmethod
+    def _database_url_is_set(cls, value: SecretStr) -> SecretStr:
+        if not value.get_secret_value().strip():
+            raise ValueError("database_url is empty; set the console's own database URL")
+        return value
+
     @field_validator("public_url")
     @classmethod
     def _console_origin(cls, value: str) -> str:
+        if not value.isascii():
+            # An internationalised host name is never the origin a browser sends in Origin.
+            raise ValueError("public_url must be ASCII (use the punycode form of the host)")
         parts = urlsplit(value.strip())
         local = parts.scheme == "http" and parts.hostname in _LOCAL_HOSTS
         if (parts.scheme != "https" and not local) or not parts.hostname:
@@ -88,7 +98,11 @@ class Settings(BaseSettings):
             port = parts.port
         except ValueError:
             raise ValueError("public_url has an invalid port") from None
+        if port == 0:
+            raise ValueError("public_url has an invalid port")
         host = parts.hostname
+        if host.endswith("."):
+            raise ValueError("public_url's host has no trailing dot (browsers send Origin without)")
         if ":" in host:  # IPv6 literal
             host = f"[{host}]"
         if port is not None and port != _DEFAULT_PORTS[parts.scheme]:

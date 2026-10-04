@@ -84,6 +84,8 @@ def upgrade() -> None:
             "scope = 'all' OR scope LIKE 'leader:_%' OR scope LIKE 'label:_%=_%'",
             name="ck_role_grants_scope",
         ),
+        sa.CheckConstraint("principal <> ''", name="ck_role_grants_principal_nonempty"),
+        sa.CheckConstraint("created_by <> ''", name="ck_role_grants_created_by_nonempty"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint(
             "scope", "principal_kind", "principal", name="uq_role_grants_scope_principal"
@@ -103,6 +105,8 @@ def upgrade() -> None:
             "created_at", sa.DateTime(timezone=True), server_default=_now(), nullable=False
         ),
         sa.CheckConstraint(KIND_CHECK, name="ck_console_admins_principal_kind"),
+        sa.CheckConstraint("principal <> ''", name="ck_console_admins_principal_nonempty"),
+        sa.CheckConstraint("created_by <> ''", name="ck_console_admins_created_by_nonempty"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("principal_kind", "principal", name="uq_console_admins_principal"),
     )
@@ -139,6 +143,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_audit_log_at", "audit_log", ["at"])
+    op.create_index("ix_audit_log_leader_at", "audit_log", ["leader", "at"])
 
     op.create_table(
         "sessions",

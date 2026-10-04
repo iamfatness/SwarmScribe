@@ -3,8 +3,10 @@
 SWARMSCRIBE_CONSOLE_KEY is 32 random bytes. HKDF-SHA256 derives two independent keys from it:
 one seals leader credentials with AES-GCM, one makes each session's CSRF token (an HMAC of
 the session id, so it is never stored). A sealed credential is `0x01 || nonce || ciphertext`;
-its associated data is the leader's name, so a credential copied onto another leader's row
-does not open."""
+its associated data is the sealing context the caller passes (leaders.sealing_context: the
+leader's name and base URL), so a credential copied onto another leader's row, or left on a
+row whose URL was changed in the database, does not open. The context is case-folded
+(lowercased) as a whole before it is used."""
 
 import base64
 import hashlib
@@ -22,8 +24,8 @@ TAG_BYTES = 16
 
 
 class CredentialUnreadable(Exception):
-    """A stored credential this key cannot open: another key, another leader's row, or a
-    tampered value. The message never contains the credential."""
+    """A stored credential this key cannot open: another key, another leader's row or URL,
+    or a tampered value. The message never contains the credential."""
 
 
 def _derive(master: bytes, purpose: bytes) -> bytes:
@@ -35,8 +37,8 @@ def _derive(master: bytes, purpose: bytes) -> bytes:
     ).derive(master)
 
 
-def _associated_data(leader_name: str) -> bytes:
-    return b"swarmscribe-console/leader:" + leader_name.lower().encode("ascii")
+def _associated_data(context: str) -> bytes:
+    return b"swarmscribe-console/leader:" + context.lower().encode("ascii")
 
 
 class ConsoleKeys:
@@ -46,22 +48,23 @@ class ConsoleKeys:
         self._aead = AESGCM(_derive(master, b"leader-credentials/v1"))
         self._csrf = _derive(master, b"csrf/v1")
 
-    def seal_credential(self, leader_name: str, credential: str) -> bytes:
+    def seal_credential(self, context: str, credential: str) -> bytes:
         nonce = os.urandom(NONCE_BYTES)
         sealed = self._aead.encrypt(
-            nonce, credential.encode("ascii"), _associated_data(leader_name)
+            nonce, credential.encode("ascii"), _associated_data(context)
         )
         return FORMAT_V1 + nonce + sealed
 
-    def open_credential(self, leader_name: str, sealed: bytes) -> str:
+    def open_credential(self, context: str, sealed: bytes) -> str:
         if len(sealed) <= 1 + NONCE_BYTES + TAG_BYTES or sealed[:1] != FORMAT_V1:
             raise CredentialUnreadable("the stored leader credential is not in a known format")
         nonce, body = sealed[1 : 1 + NONCE_BYTES], sealed[1 + NONCE_BYTES :]
         try:
-            plain = self._aead.decrypt(nonce, body, _associated_data(leader_name))
+            plain = self._aead.decrypt(nonce, body, _associated_data(context))
         except InvalidTag:
             raise CredentialUnreadable(
-                "the stored leader credential cannot be opened with this console key"
+                "the stored leader credential does not belong to this leader/URL, "
+                "or was sealed with another console key"
             ) from None
         return plain.decode("ascii")
 

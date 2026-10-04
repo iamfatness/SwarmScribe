@@ -80,6 +80,8 @@ class RoleGrant(Base):
         CheckConstraint(ROLE_CHECK, name="ck_role_grants_role"),
         CheckConstraint(KIND_CHECK, name="ck_role_grants_principal_kind"),
         CheckConstraint(SCOPE_CHECK, name="ck_role_grants_scope"),
+        CheckConstraint("principal <> ''", name="ck_role_grants_principal_nonempty"),
+        CheckConstraint("created_by <> ''", name="ck_role_grants_created_by_nonempty"),
         UniqueConstraint(
             "scope", "principal_kind", "principal", name="uq_role_grants_scope_principal"
         ),
@@ -99,6 +101,8 @@ class ConsoleAdmin(Base):
     __tablename__ = "console_admins"
     __table_args__ = (
         CheckConstraint(KIND_CHECK, name="ck_console_admins_principal_kind"),
+        CheckConstraint("principal <> ''", name="ck_console_admins_principal_nonempty"),
+        CheckConstraint("created_by <> ''", name="ck_console_admins_created_by_nonempty"),
         UniqueConstraint("principal_kind", "principal", name="uq_console_admins_principal"),
     )
 
@@ -134,7 +138,10 @@ class AuditEntry(Base):
     leader's registration."""
 
     __tablename__ = "audit_log"
-    __table_args__ = (Index("ix_audit_log_at", "at"),)
+    __table_args__ = (
+        Index("ix_audit_log_at", "at"),
+        Index("ix_audit_log_leader_at", "leader", "at"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     at: Mapped[datetime] = mapped_column(server_default=func.now())

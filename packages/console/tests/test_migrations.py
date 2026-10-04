@@ -1,4 +1,7 @@
 import asyncio
+import os
+import subprocess
+import sys
 
 import asyncpg
 import pytest
@@ -215,3 +218,90 @@ async def test_audit_apart_logs_failures_without_the_values(caplog):
     await audit.record_apart(broken, actor="secret-actor", action="x")
     assert "RuntimeError" in caplog.text
     assert "secret" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "insert into role_grants (id, role, scope, principal_kind, principal, created_by)"
+        " values (gen_random_uuid(), 'viewer', 'all', 'email', '', 't')",
+        "insert into role_grants (id, role, scope, principal_kind, principal, created_by)"
+        " values (gen_random_uuid(), 'viewer', 'all', 'email', 'a@b.org', '')",
+        "insert into console_admins (id, principal_kind, principal, created_by)"
+        " values (gen_random_uuid(), 'email', '', 't')",
+        "insert into console_admins (id, principal_kind, principal, created_by)"
+        " values (gen_random_uuid(), 'email', 'a@b.org', '')",
+    ],
+    ids=["grant-principal", "grant-created-by", "admin-principal", "admin-created-by"],
+)
+async def test_the_database_refuses_empty_principals_and_authors(sessionmaker, sql):
+    async with sessionmaker() as session:
+        with pytest.raises(IntegrityError):
+            await session.execute(text(sql))
+        await session.rollback()
+
+
+async def test_the_audit_log_is_indexed_by_leader_and_time(engine):
+    async with engine.connect() as conn:
+        definition = await conn.scalar(
+            text("select indexdef from pg_indexes where indexname = 'ix_audit_log_leader_at'")
+        )
+    assert definition is not None
+    assert "(leader, at)" in definition
+
+
+def test_migrate_against_an_unreachable_database_is_one_line_and_leaks_nothing(
+    monkeypatch, capsys
+):
+    console_env(monkeypatch, "postgresql://nobody:hunter2-pw@127.0.0.1:9/none")
+    assert main(["migrate"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = captured.err.strip().splitlines()
+    assert len(lines) == 1
+    assert lines[0].startswith("error: cannot migrate the database: ")
+    assert "Traceback" not in captured.err
+    assert "hunter2-pw" not in captured.err and "nobody" not in captured.err
+
+
+def test_two_migrate_processes_at_once_both_succeed(admin_database_url, monkeypatch):
+    name = "swarmscribe_console_migrate_race"
+    url = with_database(admin_database_url, name)
+    asyncio.run(recreate(admin_database_url, name))
+    console_env(monkeypatch, url)
+    code = "from swarmscribe_console.main import run; run()"
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", code, "migrate"],
+            env=os.environ.copy(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    try:
+        results = []
+        for process in processes:
+            out, err = process.communicate(timeout=180)
+            results.append((process.returncode, err))
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+        revision = None
+
+        async def read_revision():
+            conn = await asyncpg.connect(url)
+            try:
+                return await conn.fetchval("select version_num from alembic_version")
+            finally:
+                await conn.close()
+
+        try:
+            revision = asyncio.run(read_revision())
+        finally:
+            asyncio.run(recreate(admin_database_url, name, drop_only=True))
+    assert [code for code, _ in results] == [0, 0], results
+    assert revision == head_revision()

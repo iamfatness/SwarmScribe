@@ -25,7 +25,7 @@ from . import audit
 from .crypto import ConsoleKeys
 from .db.models import Leader
 from .errors import Conflict, Invalid, NotFound
-from .grants import LABEL_KEY, LABEL_VALUE, LEADER_NAME
+from .grants import LABEL_KEY, LABEL_VALUE, LEADER_NAME, remove_grants_for_leader
 
 MAX_LABELS = 32
 MAX_URL_CHARS = 2000
@@ -188,13 +188,13 @@ def validate_credential(value: str) -> str:
 
 async def find_leader(session: AsyncSession, name: str, *, lock: bool = False) -> Leader:
     if not isinstance(name, str) or not LEADER_NAME.fullmatch(name):
-        raise NotFound("no leader with that name", code="leader_not_found")
+        raise NotFound("no leader with that name")
     query = select(Leader).where(func.lower(Leader.name) == name.lower())
     if lock:
         query = query.with_for_update().execution_options(populate_existing=True)
     leader = await session.scalar(query)
     if leader is None:
-        raise NotFound("no leader with that name", code="leader_not_found")
+        raise NotFound("no leader with that name")
     return leader
 
 
@@ -354,8 +354,17 @@ def _reseal(
 
 async def remove_leader(session: AsyncSession, name: str, *, actor: str) -> None:
     leader = await find_leader(session, name, lock=True)
+    # Grants naming this leader go with it, so a leader later registered under the same name
+    # does not inherit them silently. Label and `all` grants are kept.
+    removed = await remove_grants_for_leader(session, leader.name, actor=actor)
     await session.delete(leader)
-    audit.record(session, actor=actor, action="leader.remove", leader=leader.name)
+    audit.record(
+        session,
+        actor=actor,
+        action="leader.remove",
+        leader=leader.name,
+        detail={"grants_removed": removed},
+    )
 
 
 def leader_view(leader: Leader) -> dict[str, Any]:

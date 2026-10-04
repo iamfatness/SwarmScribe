@@ -377,6 +377,59 @@ async def test_a_leader_is_removed(admin, sessionmaker):
     assert (await admin.delete("/api/admin/leaders/eu-1")).status_code == 404
 
 
+async def test_removing_a_leader_removes_its_own_grants_and_audits_each(admin, sessionmaker):
+    await admin.post("/api/admin/leaders", json=_body())
+    await admin.post("/api/admin/leaders", json=_body(name="us-1", base_url="https://us.example"))
+    grants = [
+        ("viewer", "leader:eu-1", "a@example.org"),
+        ("operator", "leader:EU-1", "b@example.org"),
+        ("viewer", "leader:us-1", "a@example.org"),  # another leader's
+        ("viewer", "label:env=prod", "a@example.org"),  # label grants are kept
+        ("viewer", "all", "c@example.org"),
+    ]
+    for role, scope, who in grants:
+        answer = await admin.post(
+            "/api/admin/grants",
+            json={"role": role, "scope": scope, "principal_kind": "email", "principal": who},
+        )
+        assert answer.status_code == 201
+    assert (await admin.delete("/api/admin/leaders/eu-1")).status_code == 204
+    kept = sorted(g["scope"] for g in (await admin.get("/api/admin/grants")).json())
+    assert kept == ["all", "label:env=prod", "leader:us-1"]
+    removals = [
+        e
+        for e in await _audit(sessionmaker)
+        if e.action == "grant.remove" and e.detail.get("reason") == "leader_removed"
+    ]
+    assert sorted(e.detail["principal"] for e in removals) == [
+        "email:a@example.org",
+        "email:b@example.org",
+    ]
+    assert {e.leader for e in removals} == {"eu-1"}
+    assert {e.detail["scope"] for e in removals} == {"leader:eu-1"}
+    last = (await _audit(sessionmaker))[-1]
+    assert (last.action, last.leader, last.detail) == (
+        "leader.remove",
+        "eu-1",
+        {"grants_removed": 2},
+    )
+    # A leader registered later under the same name inherits nothing.
+    await admin.post("/api/admin/leaders", json=_body())
+    assert "leader:eu-1" not in [g["scope"] for g in (await admin.get("/api/admin/grants")).json()]
+
+
+async def test_an_unknown_leader_grant_and_admin_share_one_not_found_code(admin):
+    unknown = "00000000-0000-4000-8000-000000000000"
+    answers = [
+        await admin.patch("/api/admin/leaders/us-9", json={"enabled": False}),
+        await admin.delete("/api/admin/leaders/us-9"),
+        await admin.delete(f"/api/admin/grants/{unknown}"),
+        await admin.delete(f"/api/admin/console-admins/{unknown}"),
+    ]
+    assert [a.status_code for a in answers] == [404, 404, 404, 404]
+    assert {a.json()["code"] for a in answers} == {"not_found"}
+
+
 @pytest.mark.parametrize("name", ["us-9", "..", "a%2Fb"])
 async def test_an_unknown_leader_is_not_found(admin, name):
     answer = await admin.patch(f"/api/admin/leaders/{name}", json={"enabled": False})

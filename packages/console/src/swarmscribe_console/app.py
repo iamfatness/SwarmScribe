@@ -1,4 +1,5 @@
 import logging
+import traceback
 from contextlib import asynccontextmanager
 
 import httpx
@@ -28,19 +29,25 @@ logger = logging.getLogger(__name__)
 
 
 class ContainErrors:
-    """Logs an unhandled exception once, by type and route only (never its text, which can
-    carry SQL parameters), and stops it there. Starlette's error middleware has already sent
-    the 500 answer and re-raises, which would otherwise log it a second time in the server."""
+    """Logs an unhandled exception once and stops it there: its type, the route and the
+    traceback's frames (file, line, function, source line), never the exception's text, which
+    can carry SQL parameters or request values. Starlette's error middleware has already sent
+    the 500 answer and re-raises, which would otherwise log it a second time in the server.
+    Only `http` requests are wrapped: a lifespan failure must reach the server."""
 
     def __init__(self, app: ASGIApp):
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
         try:
             await self.app(scope, receive, send)
         except Exception as exc:
             route = getattr(scope.get("route"), "path", "?")
-            logger.error("unhandled error: %s at %s", type(exc).__name__, route)
+            frames = "".join(traceback.format_tb(exc.__traceback__)).rstrip()
+            logger.error("unhandled error: %s at %s\n%s", type(exc).__name__, route, frames)
 
 
 class _ConsoleApp(FastAPI):
@@ -73,7 +80,9 @@ def create_app(
 ) -> FastAPI:
     """`fetch`, `idp_transport`, `graph` and `google_groups` replace the identity providers
     and directories in tests; real ones are built from the settings otherwise."""
-    engine = make_engine(settings.database_url.get_secret_value())
+    # hide_parameters: a failed statement, or sqlalchemy.engine logging turned on, never
+    # prints the bound values (the sign-in nonce and PKCE verifier among them).
+    engine = make_engine(settings.database_url.get_secret_value(), hide_parameters=True)
     sessionmaker = make_sessionmaker(engine)
 
     @asynccontextmanager

@@ -1,0 +1,3 @@
+CREATE DATABASE console;
+CREATE DATABASE leader_a;
+CREATE DATABASE leader_b;

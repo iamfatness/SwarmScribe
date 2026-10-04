@@ -119,7 +119,23 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      - name: Build the leader image
+        run: docker build -t swarmscribe-leader:e2e -f e2e/compose/Dockerfile .
       - name: Build the console image
         run: docker build -t swarmscribe-console:e2e -f docker/console.Dockerfile .
       - name: Check the console image
         run: bash docker/check-console-image.sh swarmscribe-console:e2e
+      - name: Write the test CA and certificate
+        run: uv run python e2e/console-compose/run_e2e.py certs
+      - name: Start Postgres, the stand-in identity provider, two leaders and the console
+        run: docker compose -f e2e/console-compose/docker-compose.yml up -d
+      - name: Run the scenario (kills leader-a)
+        run: uv run python e2e/console-compose/run_e2e.py run
+      - name: Show every service's logs
+        if: failure()
+        run: docker compose -f e2e/console-compose/docker-compose.yml logs --no-color
+      - name: Tear down
+        if: always()
+        run: docker compose -f e2e/console-compose/docker-compose.yml --profile tools down -v

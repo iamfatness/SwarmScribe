@@ -496,6 +496,65 @@ its traffic to loopback, link-local and metadata addresses (`169.254.169.254`,
 `fd00:ec2::254`, `100.100.100.200`) and allow only the leaders' networks (the
 poller's egress policy itself is C4's).
 
+### Console image
+
+`docker/console.Dockerfile` builds `swarmscribe-console`, the console's backend serving
+the built web app. A Node stage builds `packages/console-web`; a Python stage installs the
+console and the two packages it imports (leader and protocol) with `uv`; the final image
+holds only that environment and `dist/` (`SWARMSCRIBE_CONSOLE_STATIC_DIR=/app/web`). It
+carries no engine and no model libraries. It runs as user 10001, writes nothing (the root
+filesystem can be read-only), listens on port 8080 and has a `HEALTHCHECK` on `/healthz`.
+`serve` is the default command; `migrate` and `admins ...` are run by replacing the
+arguments:
+
+```
+docker build -t swarmscribe-console -f docker/console.Dockerfile .
+docker run --rm --env-file console.env swarmscribe-console migrate
+docker run --rm --env-file console.env swarmscribe-console admins add email you@example.org
+docker run -d --read-only --tmpfs /tmp -p 8080:8080 --env-file console.env swarmscribe-console
+```
+
+`console.env` holds the `SWARMSCRIBE_CONSOLE_*` variables from the table above. Put TLS in
+front of it: the console's cookies are `Secure`, and its public URL must be `https://`
+(plain `http` is accepted for localhost only).
+
+The console answers two probes without a session. `/healthz` is 200 while the process
+runs. `/readyz` is 200 when the database answers and its schema is this console's, or a
+newer one (a rolling upgrade has migrated it and this replica is about to be replaced);
+otherwise it is 503 with `database unreachable` or `database migrations are not current`.
+Neither asks an identity provider or a leader, so their outages do not take the console
+out of service.
+
+### Console Compose test
+
+`e2e/console-compose/` runs that image, read-only and as its own user, with Postgres, a
+stand-in for Entra ID and two real leaders that have a database each. It does what an
+operator does: the first console administrator is added with `swarmscribe-console admins
+add`; a leader administrator signs in with `swarmscribe-admin login` and runs
+`swarmscribe-admin console create` on each leader; a console administrator signs in
+through the browser flow, grants a role and registers both leaders. Then one leader is
+killed: within a minute the console shows it unreachable, while the other still answers a
+proxied read and takes an action. It runs in GitHub Actions (job `console-compose-e2e`);
+locally, with Docker:
+
+```
+docker build -t swarmscribe-leader:e2e -f e2e/compose/Dockerfile .
+docker build -t swarmscribe-console:e2e -f docker/console.Dockerfile .
+bash docker/check-console-image.sh swarmscribe-console:e2e
+uv run python e2e/console-compose/run_e2e.py certs
+docker compose -f e2e/console-compose/docker-compose.yml up -d
+uv run python e2e/console-compose/run_e2e.py run
+docker compose -f e2e/console-compose/docker-compose.yml --profile tools down -v
+```
+
+The test changes nothing in the console, the leader or the admin CLI to make this
+possible. All three use Entra ID's fixed address, so inside the Compose network the
+stand-in holds the name `login.microsoftonline.com` (a network alias) with a certificate
+from a CA the test makes for itself (`run_e2e.py certs`), which the containers trust
+through `SSL_CERT_FILE` (it replaces the public roots there, which is what the test wants:
+only the stand-in is reached). The leaders serve TLS from the same CA, and the console
+trusts it for them through `SWARMSCRIBE_CONSOLE_LEADER_CA_FILE`.
+
 ## Develop
 
 ```

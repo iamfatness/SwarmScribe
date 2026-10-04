@@ -3,7 +3,7 @@
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import BigInteger, cast, extract, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db.models import (
@@ -92,10 +92,20 @@ def token_view(token: JoinToken) -> dict[str, Any]:
 
 async def status_summary(session: AsyncSession) -> dict[str, Any]:
     jobs = dict.fromkeys(JOB_STATES, 0)
-    for state, count in (
-        await session.execute(select(Job.state, func.count()).group_by(Job.state))
+    # One aggregate gives the counts per state and, per state, the age of its oldest job by
+    # the database's clock (now() is the transaction's start; the leader host's clock is
+    # never used). Only the queued row's age is reported; at least 0 if a row is "future".
+    oldest_queued_age_s: int | None = None
+    oldest_age = func.greatest(
+        cast(func.floor(extract("epoch", func.now() - func.min(Job.created_at))), BigInteger),
+        0,
+    )
+    for state, count, age in (
+        await session.execute(select(Job.state, func.count(), oldest_age).group_by(Job.state))
     ).all():
         jobs[state] = count
+        if state == "queued":
+            oldest_queued_age_s = int(age)
     pools: dict[str, dict[str, Any]] = {}
     for pool, state, count in (
         await session.execute(
@@ -118,11 +128,17 @@ async def status_summary(session: AsyncSession) -> dict[str, Any]:
         followers[state] = followers.get(state, 0) + count
         row = follower_pools.setdefault(pool, {"pool": pool, **dict.fromkeys(FOLLOWER_STATES, 0)})
         row[state] = row.get(state, 0) + count
-    completed_last_hour = await session.scalar(
-        select(func.count())
-        .select_from(Job)
-        .where(Job.state == "completed", Job.completed_at >= func.now() - timedelta(hours=1))
-    )
+    # Last hour and last day in one statement: the day's completions, the hour's filtered.
+    completed_last_hour, completed_last_day = (
+        await session.execute(
+            select(
+                func.count().filter(Job.completed_at >= func.now() - timedelta(hours=1)),
+                func.count(),
+            )
+            .select_from(Job)
+            .where(Job.state == "completed", Job.completed_at >= func.now() - timedelta(days=1))
+        )
+    ).one()
     failed_attempts = await session.scalar(
         select(func.count())
         .select_from(JobAttempt)
@@ -152,6 +168,8 @@ async def status_summary(session: AsyncSession) -> dict[str, Any]:
         "followers": followers,
         "follower_pools": [follower_pools[name] for name in sorted(follower_pools)],
         "completed_last_hour": completed_last_hour or 0,
+        "completed_last_day": completed_last_day or 0,
+        "oldest_queued_age_s": oldest_queued_age_s,
         "failed_attempts_last_day": failed_attempts or 0,
         "locations": [
             {

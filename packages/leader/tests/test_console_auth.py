@@ -238,7 +238,9 @@ async def test_a_credential_that_is_not_valid_is_401_whatever_the_headers_say(
         else console_headers(credential, actor=None, role=None)
     )
     response = await admin_client.get("/v1/admin/whoami", headers=headers)
-    assert (response.status_code, response.json()["code"]) == (401, "unauthorized")
+    # Only the holder of a real, revoked credential learns it was revoked.
+    expected = "credential_revoked" if which == "revoked" else "unauthorized"
+    assert (response.status_code, response.json()["code"]) == (401, expected)
     assert response.headers["www-authenticate"] == 'Console error="invalid_token"'
     assert await audit_rows(sessionmaker, "whoami.view") == []
     refusals = await audit_rows(sessionmaker, "console.refused")
@@ -275,10 +277,47 @@ async def test_a_console_revoked_mid_session_is_refused_from_its_next_request(
     )
     assert revoked.status_code == 200
     after = await admin_client.get("/v1/admin/status", headers=headers)
-    assert (after.status_code, after.json()["message"]) == (
+    assert (after.status_code, after.json()) == (
         401,
-        "this console credential has been revoked",
+        {"code": "credential_revoked", "message": "this console credential has been revoked"},
     )
+    assert after.headers["www-authenticate"] == 'Console error="invalid_token"'
+
+
+async def test_a_revoked_credential_is_reported_before_its_headers_are_read(
+    admin_client, factory, sessionmaker
+):
+    _, revoked = await factory.console(name="old", revoked=True)
+    for actor, role in [("one two", "viewer"), ("system:poller", "admin"), (None, None)]:
+        response = await admin_client.get(
+            "/v1/admin/status", headers=console_headers(revoked, actor=actor, role=role)
+        )
+        assert (response.status_code, response.json()["code"]) == (401, "credential_revoked")
+    refusals = await audit_rows(sessionmaker, "console.refused")
+    assert [e.detail for e in refusals] == [{"code": "revoked"}] * 3
+
+
+async def test_wrong_credentials_are_still_answered_alike(admin_client, factory):
+    _, credential = await factory.console(name="fleet")
+    _, follower_credential = await factory.follower()
+    near = credential[:-1] + ("A" if credential[-1] != "A" else "B")
+    answers = [
+        await admin_client.get("/v1/admin/whoami", headers=console_headers(guess))
+        for guess in (near, new_secret(), follower_credential)
+    ]
+    assert {a.status_code for a in answers} == {401}
+    assert {a.content for a in answers} == {answers[0].content}
+    assert answers[0].json()["code"] == "unauthorized"
+
+
+async def test_a_persons_bearer_refusal_keeps_its_codes(admin_client, idp):
+    expired = idp.entra(lifetime=-3600)
+    response = await admin_client.get(
+        "/v1/admin/whoami", headers={"Authorization": f"Bearer {expired}"}
+    )
+    assert (response.status_code, response.json()["code"]) == (401, "token_expired")
+    missing = await admin_client.get("/v1/admin/whoami")
+    assert (missing.status_code, missing.json()["code"]) == (401, "unauthorized")
 
 
 @pytest.mark.parametrize("scheme", ["console", "CONSOLE"])

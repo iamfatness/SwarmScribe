@@ -170,6 +170,10 @@ uv run swarmscribe-admin console list
 uv run swarmscribe-admin console revoke fleet
 ```
 
+`status --json` also gives `completed_last_day` and `oldest_queued_age_s` (how
+long the oldest queued job has existed, by the database's clock; `null` when
+nothing is queued).
+
 For recordings with one speaker per channel (such as call recordings), add
 `--channels stereo-split --labels "Agent,Customer"`: each recording is
 transcribed per channel and every transcript line starts with its channel's
@@ -224,7 +228,9 @@ status poller: its successful reads of status, followers and whoami write no
 audit row. Any other poller read is still audited, and so is every refusal by a known
 console; an unknown credential's 401 names no one and is not.
 
-`console revoke` refuses the console (`401`) from its next request. Console
+`console revoke` refuses the console (`401`, code `credential_revoked`) from
+its next request; an unknown credential is `401 unauthorized`, so a console can
+tell the two apart and stop calling until it is given a new credential. Console
 names are never reused, even after a revocation, and a name already taken is
 refused with `409 exists`: to rotate a credential, create one under a new name,
 give it to the console, then revoke the old one. If the create succeeded but you

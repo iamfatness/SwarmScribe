@@ -12,3 +12,5 @@ These come from the final review of `fleet-console-leader` (2026-10-03). Neither
   deleted (only `state="gone"` is set), so a retired pool keeps appearing with `active: 0`. `followers.state` has
   no CHECK constraint; consider adding one alongside follower cleanup, so that an unknown state cannot make
   `followers` differ from the sum of `follower_pools`.
+
+- **Queue age meaning (C1b).** `oldest_queued_age_s` counts from job creation, so a job that went back to the queue (lease expiry, retryable failure) or is held back from claiming keeps its original age. The console should label it "oldest queued job (since created)". The C1b database-clock test cannot tell the two clocks apart on one machine; the guarantee rests on the code using `now()`.

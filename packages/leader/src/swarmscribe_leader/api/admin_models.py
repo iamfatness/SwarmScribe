@@ -70,6 +70,9 @@ class Status(BaseModel):
     # Added for the fleet console's poller; additive, so older clients ignore it.
     follower_pools: list[PoolFollowers] = Field(default_factory=list)
     completed_last_hour: int
+    # Added for the fleet console's overview; additive, so older clients ignore them.
+    completed_last_day: int = 0
+    oldest_queued_age_s: int | None = None  # None when nothing is queued
     failed_attempts_last_day: int
     locations: list[LocationStatus]
 

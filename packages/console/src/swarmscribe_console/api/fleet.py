@@ -78,14 +78,15 @@ class ScanError(BaseModel):
 
 class FleetSummary(BaseModel):
     """Spec 6's overview row, from one status payload (C1 + C1b). `oldest_queued_age_s` is
-    the age of the oldest queued job, counted from when that job was created, as of the
-    snapshot's taken_at (None when nothing was queued)."""
+    how old the oldest queued job was when the leader answered (by the leader database's
+    clock), not now: the web app adds the time since the snapshot's taken_at. None when
+    nothing was queued."""
 
     queued: int
     completed_last_hour: int
     completed_last_day: int
     failed_attempts_last_day: int
-    oldest_queued_age_s: int | None  # from the oldest queued job's creation time
+    oldest_queued_age_s: int | None  # as of the snapshot, not now (see the class docstring)
     followers_active_by_pool: dict[str, int]
     scan_errors: list[ScanError]
 
@@ -112,30 +113,44 @@ class HistoryPoint(BaseModel):
     completed_last_hour: int | None
     completed_last_day: int | None
     failed_attempts_last_day: int | None
-    oldest_queued_age_s: int | None  # from the oldest queued job's creation time
+    oldest_queued_age_s: int | None  # as of that bucket's last snapshot; None if none queued
     followers_active: int | None
 
 
-def summary_of(status: dict[str, Any]) -> dict[str, Any]:
+def _count(value: Any) -> int:
+    """A stored count; anything else (missing, null, text, a bool) is 0, as documented."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _object(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _items(value: Any) -> list[dict[str, Any]]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def summary_of(status: Any) -> dict[str, Any]:
     """The overview figures from a stored status (validated by the poller's StatusPayload).
-    Lookups stay defensive: a stored row is data, not a promise."""
-    pools = status.get("follower_pools") or []
-    locations = status.get("locations") or []
+    A stored row is data, not a promise: a missing, null or oddly typed value gives 0 (null
+    for the oldest age), never an error, so one bad row cannot take down the fleet view."""
+    status = _object(status)
+    age = status.get("oldest_queued_age_s")
     return {
-        "queued": int((status.get("jobs") or {}).get("queued", 0)),
-        "completed_last_hour": int(status.get("completed_last_hour", 0)),
-        "completed_last_day": int(status.get("completed_last_day", 0)),
-        "failed_attempts_last_day": int(status.get("failed_attempts_last_day", 0)),
-        "oldest_queued_age_s": status.get("oldest_queued_age_s"),
+        "queued": _count(_object(status.get("jobs")).get("queued")),
+        "completed_last_hour": _count(status.get("completed_last_hour")),
+        "completed_last_day": _count(status.get("completed_last_day")),
+        "failed_attempts_last_day": _count(status.get("failed_attempts_last_day")),
+        "oldest_queued_age_s": age if isinstance(age, int) and not isinstance(age, bool) else None,
         "followers_active_by_pool": {
-            str(pool.get("pool")): int(pool.get("active", 0))
-            for pool in pools
-            if isinstance(pool, dict) and pool.get("pool") is not None
+            str(pool["pool"]): _count(pool.get("active"))
+            for pool in _items(status.get("follower_pools"))
+            if pool.get("pool") is not None
         },
         "scan_errors": [
             {"location": str(loc.get("name")), "error": str(loc["last_scan_error"])}
-            for loc in locations
-            if isinstance(loc, dict) and loc.get("last_scan_error")
+            for loc in _items(status.get("locations"))
+            if loc.get("last_scan_error")
         ],
     }
 

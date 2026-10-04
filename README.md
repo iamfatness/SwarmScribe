@@ -352,7 +352,7 @@ with `PUT .../credential`). A URL change or a rotation clears the revoked mark
 and resets the leader's poll health. Removing a leader also removes the grants
 whose scope is `leader:<that name>` (each is audited), so a leader registered
 later under the same name inherits none; label and `all` grants stay. An
-unknown leader, grant or administrator is always `404 not_found`.
+unknown leader, grant or administrator on `/api/admin` is `404 not_found`.
 
 Principals are stored as lowercase ASCII (an Entra group id as a lowercase
 GUID), exactly as sign-in produces them, so `Person@Example.org` and
@@ -374,7 +374,20 @@ swarmscribe-admin console create --name fleet --max-role operator
 
 Prefer `operator`: the leader trusts the console's word for who the person is,
 so the cap is the only bound on what a leaked credential can do. Use `admin`
-only if people must create join tokens or locations from the console.
+only if people must do one of these from the console, because the leader needs
+the `admin` role for each of them (and the console refuses them below it):
+
+| Leader action | Needs |
+|---|---|
+| `GET tokens` (list join tokens), `POST tokens` (create), `POST tokens/{id}/revoke` | `admin` |
+| `POST followers/{id}/revoke` | `admin` |
+| `POST locations` (add), `POST locations/{name}/enable`, `.../disable` | `admin` |
+
+Everything else the console offers needs `operator` (retry, cancel or reprioritise a
+job, drain a follower, request a location scan) or `viewer` (status, locations,
+jobs, followers, consent report). With an `operator`-capped credential the
+`admin` actions fail with the leader's own `403`. Console administration (the
+leader's `consoles` routes) is never proxied.
 
 A console administrator then registers the leader (`POST /api/admin/leaders`
 with its name, `https://` URL, labels and the credential). The URL rules, the
@@ -387,6 +400,28 @@ bound to the leader's name and URL, and never shown again.
 (`console create --name fleet-2 ...`), replace the credential in the console in
 place (`PUT /api/admin/leaders/<name>/credential`), then revoke the old one
 (`console revoke fleet`).
+
+**Errors from the leader routes.** `/api/leaders/{name}/...` and `/api/fleet` answer
+`{code, message}`. An unknown leader, or one the person holds no grant on, is
+`404 leader_not_found` (the two are indistinguishable); `not_found` is the
+admin API's, and on `/api/leaders/{name}/...` it is an action the console does
+not offer or the leader's own 404 (an unknown job, follower or token). A leader's
+own errors pass through with its status and code (a leader 422 keeps its code but
+gets fixed text; `Retry-After` is passed on, at most 3600). A `401` is always the
+console's own session, never the leader's. The console adds these codes:
+
+| Status | Code | Meaning |
+|---|---|---|
+| 503 | `leader_unreachable` | cannot reach the leader or it timed out; `Retry-After: 15` |
+| 503 | `leader_credential_revoked` | the leader revoked this console's credential; replace it |
+| 503 | `leader_credential_unreadable` | the stored credential cannot be opened with the console key |
+| 502 | `leader_credential_rejected` | the leader does not accept the credential |
+| 502 | `bad_gateway` | an unusable answer, or an unexpected console-side error; on a `POST` it is not known whether the action happened (the audit entry says `bad_gateway` or `error`) |
+| 409 | `leader_disabled` | the leader is disabled in the console |
+| 403 | `forbidden` | the person's role on this leader is below the action's; the message names the role needed |
+| 403 | `actor_not_representable` | the person's identity cannot be sent to the leader |
+| 422 | `invalid_request` | a bad query or body (fixed text, never an echo) |
+| 413 | `too_large` | the request body is over 64 KiB |
 
 **Polling.** Every 15 seconds the console reads each leader's status as
 `system:poller` (viewer); the leader does not audit these reads. A leader that

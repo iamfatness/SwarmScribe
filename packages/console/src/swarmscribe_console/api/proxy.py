@@ -10,6 +10,7 @@ status and code but its message is replaced. The database session is released be
 leader is called, and a fresh one writes the audit entry afterwards."""
 
 import json
+import logging
 import re
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, NoReturn
@@ -47,6 +48,7 @@ from ..leader_client import (
     person_actor,
 )
 from ..leaders import sealing_context
+from ..logsafe import log_contained
 from ..poller import mark_revoked
 from ..proxy import ProxyRoute, match_route, target_of
 from ..sessions import SignedIn
@@ -61,6 +63,9 @@ MAX_QUERY_CHARS = 200
 MAX_RETRY_AFTER = 3600
 LEADER_INVALID_TEXT = "the leader did not accept the request as sent"
 _CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+logger = logging.getLogger(__name__)
+
+
 class ConsoleLocationIn(LocationIn):
     """The leader's LocationIn with one check replaced. The leader's `root` rule uses the path
     rules of the machine it runs on, which here would be the console's. The leader is the
@@ -177,7 +182,15 @@ async def proxied(
     if found is None:
         raise NotFound("the console does not offer that leader action")
     route, params = found
-    row, role = await leader_for(session, person, name)
+    try:
+        row, role = await leader_for(session, person, name)
+    except NotFound as unknown:
+        # An unknown or ungranted leader looks the same to the caller; the audit names the
+        # leader that was asked for (the writer cleans and bounds it).
+        await _audit(
+            request, person, route, name, target_of(params), unknown.code, {}
+        )
+        raise
     # Copy what the call needs, then give the connection back: nothing below holds the
     # database while a slow leader answers.
     leader_id, leader_name, base_url = row.id, row.name, row.base_url
@@ -240,6 +253,16 @@ async def proxied(
         # The client's path guard. The allow-list should make this unreachable; if it is
         # ever reached it is a refusal, not a 500.
         await refuse(BadGateway("the console could not form a safe request for that leader"))
+    except Exception as exc:
+        # A transport or library bug. The request may have gone out, so a POST still leaves
+        # its audit row (outcome "error") and the answer is a fixed 502, never a 500. Only
+        # the type and the traceback frames are logged: the text can carry secrets.
+        log_contained(logger, "proxied leader call failed", exc, where=route.action)
+        await _audit(request, person, route, leader_name, target, "error", {"role": role})
+        raise BadGateway(
+            "the console hit an unexpected error calling the leader; "
+            "whether the action happened is unknown"
+        ) from None
 
     if is_revoked(reply):
         async with request.app.state.sessionmaker() as marking:

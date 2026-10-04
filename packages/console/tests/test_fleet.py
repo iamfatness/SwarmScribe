@@ -299,3 +299,68 @@ async def test_the_fleet_query_count_does_not_grow_with_the_leaders(
         event.remove(engine, "before_cursor_execute", count)
     assert len(answer.json()) == 53
     assert large == small
+
+
+async def test_the_first_history_bucket_holds_only_snapshots_inside_the_window(
+    client, factory, fleet
+):
+    await factory.grant("viewer", "leader:eu-1", "email", "person@example.org")
+    now = utcnow()
+    since = now - timedelta(hours=1)
+
+    def status(queued):
+        body = copy.deepcopy(STATUS)
+        body["jobs"]["queued"] = queued
+        return body
+
+    eu = fleet["eu-1"]
+    # Just before the window and just inside it: often the same 5-minute bucket, which then
+    # starts before the window but is built from the inside snapshot only.
+    await factory.snapshot(eu, taken_at=since - timedelta(seconds=30), status=status(99))
+    await factory.snapshot(eu, taken_at=since + timedelta(seconds=30), status=status(3))
+    await factory.person(client, principals=PERSON)
+    answer = await client.get("/api/leaders/eu-1/history", params={"hours": 1})
+    points = answer.json()
+    assert [p["queued"] for p in points] == [3]
+    first = datetime.fromisoformat(points[0]["at"])
+    assert since - timedelta(minutes=5) < first <= since + timedelta(seconds=30)
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+async def test_unsafe_methods_on_the_fleet_are_405(client, factory, fleet, method):
+    await factory.grant("viewer", "all", "email", "person@example.org")
+    csrf = await factory.person(client, principals=PERSON)
+    answer = await client.request(method, "/api/fleet", headers={"X-CSRF-Token": csrf})
+    assert answer.status_code == 405
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+async def test_history_is_read_only_and_never_reaches_a_leader(
+    client, factory, fleet, fake_leader, method
+):
+    await factory.grant("admin", "all", "email", "person@example.org")
+    csrf = await factory.person(client, principals=PERSON)
+    answer = await client.request(
+        method, "/api/leaders/eu-1/history", headers={"X-CSRF-Token": csrf}
+    )
+    assert answer.status_code in (404, 405)
+    assert fake_leader.requests == []
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        {"jobs": [1, 2], "completed_last_hour": None, "follower_pools": [1, None, "x"]},
+        {"jobs": "queued", "oldest_queued_age_s": "soon", "locations": {"a": 1}},
+        {"jobs": {"queued": None}, "failed_attempts_last_day": "3", "locations": [None, 4]},
+        {"jobs": {"queued": True}, "follower_pools": [{"pool": "p", "active": None}]},
+        None,
+        [],
+    ],
+)
+async def test_one_oddly_shaped_row_never_breaks_the_summary(status):
+    summary = summary_of(status)
+    assert summary["queued"] == 0
+    assert summary["completed_last_hour"] == summary["completed_last_day"] == 0
+    assert summary["oldest_queued_age_s"] is None
+    assert summary["scan_errors"] == []

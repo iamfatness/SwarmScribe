@@ -693,3 +693,52 @@ async def test_a_token_body_with_every_field_is_forwarded_as_sent(signed_in_as, 
     sent = {"pool": "gpu", "expires_in_seconds": 3600, "max_uses": 5}
     assert (await client.post("/api/leaders/eu-1/tokens", json=sent)).status_code == 201
     assert json.loads(fake_leader.bodies[0]) == sent
+
+
+async def test_an_unexpected_error_in_a_proxied_post_is_audited_and_is_a_502(
+    signed_in_as, eu, fake_leader, sessionmaker
+):
+    async def explode(_request):
+        raise RuntimeError("something in the transport broke")
+
+    fake_leader.on_request = explode
+    client = await signed_in_as("operator")
+    answer = await client.post(f"/api/leaders/eu-1/jobs/{JOB}/retry")
+    assert answer.status_code == 502
+    assert answer.json()["code"] == "bad_gateway"
+    assert "transport broke" not in answer.text
+    (entry,) = await _audit(sessionmaker)  # exactly one row: no second "refused" entry
+    assert (entry.action, entry.leader, entry.target, entry.outcome) == (
+        "jobs.retry",
+        "eu-1",
+        f"job_id={JOB}",
+        "error",
+    )
+    assert entry.actor == f"person@example.org ({ENTRA_ISSUER} entra-person-1)"
+
+
+async def test_a_post_to_an_unknown_or_ungranted_leader_is_audited_with_the_name_asked_for(
+    signed_in_as, factory, eu, fake_leader, sessionmaker
+):
+    await factory.leader("us-1", labels={"env": "test"})
+    client = await signed_in_as("admin")
+    long_name = "n" * 300
+    for name in ("us-1", "zz-9", long_name):
+        answer = await client.post(f"/api/leaders/{name}/jobs/{JOB}/retry")
+        assert (answer.status_code, answer.json()["code"]) == (404, "leader_not_found")
+    entries = await _audit(sessionmaker)
+    assert [(e.action, e.outcome, e.target) for e in entries] == [
+        ("jobs.retry", "leader_not_found", f"job_id={JOB}")
+    ] * 3
+    assert [e.leader for e in entries[:2]] == ["us-1", "zz-9"]
+    assert len(entries[2].leader) == 100  # cut by the audit writer
+    assert entries[0].actor == f"person@example.org ({ENTRA_ISSUER} entra-person-1)"
+    assert fake_leader.requests == []
+
+
+async def test_a_get_to_an_unknown_leader_writes_no_audit_row(
+    signed_in_as, eu, fake_leader, sessionmaker
+):
+    client = await signed_in_as("admin")
+    assert (await client.get("/api/leaders/zz-9/status")).status_code == 404
+    assert await _audit(sessionmaker) == []

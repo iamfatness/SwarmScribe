@@ -29,6 +29,7 @@ def web(tmp_path):
     (folder / "assets").mkdir(parents=True)
     (folder / "index.html").write_text(INDEX, encoding="utf-8")
     (folder / "assets" / "app.js").write_text("console.log('console')", encoding="utf-8")
+    (folder / "assets" / "app-Dk3f9aB2.js").write_text("console.log('hashed')", encoding="utf-8")
     (folder / "assets" / "app.css").write_text("body{margin:0}", encoding="utf-8")
     (folder / "assets" / "logo.svg").write_text(
         "<svg xmlns='http://www.w3.org/2000/svg'/>", encoding="utf-8"
@@ -90,6 +91,23 @@ async def test_every_static_answer_carries_the_security_headers(web_client, path
     assert "max-age" in headers["strict-transport-security"]
     if kind is not None:
         assert kind in headers["content-type"]
+
+
+@pytest.mark.parametrize(
+    "path, expected",
+    [
+        ("/", "no-cache"),
+        ("/index.html", "no-cache"),
+        ("/fleet", "no-cache"),  # the fallback is index.html
+        ("/assets/app.js", "no-cache"),  # not hashed: re-check every time
+        ("/assets/app.css", "no-cache"),
+        ("/assets/app-Dk3f9aB2.js", "public, max-age=31536000, immutable"),
+    ],
+)
+async def test_only_hashed_assets_are_cached_for_long(web_client, path, expected):
+    answer = await web_client.get(path)
+    assert answer.status_code == 200
+    assert answer.headers["cache-control"] == expected
 
 
 @pytest.mark.parametrize("path", ["/leaders/eu-1", "/fleet", "/leaders/eu-1/jobs"])
@@ -344,9 +362,9 @@ async def test_an_unhandled_error_in_the_proxy_logs_frames_and_never_the_text(
 
     fake_leader.on_request = explode
     answer = await client.post("/api/leaders/eu-1/tokens", json={})
-    assert answer.status_code == 500
-    assert answer.json()["code"] == "internal"
-    assert caplog.text.count("unhandled error: RuntimeError") == 1
+    assert answer.status_code == 502
+    assert answer.json()["code"] == "bad_gateway"
+    assert caplog.text.count("proxied leader call failed: RuntimeError") == 1
     assert "File " in caplog.text  # the traceback's frames
     for secret in (plaintext, CREDENTIAL, reply_body):
         assert secret not in caplog.text

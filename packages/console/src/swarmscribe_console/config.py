@@ -68,9 +68,9 @@ class Settings(BaseSettings):
     login_attempt_seconds: int = Field(default=600, gt=0)
     # Sign-ins that have gone to the identity provider and not come back. Beyond this many
     # the oldest are dropped, so that requests to /auth/login cannot fill the database.
-    # The floor of 1 only refuses nonsense; a cap below the number of people signing in at
-    # once would drop live sign-ins, so deployments should leave the default or go higher.
-    login_attempts_max: int = Field(default=10_000, ge=1)
+    # The floor of 100 covers people signing in together plus abandoned attempts: a smaller
+    # cap would evict sign-ins still in progress. Each login's trim costs time linear in it.
+    login_attempts_max: int = Field(default=10_000, ge=100)
 
     # The poller and the proxy (fleet console spec 5.3, 5.4).
     poll_interval_seconds: float = Field(default=15.0, gt=0)

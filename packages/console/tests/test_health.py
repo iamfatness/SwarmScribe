@@ -99,10 +99,64 @@ async def test_concurrent_readyz_calls_share_one_database_check(client, monkeypa
     monkeypatch.setattr(health_module, "current_revision", counting)
     answers = await asyncio.gather(*(client.get("/readyz") for _ in range(50)))
     assert {a.status_code for a in answers} == {200}
-    assert checks <= 1
+    assert checks == 1
     # Within the cache window a further call still does not reach the database.
     assert (await client.get("/readyz")).status_code == 200
-    assert checks <= 1
+    assert checks == 1
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+async def test_the_readiness_answer_expires_after_a_second(client, monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(health_module.time, "monotonic", clock)
+    checks = 0
+    real = health_module.current_revision
+
+    async def counting(engine):
+        nonlocal checks
+        checks += 1
+        return await real(engine)
+
+    monkeypatch.setattr(health_module, "current_revision", counting)
+    assert (await client.get("/readyz")).status_code == 200
+    clock.now += 0.9
+    assert (await client.get("/readyz")).status_code == 200
+    assert checks == 1
+    clock.now += 0.2  # 1.1 s since the check
+    assert (await client.get("/readyz")).status_code == 200
+    assert checks == 2
+
+
+async def test_a_failed_check_is_reused_for_a_second_and_then_retried(client, monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(health_module.time, "monotonic", clock)
+    real = health_module.current_revision
+    checks = 0
+    broken = True
+
+    async def flaky(engine):
+        nonlocal checks
+        checks += 1
+        if broken:
+            raise ConnectionError("database is down")
+        return await real(engine)
+
+    monkeypatch.setattr(health_module, "current_revision", flaky)
+    assert (await client.get("/readyz")).status_code == 503
+    broken = False  # recovered, but the failure is still cached
+    clock.now += 0.5
+    assert (await client.get("/readyz")).status_code == 503
+    assert checks == 1
+    clock.now += 0.6  # past one second: retried
+    assert (await client.get("/readyz")).status_code == 200
+    assert checks == 2
 
 
 async def test_healthz_never_touches_the_database(client, monkeypatch):

@@ -137,9 +137,9 @@ class LeaderBadAnswer(Exception):
 
 
 def leader_tls_context(ca_file: Path | None) -> ssl.SSLContext | None:
-    """How a leader's certificate is verified. None: httpx's default, the public roots it
-    ships with. With `ca_file` (SWARMSCRIBE_CONSOLE_LEADER_CA_FILE): those roots plus the CA
-    certificates in that PEM file, for leaders on a private CA. Verification and host-name
+    """How a leader's certificate is verified. None: httpx's default, the public roots
+    (certifi's) it ships with. With `ca_file` (SWARMSCRIBE_CONSOLE_LEADER_CA_FILE): those roots plus
+    the CA certificates in that PEM file, for leaders on a private CA. Verification and host-name
     checking are never turned off, and the environment (SSL_CERT_FILE) is never read."""
     if ca_file is None:
         return None

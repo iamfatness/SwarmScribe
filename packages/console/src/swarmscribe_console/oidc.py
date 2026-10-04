@@ -167,9 +167,14 @@ async def trim_pending_sign_ins(session: AsyncSession, *, keep: int) -> int:
     Locking an OFFSET subquery would lock every row it passes over (all of them, while under
     the cap) and make concurrent trims delete nothing. Victims another transaction has locked
     are skipped, never waited for. The caller has flushed its own new row, and commits."""
+    # Rows tied with the boundary's expires_at survive (strict <), so a tie can leave the table
+    # a few rows over the cap. The value is the app's clock to the microsecond plus a constant,
+    # so ties are rare and harmless; a tie-break column would not change the value either.
+    if keep < 1:
+        raise ValueError("keep must be at least 1")
     boundary = (
         select(LoginAttempt.expires_at)
-        .order_by(LoginAttempt.expires_at.desc(), LoginAttempt.state_hash)
+        .order_by(LoginAttempt.expires_at.desc())
         .offset(keep - 1)
         .limit(1)
         .scalar_subquery()  # NULL when there are fewer than `keep` rows: nothing is older

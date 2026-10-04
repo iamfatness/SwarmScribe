@@ -3,11 +3,14 @@
 The round-trip tests talk real TLS to a server on an ephemeral port of 127.0.0.1."""
 
 import asyncio
+import dataclasses
 import datetime
 import ipaddress
+import logging
 import ssl
 from pathlib import Path
 
+import httpx
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -279,6 +282,39 @@ async def test_the_sign_in_code_exchange_refuses_a_server_signed_only_by_the_lea
         await application.state.leader_client.aclose()
         await application.state.engine.dispose()
     assert "could not be used" in str(refused.value)
+
+
+async def test_the_real_callback_refuses_a_provider_signed_only_by_the_leader_ca(
+    private_leader, make_settings, monkeypatch, caplog
+):
+    """Through /auth/login and /auth/callback, so the app's own wiring is covered: it must not
+    hand the exchange a transport or context derived from the leader CA."""
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    application = create_app(
+        make_settings(leader_ca_file=str(private_leader.ca_file)), background=False
+    )
+    assert application.state.idp_transport is None
+    web = application.state.web_providers["entra"]
+    application.state.web_providers["entra"] = dataclasses.replace(
+        web, token_endpoint=f"{private_leader.target.base_url}/token"
+    )
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=application), base_url="https://console.example.org"
+        ) as browser:
+            login = await browser.get("/auth/login", params={"provider": "entra"})
+            state = dict(httpx.URL(login.headers["location"]).params)["state"]
+            with caplog.at_level(logging.WARNING):
+                answer = await browser.get(
+                    "/auth/callback", params={"code": "c", "state": state}
+                )
+            assert answer.status_code == 502
+            assert "could not be used" in caplog.text  # the TLS refusal, not a timeout
+            assert (await browser.get("/api/session")).status_code == 401
+    finally:
+        await application.state.leader_client.aclose()
+        await application.state.engine.dispose()
 
 
 async def test_ssl_cert_file_is_how_the_identity_provider_calls_get_a_ca(

@@ -6,10 +6,12 @@ import { ErrorPanel } from "../../components/ErrorPanel";
 import { HealthBadge } from "../../components/HealthBadge";
 import { formatTime } from "../../lib/format";
 import { NotFoundPage } from "../NotFoundPage";
+import { ConsentTab } from "./ConsentTab";
 import { JobsTab } from "./JobsTab";
 import { LocationsTab } from "./LocationsTab";
 import { PoolsTab } from "./PoolsTab";
 import { TABS, leaderUrl, type TabId } from "./tabs";
+import { TokensTab } from "./TokensTab";
 
 function TabContent({ tab, leader }: { tab: TabId; leader: FleetLeader }) {
   switch (tab) {
@@ -19,6 +21,10 @@ function TabContent({ tab, leader }: { tab: TabId; leader: FleetLeader }) {
       return <JobsTab leader={leader} />;
     case "locations":
       return <LocationsTab leader={leader} />;
+    case "tokens":
+      return <TokensTab leader={leader} />;
+    case "consent":
+      return <ConsentTab leader={leader} />;
   }
 }
 

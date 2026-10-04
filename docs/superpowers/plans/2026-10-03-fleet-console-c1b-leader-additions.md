@@ -4,7 +4,7 @@
 
 **Goal:** Two small additive leader changes the fleet console (C2b) depends on: a revoked console credential's `401` carries the code `credential_revoked` (an unknown credential stays `unauthorized`), and `GET /v1/admin/status` adds `completed_last_day` and `oldest_queued_age_s`, both computed by the database's clock inside queries the status call already makes.
 
-**Architecture:** Task A sets a class-level `code` on C1's `RevokedConsoleCredential`; the existing error handler already answers with `exc.code`, so nothing else in the request path changes (message, `WWW-Authenticate` and audit stay as they are). Task B reshapes two of `reports.status_summary`'s existing job queries: the jobs-by-state aggregate also returns, per state, the age of the oldest job by `now() − min(created_at)` (only the `queued` row is used), and the completed-in-the-last-hour count becomes one query with two `FILTER`ed counts (last hour, last day). Both fields are added to the `Status` model with defaults. No migration is needed (`0006` is not used).
+**Architecture:** Task 1 sets a class-level `code` on C1's `RevokedConsoleCredential`; the existing error handler already answers with `exc.code`, so nothing else in the request path changes (message, `WWW-Authenticate` and audit stay as they are). Task 2 reshapes two of `reports.status_summary`'s existing job queries: the jobs-by-state aggregate also returns, per state, the age of the oldest job by `now() − min(created_at)` (only the `queued` row is used), and the completed-in-the-last-hour count becomes one query with two `FILTER`ed counts (last hour, last day). Both fields are added to the `Status` model with defaults. No migration is needed (`0006` is not used).
 
 **Tech Stack:** Python 3.11+, uv workspace, FastAPI, Pydantic v2, SQLAlchemy 2.0 async on Postgres, pytest + pytest-asyncio, ruff.
 
@@ -18,7 +18,7 @@ git pull
 git switch -c fleet-console-leader-additions
 ```
 
-Before Task A, confirm `packages/leader/src/swarmscribe_leader/auth/consoles.py` defines `RevokedConsoleCredential` and `packages/leader/src/swarmscribe_leader/api/admin_models.py`'s `Status` has `follower_pools`.
+Before Task 1, confirm `packages/leader/src/swarmscribe_leader/auth/consoles.py` defines `RevokedConsoleCredential` and `packages/leader/src/swarmscribe_leader/api/admin_models.py`'s `Status` has `follower_pools`.
 
 ## Global Constraints
 
@@ -36,13 +36,13 @@ Before Task A, confirm `packages/leader/src/swarmscribe_leader/auth/consoles.py`
 
 Hostile and malformed input the rulings imply but do not spell out. Each line names the behaviour a reasonable person expects and the task whose tests pin it.
 
-1. **Probing with wrong credentials** (unknown, malformed, oversize, a follower's credential, a near miss of a real one; with or without actor headers) → still `401 unauthorized`, byte-identical to each other; only the holder of a real revoked credential ever sees `credential_revoked`. — Task A.
-2. **A revoked credential with malformed delegation headers** → `401 credential_revoked` (the credential is checked first), never `400`. — Task A.
-3. **Clock skew between the leader host and the database** → `oldest_queued_age_s` uses the database's `now()`, so a wrong Python clock does not change it. — Task B.
-4. **A queued job whose `created_at` is in the future** (a database clock that stepped back, a hand-edited row) → `oldest_queued_age_s` is `0`, never negative. — Task B.
-5. **Only leased, completed, failed or cancelled jobs** (nothing queued) → `oldest_queued_age_s` is `null`, not `0`; and a very old queued job (years) is a plain integer, not a float or an overflow. — Task B.
-6. **Jobs completed exactly at the window edges, and jobs in other states with a `completed_at`** → only `state = completed` counts; last hour ⊂ last day. — Task B.
-7. **Many pools and states** → the status call issues the same number of statements against `jobs` as before (three). — Task B.
+1. **Probing with wrong credentials** (unknown, malformed, oversize, a follower's credential, a near miss of a real one; with or without actor headers) → still `401 unauthorized`, byte-identical to each other; only the holder of a real revoked credential ever sees `credential_revoked`. — Task 1.
+2. **A revoked credential with malformed delegation headers** → `401 credential_revoked` (the credential is checked first), never `400`. — Task 1.
+3. **Clock skew between the leader host and the database** → `oldest_queued_age_s` uses the database's `now()`, so a wrong Python clock does not change it. — Task 2.
+4. **A queued job whose `created_at` is in the future** (a database clock that stepped back, a hand-edited row) → `oldest_queued_age_s` is `0`, never negative. — Task 2.
+5. **Only leased, completed, failed or cancelled jobs** (nothing queued) → `oldest_queued_age_s` is `null`, not `0`; and a very old queued job (years) is a plain integer, not a float or an overflow. — Task 2.
+6. **Jobs completed exactly at the window edges, and jobs in other states with a `completed_at`** → only `state = completed` counts; last hour ⊂ last day. — Task 2.
+7. **Many pools and states** → the status call issues the same number of statements against `jobs` as before (three). — Task 2.
 
 ## Decisions this plan makes (the rulings are silent)
 
@@ -58,19 +58,19 @@ Hostile and malformed input the rulings imply but do not spell out. Each line na
 
 ```
 packages/leader/src/swarmscribe_leader/
-  auth/consoles.py        MOD  RevokedConsoleCredential.code (Task A)
-  reports.py              MOD  status_summary: two reshaped queries (Task B)
-  api/admin_models.py     MOD  Status: completed_last_day, oldest_queued_age_s (Task B)
+  auth/consoles.py        MOD  RevokedConsoleCredential.code (Task 1)
+  reports.py              MOD  status_summary: two reshaped queries (Task 2)
+  api/admin_models.py     MOD  Status: completed_last_day, oldest_queued_age_s (Task 2)
 packages/leader/tests/
-  test_consoles.py        MOD  (Task A)
-  test_console_auth.py    MOD  (Task A)
-  test_admin_api.py       MOD  (Task B)
-README.md                 MOD  console section (Task A); status fields (Task B)
+  test_consoles.py        MOD  (Task 1)
+  test_console_auth.py    MOD  (Task 1)
+  test_admin_api.py       MOD  (Task 2)
+README.md                 MOD  console section (Task 1); status fields (Task 2)
 ```
 
 ---
 
-### Task A: A revoked console credential answers `credential_revoked`
+### Task 1: A revoked console credential answers `credential_revoked`
 
 **Files:**
 - Modify: `packages/leader/src/swarmscribe_leader/auth/consoles.py` (`RevokedConsoleCredential`)
@@ -230,9 +230,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task B: Status adds `completed_last_day` and `oldest_queued_age_s`
+### Task 2: Status adds `completed_last_day` and `oldest_queued_age_s`
 
-Independent of Task A.
+Independent of Task 1.
 
 **Files:**
 - Modify: `packages/leader/src/swarmscribe_leader/reports.py` (`status_summary`, imports)
@@ -459,7 +459,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ## Self-review
 
-**Ruling coverage.** Revoked → `credential_revoked`, message unchanged, unknown stays `unauthorized`, C1 tests and README updated: Task A (Steps 1, 3, 4). `completed_last_day` and `oldest_queued_age_s` (null when nothing queued), additive, database clock, no extra queries: Task B (`test_status_with_no_jobs_has_no_queue_age`, `test_status_counts_completions_in_the_last_hour_and_day`, `test_the_queue_age_is_the_oldest_queued_jobs`, `test_nothing_queued_is_no_age_not_zero`, `test_the_queue_age_uses_the_databases_clock`, `test_status_makes_no_extra_job_queries`). No migration needed, so `0006` is unused.
+**Ruling coverage.** Revoked → `credential_revoked`, message unchanged, unknown stays `unauthorized`, C1 tests and README updated: Task 1 (Steps 1, 3, 4). `completed_last_day` and `oldest_queued_age_s` (null when nothing queued), additive, database clock, no extra queries: Task 2 (`test_status_with_no_jobs_has_no_queue_age`, `test_status_counts_completions_in_the_last_hour_and_day`, `test_the_queue_age_is_the_oldest_queued_jobs`, `test_nothing_queued_is_no_age_not_zero`, `test_the_queue_age_uses_the_databases_clock`, `test_status_makes_no_extra_job_queries`). No migration needed, so `0006` is unused.
 
 **Placeholder scan.** Every code step gives its exact replacement text and location; every run step its command and expected result.
 

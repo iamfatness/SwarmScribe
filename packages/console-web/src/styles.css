@@ -233,7 +233,7 @@ main {
   text-decoration: none;
 }
 
-.button:hover:not(:disabled) {
+.button:hover:not(:disabled):not([aria-disabled="true"]) {
   background: var(--surface-2);
 }
 
@@ -243,9 +243,11 @@ main {
   color: var(--accent-on);
 }
 
-.button-primary:hover:not(:disabled) {
+.button-primary:hover:not(:disabled):not([aria-disabled="true"]) {
+  /* As specific as the .button hover above, which otherwise wins and paints a primary button
+     light grey under its white text (1.16:1, found by axe with the pointer over it). */
   background: var(--accent);
-  filter: brightness(1.1);
+  text-decoration: underline;
 }
 
 .button-danger {
@@ -253,7 +255,8 @@ main {
   color: var(--bad-fg);
 }
 
-.button:disabled {
+.button:disabled,
+.button[aria-disabled="true"] {
   cursor: not-allowed;
   border-style: dashed;
   color: var(--muted);
@@ -376,6 +379,11 @@ td.num {
 
 .fleet-table thead th {
   min-width: 6rem;
+  white-space: normal;
+}
+
+.fleet-table.wide {
+  min-width: 72rem;
 }
 
 .leader-name {
@@ -386,9 +394,40 @@ td.num {
   color: var(--muted);
 }
 
+/* Cells wrap at word boundaries only, so a narrow screen scrolls the table sideways instead
+   of crushing the columns. Only a column that holds long unbroken text (a path, a URL, an id,
+   a failure detail) opts in to breaking anywhere, with .long. */
 td,
 th {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+thead th {
+  white-space: nowrap;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+td.long,
+th.long,
+.cell-note {
   overflow-wrap: anywhere;
+}
+
+td.long,
+th.long {
+  min-width: 12rem;
+}
+
+table.medium {
+  min-width: 44rem;
+}
+
+table.wide {
+  min-width: 64rem;
 }
 
 .cell-note,
@@ -488,4 +527,160 @@ th {
   .header-tools {
     margin-left: 0;
   }
+}
+
+/* ---- Drill-down and administration (C3b) ---- */
+
+.breadcrumb {
+  margin: 0 0 0.25rem;
+  color: var(--muted);
+}
+
+.tab-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.tab-link {
+  display: inline-block;
+  padding: 0.5rem 0.9rem;
+  color: var(--text);
+  text-decoration: none;
+  border-bottom: 3px solid transparent;
+}
+
+.tab-link[aria-current="page"] {
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+.tab-panel h2 {
+  margin-top: 1rem;
+}
+
+h3 {
+  font-size: 1.05rem;
+  margin: 1.25rem 0 0.5rem;
+}
+
+.section-head,
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  margin: 0.75rem 0;
+}
+
+.filters {
+  justify-content: flex-start;
+}
+
+.section-head h3,
+.section-head p {
+  margin: 0;
+}
+
+td.actions {
+  white-space: nowrap;
+}
+
+.action {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  margin-right: 0.5rem;
+}
+
+.needs-role {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.action-notice {
+  overflow-wrap: anywhere;
+  min-height: 1.5rem;
+  margin: 0.25rem 0;
+  color: var(--ok-fg);
+  font-weight: 600;
+}
+
+.error-text {
+  color: var(--bad-fg);
+}
+
+.dialog {
+  width: min(36rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+  padding: 1.25rem 1.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+}
+
+html:has(dialog[open]) {
+  overflow: hidden;
+}
+
+.dialog::backdrop {
+  background: rgb(0 0 0 / 0.5);
+}
+
+.dialog-title {
+  margin-top: 0;
+}
+
+.dialog-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.form-grid {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.form-panel {
+  max-width: 36rem;
+  margin-top: 2rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.form-panel h2 {
+  margin-top: 0;
+}
+
+.field {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.field-check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.field-help {
+  font-size: 0.8125rem;
+  color: var(--muted);
+}
+
+td.actions > .button {
+  margin-right: 0.5rem;
 }

@@ -389,8 +389,9 @@ jobs, followers, consent report). With an `operator`-capped credential the
 `admin` actions fail with the leader's own `403`. Console administration (the
 leader's `consoles` routes) is never proxied.
 
-A console administrator then registers the leader (`POST /api/admin/leaders`
-with its name, `https://` URL, labels and the credential). The URL rules, the
+A console administrator then registers the leader, in the web app under
+Administration, Leaders (or `POST /api/admin/leaders` with its name, `https://`
+URL, labels and the credential). The URL rules, the
 egress policy and what a URL change or rotation resets are in "Console
 administrators and grants" and "Deployment note: egress" in this section, and
 are not repeated here. The credential is sealed with `SWARMSCRIBE_CONSOLE_KEY`,
@@ -457,6 +458,17 @@ reload; `/api` and `/auth` never do. Every built asset is named
 revalidated on every load. The overview refreshes every 10 seconds and stops
 refreshing after 55 minutes without input, so the one-hour idle timeout still
 applies to an open tab.
+
+Each leader row opens a leader page with Jobs, Pools and followers, Locations,
+Consent and Join tokens tabs. Those read the leader live through the console's
+proxy (on open and on Refresh, never on a timer) and carry the leader actions:
+retry, cancel or reprioritise a job, drain or revoke a follower, add, enable,
+disable or scan a location, create or revoke a join token. A button is disabled
+and names the role it needs when the person's role on the leader is lower. An
+Administration area, shown to console administrators only, registers, edits,
+rotates and removes leaders, adds and removes grants, and manages the console
+administrators. Adding or removing a grant applies at once; group membership is
+read at sign-in. `packages/console-web/README.md` has the app's own notes.
 
 ### Deployment note: egress
 

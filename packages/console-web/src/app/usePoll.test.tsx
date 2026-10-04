@@ -201,4 +201,19 @@ describe("usePoll", () => {
     });
     expect(load).toHaveBeenCalledTimes(1);
   });
+
+  it("on demand (no interval) ignores visibility changes and idle resume", async () => {
+    const load = vi.fn(async () => "v");
+    render(<Probe load={load} interval={null} id="a" />);
+    await flush();
+    expect(load).toHaveBeenCalledTimes(1);
+    act(() => setVisibility("hidden"));
+    act(() => setVisibility("visible"));
+    setLastInputForTests(Date.now() - IDLE_AFTER_MS);
+    await act(async () => {
+      noteActivity();
+      await vi.advanceTimersByTimeAsync(120_000);
+    });
+    expect(load).toHaveBeenCalledTimes(1);
+  });
 });

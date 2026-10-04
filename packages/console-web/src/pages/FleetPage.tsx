@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { describeError } from "../api/errors";
 import type { FleetLeader } from "../api/types";
 import { useFleet } from "../app/fleet";
-import { useNavigate, useSearchParam } from "../app/router";
+import { Link, useNavigate, useSearchParam } from "../app/router";
 import { useNow } from "../app/useNow";
 import { usePageTitle } from "../app/usePageTitle";
 import { ErrorPanel } from "../components/ErrorPanel";
@@ -16,6 +16,7 @@ import {
   labelPairs,
   oldestQueuedAge,
 } from "../lib/format";
+import { leaderUrl } from "./leader/tabs";
 
 function matchesLabel(leader: FleetLeader, label: string | null): boolean {
   if (!label) return true;
@@ -79,9 +80,13 @@ function ScanErrors({ leader }: { leader: FleetLeader }) {
   );
 }
 
-/** The leader's name. C3b turns it into the link to the leader's drill-down. */
+/** The leader's name, linking to its drill-down. */
 export function LeaderName({ leader }: { leader: FleetLeader }): ReactNode {
-  return <span className="leader-name">{leader.name}</span>;
+  return (
+    <Link to={leaderUrl(leader.name)} className="leader-name">
+      {leader.name}
+    </Link>
+  );
 }
 
 function LeaderRow({ leader, now }: { leader: FleetLeader; now: number }) {
@@ -163,7 +168,7 @@ export function FleetPage() {
         <p>No leader has the label {label}.</p>
       ) : (
         <div className="table-scroll" role="region" aria-label="Leaders" tabIndex={0}>
-          <table className="fleet-table">
+          <table className="fleet-table wide">
             <caption className="visually-hidden">
               Leaders with their health, queue, throughput, followers and scan errors
             </caption>

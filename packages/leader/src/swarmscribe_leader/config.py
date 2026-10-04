@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     follower_gone_after_seconds: int = Field(default=600, gt=0)
     download_link_ttl_seconds: int = Field(default=1800, gt=0)
     upload_link_ttl_seconds: int = Field(default=7200, gt=0)
+    # A lease holder may ask for fresh links this often, and no more.
+    links_refresh_min_seconds: int = Field(default=60, ge=0)
 
     # Administrators' sign-in. Either provider, or both, may be configured.
     entra_tenant_id: str | None = None

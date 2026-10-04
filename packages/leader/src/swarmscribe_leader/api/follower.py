@@ -10,6 +10,8 @@ from swarmscribe_protocol import (
     FailRequest,
     HeartbeatRequest,
     HeartbeatResponse,
+    JobLinks,
+    LinksRequest,
     OutputChecksums,
     RegisterRequest,
     RegisterResponse,
@@ -24,7 +26,14 @@ from ..clock import utcnow
 from ..db.models import Follower, Job, Recording
 from ..errors import LeaderError, Unauthorized
 from ..jobs import store
-from ..jobs.claims import build_claim, device_of, outputs_unchanged, outputs_verified, profile_for
+from ..jobs.claims import (
+    build_claim,
+    build_links,
+    device_of,
+    outputs_unchanged,
+    outputs_verified,
+    profile_for,
+)
 from ..storage.base import StorageError
 from .deps import db_session, settings_of
 
@@ -149,6 +158,32 @@ async def heartbeat(
     )
     await session.commit()
     return HeartbeatResponse(directive=directive)
+
+
+@router.post("/jobs/{job_id}/links", response_model=JobLinks)
+async def fresh_links(
+    job_id: uuid.UUID,
+    body: LinksRequest,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(db_session)],
+    follower: Annotated[Follower, Depends(current_follower)],
+) -> JobLinks:
+    """New links for the job, for the follower holding its lease: a job that outlasts its
+    links (two hours for uploads) asks here. The links carry the same lease, so they stop
+    working when it ends, like the ones the claim gave."""
+    settings = settings_of(request)
+    job = await store.refresh_links(
+        session,
+        job_id,
+        body.lease_id,
+        follower,
+        min_interval_seconds=settings.links_refresh_min_seconds,
+    )
+    links = await build_links(
+        session, job, settings=settings, backend_factory=request.app.state.backend_factory
+    )
+    await session.commit()
+    return links
 
 
 @router.post("/jobs/{job_id}/submit", response_model=SubmitResponse)

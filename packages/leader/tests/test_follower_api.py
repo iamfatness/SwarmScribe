@@ -1,5 +1,7 @@
+import asyncio
 import hashlib
 import json
+import logging
 import uuid
 from datetime import timedelta
 
@@ -908,3 +910,284 @@ async def test_a_location_with_labels_the_protocol_refuses_is_skipped_not_a_500(
         0,
         1,
     )
+
+
+# --- fresh links (follower spec 12.2) ----------------------------------------------------
+
+
+@pytest.fixture
+async def quick_links_app(engine, migrated_database_url):
+    """A leader that allows a refresh at once, for tests that are not about the bound."""
+    settings = Settings(
+        database_url=migrated_database_url,
+        public_url="http://leader",
+        link_key="k" * 32,
+        links_refresh_min_seconds=0,
+    )
+    application = create_app(settings, background=False)
+    async with application.router.lifespan_context(application):
+        yield application
+
+
+@pytest.fixture
+async def quick(quick_links_app):
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=quick_links_app), base_url="http://leader"
+    ) as http:
+        yield http
+
+
+async def fresh(client, headers, claimed, lease_id=None):
+    return await client.post(
+        f"/v1/jobs/{claimed.job_id}/links",
+        headers=headers,
+        json={"lease_id": lease_id or claimed.lease_id},
+    )
+
+
+async def audit_of(sessionmaker, action):
+    from swarmscribe_leader.db.models import AuditEntry
+
+    async with sessionmaker() as session:
+        return list(
+            (await session.scalars(select(AuditEntry).where(AuditEntry.action == action))).all()
+        )
+
+
+async def set_follower_state(sessionmaker, state):
+    async with sessionmaker() as session:
+        (await session.scalars(select(Follower))).one().state = state
+        await session.commit()
+
+
+async def test_the_lease_holder_gets_fresh_links_that_work(quick, sessionmaker, factory, tmp_path):
+    await queue_one(sessionmaker, factory, tmp_path, data=b"the recording")
+    headers = await register(quick, sessionmaker)
+    claimed = await claim(quick, headers)
+    response = await fresh(quick, headers, claimed)
+    assert response.status_code == 200, response.text
+    links = response.json()
+    assert set(links) == {"download_url", "upload_urls"}
+    assert set(links["upload_urls"]) == {"txt", "srt", "segments_json"}
+    assert (await quick.get(links["download_url"]["url"])).content == b"the recording"
+    put = await quick.put(links["upload_urls"]["txt"]["url"], content=b"text\n")
+    assert put.status_code == 201
+    assert (tmp_path / "transcripts" / "talks" / "one.mp3.txt").read_bytes() == b"text\n"
+    (entry,) = await audit_of(sessionmaker, "job.links")
+    assert entry.detail == {"attempt": 1}
+    assert entry.subject_id == claimed.job_id
+    assert "/v1/files/" not in f"{entry.actor} {entry.detail}"
+
+
+async def test_fresh_links_do_not_extend_the_lease(quick, sessionmaker, factory, tmp_path):
+    await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(quick, sessionmaker)
+    claimed = await claim(quick, headers)
+    async with sessionmaker() as session:
+        before = (await session.scalars(select(Job))).one().lease_expires_at
+    assert (await fresh(quick, headers, claimed)).status_code == 200
+    async with sessionmaker() as session:
+        assert (await session.scalars(select(Job))).one().lease_expires_at == before
+
+
+async def test_fresh_links_are_bounded_per_lease(client, sessionmaker, factory, tmp_path):
+    await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(client, sessionmaker)
+    claimed = await claim(client, headers)
+    early = await fresh(client, headers, claimed)  # the claim itself issued links just now
+    assert (early.status_code, early.json()["code"]) == (429, "too_many_requests")
+    assert 1 <= int(early.headers["retry-after"]) <= 60
+    assert await audit_of(sessionmaker, "job.links") == []
+    async with sessionmaker() as session:
+        job = (await session.scalars(select(Job))).one()
+        job.links_issued_at = utcnow() - timedelta(seconds=61)
+        await session.commit()
+    assert (await fresh(client, headers, claimed)).status_code == 200
+    again = await fresh(client, headers, claimed)
+    assert again.status_code == 429
+
+
+async def test_the_bound_is_measured_on_the_database_clock(
+    client, sessionmaker, factory, tmp_path, monkeypatch
+):
+    """A replica whose own clock is an hour fast neither lets a call through early nor holds
+    one back: the claim's issue time and the comparison both come from the database."""
+    await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(client, sessionmaker)
+    monkeypatch.setattr(
+        "swarmscribe_leader.api.follower.utcnow", lambda: utcnow() + timedelta(hours=1)
+    )
+    claimed = await claim(client, headers)
+    assert (await fresh(client, headers, claimed)).status_code == 429
+    async with sessionmaker() as session:
+        await session.execute(
+            text("update jobs set links_issued_at = clock_timestamp() - interval '55 seconds'")
+        )
+        await session.commit()
+    late = await fresh(client, headers, claimed)
+    assert late.status_code == 429
+    assert 1 <= int(late.headers["retry-after"]) <= 6
+    async with sessionmaker() as session:
+        await session.execute(
+            text("update jobs set links_issued_at = clock_timestamp() - interval '61 seconds'")
+        )
+        await session.commit()
+    assert (await fresh(client, headers, claimed)).status_code == 200
+
+
+async def test_two_simultaneous_calls_issue_once(client, sessionmaker, factory, tmp_path):
+    await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(client, sessionmaker)
+    claimed = await claim(client, headers)
+    async with sessionmaker() as session:
+        job = (await session.scalars(select(Job))).one()
+        job.links_issued_at = utcnow() - timedelta(seconds=120)
+        await session.commit()
+    first, second = await asyncio.gather(
+        fresh(client, headers, claimed), fresh(client, headers, claimed)
+    )
+    assert sorted((first.status_code, second.status_code)) == [200, 429]
+    assert len(await audit_of(sessionmaker, "job.links")) == 1
+
+
+async def test_fresh_links_need_the_current_lease(quick, sessionmaker, factory, tmp_path):
+    await queue_one(sessionmaker, factory, tmp_path)
+    owner = await register(quick, sessionmaker)
+    claimed = await claim(quick, owner)
+    intruder = await register(quick, sessionmaker)
+    for headers, lease in (
+        (intruder, claimed.lease_id),
+        (owner, "00000000-0000-0000-0000-000000000000"),
+        (owner, "not-a-lease"),
+    ):
+        response = await fresh(quick, headers, claimed, lease)
+        assert (response.status_code, response.json()["code"]) == (409, "stale_lease")
+    missing = await quick.post(
+        f"/v1/jobs/{uuid.uuid4()}/links", headers=owner, json={"lease_id": claimed.lease_id}
+    )
+    assert missing.status_code == 404
+    assert (await quick.post(f"/v1/jobs/{claimed.job_id}/links", json={})).status_code == 401
+    assert await audit_of(sessionmaker, "job.links") == []
+
+
+async def test_a_job_that_is_no_longer_leased_gets_no_links(quick, sessionmaker, factory, tmp_path):
+    await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(quick, sessionmaker)
+    claimed = await claim(quick, headers)
+    async with sessionmaker() as session:
+        job = await session.get(Job, uuid.UUID(claimed.job_id), with_for_update=True)
+        await store.cancel(session, job, now=utcnow(), reason="consent withdrawn")
+        await session.commit()
+    response = await fresh(quick, headers, claimed)
+    assert (response.status_code, response.json()["code"]) == (409, "stale_lease")
+
+
+@pytest.mark.parametrize("state", ["completed", "failed", "queued"])
+async def test_a_job_in_another_state_gets_no_links_even_with_its_lease_left_on_it(
+    quick, sessionmaker, factory, tmp_path, state
+):
+    await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(quick, sessionmaker)
+    claimed = await claim(quick, headers)
+    async with sessionmaker() as session:
+        (await session.scalars(select(Job))).one().state = state
+        await session.commit()
+    response = await fresh(quick, headers, claimed)
+    assert (response.status_code, response.json()["code"]) == (409, "stale_lease")
+    assert await audit_of(sessionmaker, "job.links") == []
+
+
+async def test_the_old_holders_fresh_links_die_with_its_lease(
+    quick, sessionmaker, factory, tmp_path
+):
+    await queue_one(sessionmaker, factory, tmp_path)
+    slow = await register(quick, sessionmaker)
+    first = await claim(quick, slow)
+    links = (await fresh(quick, slow, first)).json()
+    await reap(sessionmaker, now=utcnow() + timedelta(seconds=121), gone_after=timedelta(hours=1))
+    fast = await register(quick, sessionmaker)
+    await claim(quick, fast)
+    late = await quick.put(links["upload_urls"]["txt"]["url"], content=b"old holder\n")
+    assert (late.status_code, late.json()["code"]) == (409, "stale_lease")
+    assert (await fresh(quick, slow, first)).status_code == 409
+
+
+async def test_earlier_links_keep_working_until_their_own_expiry(
+    quick, sessionmaker, factory, tmp_path
+):
+    """Fresh links supersede nothing: the claim's links and every refresh stay valid for the
+    same lease (follower spec 12.2)."""
+    await queue_one(sessionmaker, factory, tmp_path, data=b"the recording")
+    headers = await register(quick, sessionmaker)
+    claimed = await claim(quick, headers)
+    newer = (await fresh(quick, headers, claimed)).json()
+    assert (await quick.get(claimed.download_url.url)).content == b"the recording"
+    assert (await quick.get(newer["download_url"]["url"])).content == b"the recording"
+    assert (await quick.put(claimed.upload_urls.txt.url, content=b"a\n")).status_code == 201
+    assert (await quick.put(newer["upload_urls"]["txt"]["url"], content=b"b\n")).status_code == 201
+
+
+async def test_a_revoked_follower_gets_no_links(quick, sessionmaker, factory, tmp_path):
+    await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(quick, sessionmaker)
+    claimed = await claim(quick, headers)
+    await set_follower_state(sessionmaker, "revoked")
+    assert (await fresh(quick, headers, claimed)).status_code == 403
+    assert await audit_of(sessionmaker, "job.links") == []
+
+
+async def test_a_draining_holder_may_finish_so_it_gets_links(
+    quick, sessionmaker, factory, tmp_path
+):
+    await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(quick, sessionmaker)
+    claimed = await claim(quick, headers)
+    await set_follower_state(sessionmaker, "draining")
+    assert (await fresh(quick, headers, claimed)).status_code == 200
+
+
+async def test_the_links_are_never_logged(quick, sessionmaker, factory, tmp_path, caplog):
+    await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(quick, sessionmaker)
+    claimed = await claim(quick, headers)
+    caplog.set_level(logging.DEBUG)
+    response = await fresh(quick, headers, claimed)
+    assert response.status_code == 200
+    links = response.json()
+    urls = [links["download_url"]["url"], *(v["url"] for v in links["upload_urls"].values())]
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "/v1/files/" not in logged
+    assert not any(url in logged for url in urls)
+
+
+async def test_links_when_storage_is_unavailable_are_503_and_not_counted(
+    quick, quick_links_app, sessionmaker, factory, tmp_path
+):
+    location = await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(quick, sessionmaker)
+    claimed = await claim(quick, headers)
+    real = quick_links_app.state.backend_factory
+    quick_links_app.state.backend_factory = Broken(real, location.id)
+    response = await fresh(quick, headers, claimed)
+    assert (response.status_code, response.json()["code"]) == (503, "unavailable")
+    assert await audit_of(sessionmaker, "job.links") == []
+    quick_links_app.state.backend_factory = real
+    assert (await fresh(quick, headers, claimed)).status_code == 200
+
+
+async def test_a_503_for_storage_does_not_use_up_the_bound(
+    client, app, sessionmaker, factory, tmp_path
+):
+    location = await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(client, sessionmaker)
+    claimed = await claim(client, headers)
+    async with sessionmaker() as session:
+        job = (await session.scalars(select(Job))).one()
+        job.links_issued_at = utcnow() - timedelta(seconds=120)
+        await session.commit()
+    real = app.state.backend_factory
+    app.state.backend_factory = Broken(real, location.id)
+    assert (await fresh(client, headers, claimed)).status_code == 503
+    app.state.backend_factory = real
+    assert (await fresh(client, headers, claimed)).status_code == 200
+

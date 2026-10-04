@@ -17,11 +17,12 @@ NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
 
 
 class WhoAmI(BaseModel):
-    provider: str
-    issuer: str
-    subject: str
+    provider: str  # "entra", "google", or "console" for a console's delegated request
+    issuer: str | None  # None only for a console's poller
+    subject: str | None
     email: str | None
     role: str
+    console: str | None = None
 
 
 class LoginProvider(BaseModel):

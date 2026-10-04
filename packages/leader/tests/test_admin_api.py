@@ -1293,3 +1293,38 @@ async def test_revoking_a_console_shows_it_revoked_and_twice_is_harmless(
 async def test_revoking_an_unknown_console_is_404(admin_client, idp):
     response = await post(admin_client, idp, "/v1/admin/consoles/nowhere/revoke", "admin")
     assert (response.status_code, response.json()["code"]) == (404, "not_found")
+
+
+# --- a console's delegated requests meet the same role boundary --------------------------
+
+CONSOLE_MANAGEMENT = {"/v1/admin/consoles", "/v1/admin/consoles/{console}/revoke"}
+DELEGABLE = [route for route in ROUTES if route[1] not in CONSOLE_MANAGEMENT]
+
+
+def delegated(credential: str, role: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Console {credential}",
+        "X-SwarmScribe-Actor": "https://issuer.example.org person-1 person@example.org",
+        "X-SwarmScribe-Actor-Role": role,
+    }
+
+
+@pytest.mark.parametrize(
+    "method, path, body, role", DELEGABLE, ids=[f"{m} {p}" for m, p, _, _ in DELEGABLE]
+)
+async def test_a_console_meets_each_routes_role_boundary_like_a_person(
+    admin_client, factory, world, method, path, body, role
+):
+    path = path.format(**world)
+    if body is not None:
+        body = {k: v.format(**world) if isinstance(v, str) else v for k, v in body.items()}
+    _, full = await factory.console(name="full", max_role="admin")
+    below = BELOW[role]
+    if below is not None:
+        _, capped = await factory.console(name="capped", max_role=below)
+        # asserting the role below, and asserting admin through a cap below
+        for headers in (delegated(full, below), delegated(capped, "admin")):
+            refused = await admin_client.request(method, path, headers=headers, json=body)
+            assert (refused.status_code, refused.json()["code"]) == (403, "forbidden")
+    allowed = await admin_client.request(method, path, headers=delegated(full, role), json=body)
+    assert allowed.status_code < 400, allowed.text

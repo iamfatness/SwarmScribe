@@ -13,10 +13,12 @@ class LeaderError(Exception):
 
 
 class Unauthorized(LeaderError):
-    """No usable credential was sent. Answered with `WWW-Authenticate: Bearer`."""
+    """No usable credential was sent. Answered with `WWW-Authenticate: <scheme>`: Bearer,
+    or Console when a console credential was refused."""
 
     status = 401
     code = "unauthorized"
+    scheme = "Bearer"
     bearer_error: str | None = None
 
 

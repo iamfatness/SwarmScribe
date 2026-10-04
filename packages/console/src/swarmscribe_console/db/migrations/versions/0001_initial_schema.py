@@ -59,8 +59,11 @@ def upgrade() -> None:
         sa.CheckConstraint("name ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$'", name="ck_leaders_name"),
         sa.CheckConstraint("base_url LIKE 'https://%'", name="ck_leaders_base_url_https"),
         sa.CheckConstraint("jsonb_typeof(labels) = 'object'", name="ck_leaders_labels_object"),
+        sa.CheckConstraint(
+            "get_byte(credential, 0) = 1 AND length(credential) > 29",
+            name="ck_leaders_credential_sealed",
+        ),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("name"),
     )
     op.create_index("uq_leaders_name_lower", "leaders", [sa.text("lower(name)")], unique=True)
 

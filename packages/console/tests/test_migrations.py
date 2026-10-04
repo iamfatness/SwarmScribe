@@ -13,9 +13,10 @@ from swarmscribe_console.db.migrate import alembic_config, current_revision, hea
 from swarmscribe_console.db.models import AuditEntry, Base, Snapshot
 from swarmscribe_console.main import main
 
+SEALED = "'\\x01'::bytea || decode(repeat('00', 40), 'hex')"
 LEADER_SQL = (
     "insert into leaders (name, base_url, credential, credential_updated_by, added_by)"
-    " values (:name, :url, '\\x01'::bytea, 'test', 'test') returning id"
+    " values (:name, :url, " + SEALED + ", 'test', 'test') returning id"
 )
 
 
@@ -50,6 +51,14 @@ async def test_the_database_refuses_bad_leader_rows(sessionmaker, name, url):
     async with sessionmaker() as session:
         with pytest.raises(IntegrityError):
             await session.execute(text(LEADER_SQL), {"name": name, "url": url})
+        await session.rollback()
+
+
+async def test_the_database_refuses_an_unsealed_credential(sessionmaker):
+    plain = LEADER_SQL.replace(SEALED, "'\\x41'::bytea")
+    async with sessionmaker() as session:
+        with pytest.raises(IntegrityError):
+            await session.execute(text(plain), {"name": "eu-1", "url": "https://a.example"})
         await session.rollback()
 
 
@@ -161,3 +170,48 @@ def test_migrate_refuses_bad_settings_without_echoing_them(monkeypatch, capsys):
     assert "key" in err
     assert "a-wrong-key-value" not in err
     assert "secret-pw" not in err
+
+
+@pytest.mark.parametrize("field", ["actor", "action", "target", "outcome", "leader"])
+async def test_audit_replaces_control_characters_in_every_field(sessionmaker, field):
+    fields = {"actor": "a", "action": "x", "target": "t", "outcome": "ok", "leader": "l"}
+    fields[field] = "a\r\nb\x00c\u2028d\x85e"
+    async with sessionmaker() as session:
+        audit.record(session, **fields)
+        await session.commit()
+        (entry,) = (await session.scalars(select(AuditEntry))).all()
+    assert getattr(entry, field) == "a\ufffd\ufffdb\ufffdc\ufffdd\ufffde"
+
+
+@pytest.mark.parametrize(
+    ("field", "limit"),
+    [("actor", 400), ("action", 64), ("target", 400), ("outcome", 64), ("leader", 100)],
+)
+async def test_audit_truncates_over_long_values_and_still_commits(sessionmaker, field, limit):
+    fields = {"actor": "a", "action": "x", "target": "t", "outcome": "ok", "leader": "l"}
+    fields[field] = "z" * 10_000
+    async with sessionmaker() as session:
+        session.add_all([])
+        audit.record(session, **fields)
+        await session.commit()
+        (entry,) = (await session.scalars(select(AuditEntry))).all()
+    assert getattr(entry, field) == "z" * (limit - 1) + "\u2026"
+
+
+async def test_audit_bounds_detail(sessionmaker):
+    async with sessionmaker() as session:
+        audit.record(session, actor="a", action="x", detail={"big": "y" * 5000})
+        audit.record(session, actor="a", action="x", detail={"k\x00": "v\x00", "n": 1})
+        await session.commit()
+        entries = (await session.scalars(select(AuditEntry).order_by(AuditEntry.id))).all()
+    assert entries[0].detail == {"truncated": True}
+    assert entries[1].detail == {"k\ufffd": "v\ufffd", "n": 1}
+
+
+async def test_audit_apart_logs_failures_without_the_values(caplog):
+    def broken():
+        raise RuntimeError("secret-value")
+
+    await audit.record_apart(broken, actor="secret-actor", action="x")
+    assert "RuntimeError" in caplog.text
+    assert "secret" not in caplog.text

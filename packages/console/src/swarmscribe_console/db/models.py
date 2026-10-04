@@ -27,6 +27,10 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 ROLE_CHECK = "role IN ('viewer','operator','admin')"
 KIND_CHECK = "principal_kind IN ('entra_group','google_group','email','domain')"
 SCOPE_CHECK = "scope = 'all' OR scope LIKE 'leader:_%' OR scope LIKE 'label:_%=_%'"
+# crypto.seal_credential: 0x01 || 12-byte nonce || ciphertext || 16-byte tag. Rejects a raw
+# (plaintext) credential: 43 characters never starts with byte 1 and is shorter than 30 bytes
+# only when empty.
+SEALED_CHECK = "get_byte(credential, 0) = 1 AND length(credential) > 29"
 NAME_CHECK = "name ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$'"
 
 
@@ -47,11 +51,12 @@ class Leader(Base):
         CheckConstraint(NAME_CHECK, name="ck_leaders_name"),
         CheckConstraint("base_url LIKE 'https://%'", name="ck_leaders_base_url_https"),
         CheckConstraint("jsonb_typeof(labels) = 'object'", name="ck_leaders_labels_object"),
+        CheckConstraint(SEALED_CHECK, name="ck_leaders_credential_sealed"),
         Index("uq_leaders_name_lower", func.lower(text("name")), unique=True),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    name: Mapped[str] = mapped_column(String(100), unique=True)
+    name: Mapped[str] = mapped_column(String(100))
     base_url: Mapped[str] = mapped_column(Text)
     labels: Mapped[dict[str, Any]] = mapped_column(
         default=dict, server_default=text("'{}'::jsonb")

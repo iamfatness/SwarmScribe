@@ -10,6 +10,7 @@ renders it with values that must be refused. `--only core,migrate` runs some sec
 
 import argparse
 import ipaddress
+import json
 import re
 import subprocess
 import sys
@@ -21,8 +22,12 @@ import yaml
 CHART = Path(__file__).resolve().parents[1]
 VALUES = CHART / "ci" / "test-values.yaml"
 WEB = CHART.parents[2] / "packages" / "console-web"
-# What the console serves besides the web app's pages (packages/console/src/.../api/*.py:
-# APIRouter prefixes /api and /auth; the web build's assets folder is read from vite.config.ts).
+# The web app's top-level routes: one list, which the app itself consults to decide what is a
+# page (packages/console-web/src/app/routes.ts), so a page cannot exist without being in it.
+ROUTE_PREFIXES = WEB / "src" / "app" / "routePrefixes.json"
+# What the console serves besides the web app's pages: /api and /auth (and the probes, which
+# are never routed). packages/console/tests/test_route_prefixes.py fails when the backend
+# serves a route under any other prefix; the web build's assets folder comes from vite.config.ts.
 BACKEND_PREFIXES = ("/api", "/auth")
 NAME = "console-swarmscribe-console"
 SECRET_NAMES = {
@@ -65,20 +70,33 @@ MUST_BE_ALLOWED = (
 )
 
 
-def helm_template(*extra: str) -> subprocess.CompletedProcess:
-    command = ["helm", "template", "console", str(CHART), "--namespace", "fleet"]
+def helm_template(*extra: str, release: str = "console") -> subprocess.CompletedProcess:
+    command = ["helm", "template", release, str(CHART), "--namespace", "fleet"]
     return subprocess.run([*command, "-f", str(VALUES), *extra], capture_output=True, text=True)
 
 
-def render(*extra: str) -> list[dict]:
-    done = helm_template(*extra)
+def render(*extra: str, release: str = "console") -> list[dict]:
+    done = helm_template(*extra, release=release)
     if done.returncode != 0:
         raise SystemExit(f"helm template failed:\n{done.stderr}")
     return [doc for doc in yaml.safe_load_all(done.stdout) if doc]
 
 
-def refused(problems: list[str], what: str, *values: str) -> None:
-    if helm_template("--set", ",".join(values)).returncode == 0:
+def refused(problems: list[str], what: str, *values: str, strings: bool = False) -> None:
+    flag = "--set-string" if strings else "--set"
+    if helm_template(flag, ",".join(values)).returncode == 0:
+        problems.append(f"the chart renders with {what}")
+
+
+def values_file(values: dict) -> Path:
+    path = Path(tempfile.mkdtemp()) / "values.yaml"
+    path.write_text(yaml.safe_dump(values), encoding="utf-8")
+    return path
+
+
+def refused_file(problems: list[str], what: str, values: dict) -> None:
+    """`refused` for values --set cannot express (a newline in a key, a list of maps)."""
+    if helm_template("-f", str(values_file(values))).returncode == 0:
         problems.append(f"the chart renders with {what}")
 
 
@@ -197,12 +215,197 @@ def check_core(docs: list[dict]) -> list[str]:
     refused(
         problems, "no sign-in provider", "oidc.entra.enabled=false", "oidc.google.enabled=false"
     )
+    # Secrets and chart-owned names through `settings`: the console reads its environment
+    # case-insensitively, so every spelling is refused (and a name must be upper case).
     refused(problems, "the console key under settings", "settings.KEY=abc")
+    refused(problems, "a lower-case console key under settings", "settings.key=abc")
+    refused(problems, "a lower-case database_url under settings", "settings.database_url=abc")
+    refused(problems, "a mixed-case key under settings", "settings.Key=abc")
     refused(problems, "a client secret under settings", "settings.ENTRA_CLIENT_SECRET=abc")
-    pinned = one(render("--set", "image.digest=sha256:abc"), "Deployment")
+    refused(problems, "a mixed-case *_secret under settings", "settings.Entra_Client_Secret=abc")
+    refused(problems, "google_service_account under settings", "settings.google_service_account=x")
+    refused(problems, "public_url under settings", "settings.public_url=https://a.example.org")
+    refused(problems, "port under settings", "settings.port=1")
+    refused(problems, "a lower-case setting name", "settings.poll_concurrency=4")
+    refused_file(problems, "a setting name with a space", {"settings": {"A B": "4"}})
+    refused_file(problems, "a setting name with a newline", {"settings": {"A\nKEY": "plain"}})
+    refused_file(
+        problems,
+        "a setting name that injects a ConfigMap entry",
+        {"settings": {"X: y\n  SWARMSCRIBE_CONSOLE_KEY": "plain"}},
+    )
+    for name in (
+        "SWARMSCRIBE_CONSOLE_KEY",
+        "swarmscribe_console_database_url",
+        "Swarmscribe_Console_Entra_Client_Secret",
+        "SWARMSCRIBE_CONSOLE_PUBLIC_URL",
+    ):
+        refused_file(
+            problems, f"{name} under extraEnv", {"extraEnv": [{"name": name, "value": "x"}]}
+        )
+    refused_file(
+        problems,
+        "a secret under extraEnv by valueFrom",
+        {
+            "extraEnv": [
+                {"name": "SWARMSCRIBE_CONSOLE_KEY", "valueFrom": {"fieldRef": {"fieldPath": "x"}}}
+            ]
+        },
+    )
+    proxied = render(
+        "-f",
+        str(values_file({"extraEnv": [{"name": "HTTPS_PROXY", "value": "http://proxy:3128"}]})),
+    )
+    if "HTTPS_PROXY" not in {e["name"] for e in console_container(proxied)["env"]}:
+        problems.append("Deployment: extraEnv HTTPS_PROXY is not passed on")
+
+    # Validated before any hook can run: a bad value fails at render.
+    for what, value in (
+        ("a publicUrl with a query", "https://console.example.org?x=1"),
+        ("a publicUrl with a fragment", "https://console.example.org#f"),
+        ("a publicUrl with userinfo", "https://user@console.example.org"),
+        ("a publicUrl with a path", "https://console.example.org/app"),
+        ("a publicUrl with a trailing slash", "https://console.example.org/"),
+        ("a publicUrl with a trailing dot", "https://console.example.org."),
+        ("a publicUrl with upper-case letters", "https://Console.Example.ORG"),
+        ("a publicUrl with a space", "https://console example.org"),
+        ("an IPv4 publicUrl", "https://10.1.2.3"),
+        ("an IPv6 publicUrl", "https://[::1]"),
+        ("a wildcard publicUrl", "https://*.example.org"),
+        ("a publicUrl with a quote", 'https://con"sole.example.org'),
+        ("a publicUrl with a leading hyphen", "https://-console.example.org"),
+        ("a publicUrl without a host", "https://"),
+    ):
+        refused_file(problems, what, {"publicUrl": value})
+    refused_file(problems, "a publicUrl with a newline", {"publicUrl": "https://a.example.org\nx"})
+    refused_file(problems, "a publicUrl that is not a string", {"publicUrl": 5})
+    for what, value in (
+        ("port 0", "port=0"),
+        ("a negative port", "port=-1"),
+        ("port 70000", "port=70000"),
+        ("a text port", "port=abc"),
+        ("a fractional port", "port=8080.5"),
+        ("service.port 0", "service.port=0"),
+        ("service.port 70000", "service.port=70000"),
+        ("no replicas", "replicaCount=0"),
+        ("negative replicas", "replicaCount=-1"),
+        ("text replicas", "replicaCount=two"),
+        ("fractional replicas", "replicaCount=2.5"),
+        ("an unknown pullPolicy", "image.pullPolicy=Sometimes"),
+        ("an unknown service type", "service.type=ExternalName"),
+        ("a negative grace period", "terminationGracePeriodSeconds=-1"),
+        ("a malformed digest", "image.digest=notadigest"),
+        ("a bad fullnameOverride", "fullnameOverride=Not_Valid"),
+        ("a Postgres port of 0", "networkPolicy.egress.postgres.port=0"),
+    ):
+        refused(problems, what, value)
+    refused_file(
+        problems,
+        "an unknown pathType",
+        {"ingress": {"paths": [{"path": "/a", "pathType": "Loose"}]}},
+    )
+    # A Prefix "/" would publish /healthz and /readyz.
+    refused_file(
+        problems,
+        "a Prefix / ingress path",
+        {"ingress": {"paths": [{"path": "/", "pathType": "Prefix"}]}},
+    )
+    refused_file(
+        problems,
+        "an ImplementationSpecific / ingress path",
+        {"ingress": {"paths": [{"path": "/", "pathType": "ImplementationSpecific"}]}},
+    )
+
+    pinned = one(render("--set", f"image.digest={DIGEST}"), "Deployment")
     image = pinned["spec"]["template"]["spec"]["containers"][0]["image"]
-    if image != "swarmscribe-console@sha256:abc":
+    if image != f"swarmscribe-console@{DIGEST}":
         problems.append("Deployment: image.digest does not win over the tag")
+
+    problems += check_names()
+    problems += check_quoting()
+    return problems
+
+
+DIGEST = "sha256:" + "ab" * 32
+NAME_PATTERN = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?")
+
+
+def console_container(docs: list[dict]) -> dict:
+    return one(docs, "Deployment")["spec"]["template"]["spec"]["containers"][0]
+
+
+def label_values(node: object):
+    """Every string under a `labels` or `matchLabels` map, wherever it sits in a manifest."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in ("labels", "matchLabels") and isinstance(value, dict):
+                yield from (str(v) for v in value.values())
+            else:
+                yield from label_values(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from label_values(item)
+
+
+def check_names() -> list[str]:
+    """Every object name and label value stays within 63 characters, for the longest release
+    name Helm allows (53), a long fullnameOverride, and a long nameOverride."""
+    problems: list[str] = []
+    release = ("r" * 52) + "1"
+    cases = (
+        ("a 53-character release name", {"release": release}, ()),
+        (
+            "a 53-character release name with dots",
+            {"release": "a" * 20 + "." + "b" * 20 + ".cc"},
+            (),
+        ),
+        ("a 70-character fullnameOverride", {}, ("--set", "fullnameOverride=" + "x" * 70)),
+        ("a long nameOverride", {"release": release}, ("--set", "nameOverride=" + "n" * 60)),
+    )
+    for what, kwargs, extra in cases:
+        docs = render(*extra, **kwargs)
+        if len([d for d in docs if d["kind"] == "Job"]) != 1:
+            problems.append(f"{what}: no migration Job")
+        for doc in docs:
+            name = doc["metadata"]["name"]
+            if len(name) > 63 or not NAME_PATTERN.fullmatch(name):
+                problems.append(f"{what}: {doc['kind']} name {name!r} is too long or not valid")
+        for value in label_values(docs):
+            if len(value) > 63:
+                problems.append(f"{what}: a label value is {len(value)} characters: {value!r}")
+        names = [(d["kind"], d["metadata"]["name"]) for d in docs]
+        if len(set(names)) != len(names):
+            problems.append(f"{what}: two objects share a kind and a name")
+    override = render("--set", "fullnameOverride=custom")
+    if not any(d["kind"] == "Deployment" and d["metadata"]["name"] == "custom" for d in override):
+        problems.append("fullnameOverride does not name the Deployment")
+    if not any(d["kind"] == "Job" and d["metadata"]["name"] == "custom-migrate" for d in override):
+        problems.append("fullnameOverride does not name the migration Job")
+    return problems
+
+
+def check_quoting() -> list[str]:
+    """Names that look like numbers or booleans stay strings."""
+    problems: list[str] = []
+    docs = render(
+        "--set-string",
+        "secrets.existingSecret=12345,ingress.tls.secretName=true,leaderCa.existingConfigMap=789",
+    )
+    for entry in console_container(docs)["env"]:
+        ref = entry.get("valueFrom", {}).get("secretKeyRef")
+        if ref and ref["name"] != "12345":
+            problems.append(f"{entry['name']}: the Secret name {ref['name']!r} is not 12345")
+    ingress = one(docs, "Ingress")
+    if ingress["spec"]["tls"][0]["secretName"] != "true":
+        problems.append("Ingress: a TLS Secret named true does not stay a string")
+    volumes = one(docs, "Deployment")["spec"]["template"]["spec"]["volumes"]
+    if volumes[0]["configMap"]["name"] != "789":
+        problems.append("Deployment: a CA ConfigMap named 789 does not stay a string")
+    job = one(docs, "Job", f"{NAME}-migrate")["spec"]["template"]["spec"]["containers"][0]
+    for entry in job["env"]:
+        ref = entry.get("valueFrom", {}).get("secretKeyRef")
+        if ref and ref["name"] != "12345":
+            problems.append(f"Job: {entry['name']} names the Secret {ref['name']!r}")
     return problems
 
 
@@ -250,19 +453,23 @@ def routes(entry: dict, request_path: str) -> bool:
 
 
 def web_routes() -> list[str]:
-    """Concrete example paths for every route the web app answers, read from the router's
-    route table (packages/console-web/src/App.tsx: `pathname === "..."` and `matchPath("...")`),
-    plus the backend prefixes and the web build's assets folder."""
-    source = (WEB / "src" / "App.tsx").read_text(encoding="utf-8")
-    literals = re.findall(r'(?:pathname === |matchPath\()"(/[^"]*)"', source)
-    literals += re.findall(r'<Route[^>]*path="(/[^"]*)"', source)
-    if len(literals) < 5:
-        raise SystemExit("could not read the web app's routes from App.tsx: update check_render.py")
+    """Concrete example paths for every route the web app answers: one under each prefix in
+    routePrefixes.json (the list the app dispatches on), the backend prefixes, and the web
+    build's assets folder."""
+    prefixes = json.loads(ROUTE_PREFIXES.read_text(encoding="utf-8"))
+    well_formed = isinstance(prefixes, list) and "/" in prefixes
+    well_formed = well_formed and all(
+        isinstance(p, str) and (p == "/" or re.fullmatch(r"/[a-z0-9-]+", p)) for p in prefixes
+    )
+    if not well_formed:
+        raise SystemExit(f"{ROUTE_PREFIXES} must be a JSON array of '/' and '/segment' strings")
     assets = re.search(r'assetsDir:\s*"([^"]+)"', (WEB / "vite.config.ts").read_text("utf-8"))
     if assets is None:
         raise SystemExit("could not read assetsDir from vite.config.ts: update check_render.py")
-    paths = [re.sub(r":\w+", "x", literal) for literal in literals]
-    return sorted({*paths, *BACKEND_PREFIXES, f"/{assets.group(1)}/index-0123456789abcdef.js"})
+    deep = [f"{p}/x/y" for p in prefixes if p != "/"]
+    return sorted(
+        {*prefixes, *deep, *BACKEND_PREFIXES, f"/{assets.group(1)}/index-0123456789abcdef.js"}
+    )
 
 
 def check_paths(entries: list[dict]) -> list[str]:
@@ -287,7 +494,7 @@ def check_ingress(docs: list[dict]) -> list[str]:
         problems.append("Ingress: the host is not the public URL's")
     for rule in ingress["spec"]["rules"]:
         problems += check_paths(rule["http"]["paths"])
-    limit = "nginx.ingress.kubernetes.io/limit-rpm"
+    limit = "traefik.ingress.kubernetes.io/router.middlewares"
     if limit in ingress["metadata"].get("annotations", {}):
         problems.append("Ingress: the sign-in annotations are on the whole console")
     sign_in = one(docs, "Ingress", f"{NAME}-sign-in")
@@ -306,6 +513,20 @@ def check_ingress(docs: list[dict]) -> list[str]:
         thin = one(render("-f", str(values)), "Ingress")
     if not check_paths(thin["spec"]["rules"][0]["http"]["paths"]):
         problems.append("the route drift check passes when ingress.paths lacks the web routes")
+    # And it must follow the list the app dispatches on: a new prefix in routePrefixes.json
+    # that ingress.paths lacks has to fail it.
+    global ROUTE_PREFIXES
+    real = ROUTE_PREFIXES
+    grown = Path(tempfile.mkdtemp()) / "routePrefixes.json"
+    grown.write_text(
+        json.dumps([*json.loads(real.read_text(encoding="utf-8")), "/reports"]), encoding="utf-8"
+    )
+    ROUTE_PREFIXES = grown
+    try:
+        if not check_paths(ingress["spec"]["rules"][0]["http"]["paths"]):
+            problems.append("the route drift check ignores a new prefix in routePrefixes.json")
+    finally:
+        ROUTE_PREFIXES = real
     refused(problems, "an Ingress without TLS", "ingress.tls.secretName=")
     if "Ingress" in kinds(render("--set", "ingress.enabled=false")):
         problems.append("a disabled Ingress is still rendered")
@@ -348,6 +569,22 @@ def check_network(docs: list[dict]) -> list[str]:
     labels = console_labels(docs)
     if any(labels.get(k) != v for k, v in budget["spec"]["selector"]["matchLabels"].items()):
         problems.append("PodDisruptionBudget: does not select the console pods")
+    if budget["spec"].get("unhealthyPodEvictionPolicy") != "AlwaysAllow":
+        problems.append("PodDisruptionBudget: unready pods are not evictable (AlwaysAllow)")
+    template = one(docs, "Deployment")["spec"]["template"]["spec"]
+    spread = template.get("topologySpreadConstraints", [])
+    if [(c["topologyKey"], c["whenUnsatisfiable"]) for c in spread] != [
+        ("kubernetes.io/hostname", "ScheduleAnyway")
+    ]:
+        problems.append("Deployment: no soft spread across nodes by default with 2 replicas")
+    elif any(labels.get(k) != v for k, v in spread[0]["labelSelector"]["matchLabels"].items()):
+        problems.append("Deployment: the default spread does not select the console pods")
+    single = one(render("--set", "replicaCount=1"), "Deployment")["spec"]["template"]["spec"]
+    if "topologySpreadConstraints" in single:
+        problems.append("Deployment: a spread constraint for one replica")
+    own = one(render("--set", "spreadAcrossNodes=false"), "Deployment")["spec"]["template"]["spec"]
+    if "topologySpreadConstraints" in own:
+        problems.append("Deployment: spreadAcrossNodes=false still spreads")
     if "PodDisruptionBudget" in kinds(render("--set", "replicaCount=1")):
         problems.append("a PodDisruptionBudget is rendered for one replica (it blocks drains)")
 

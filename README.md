@@ -616,6 +616,18 @@ docker build -t swarmscribe-console:0.1.0 -f docker/console.Dockerfile .
 #                         docker push registry.example.org/swarmscribe-console:0.1.0
 ```
 
+If `kind load docker-image` fails on Docker Desktop (its containerd image store can make it
+stop with "content digest ... not found"), load the image from an archive instead. Either
+form worked on kind v0.30.0 with Docker Desktop on Windows (the first command here also
+worked on that machine, so the failure itself was not reproduced there):
+
+```
+docker save swarmscribe-console:0.1.0 -o swarmscribe-console.tar
+kind load image-archive swarmscribe-console.tar
+# or, without a file (the node's name is <cluster>-control-plane):
+docker save swarmscribe-console:0.1.0 | docker exec -i kind-control-plane ctr -n k8s.io images import -
+```
+
 Use `image.pullPolicy: Never` (or `IfNotPresent`) for a loaded image. The image needs no
 writable path, so the chart mounts no `/tmp`.
 
@@ -626,13 +638,22 @@ separate piece of work). CI lints and renders it with Helm 4.3.0. It was also in
 once on a kind cluster (Kubernetes 1.34) with a throwaway Postgres: the migration hook ran
 and finished before any console pod started, the pods became ready, `helm upgrade` ran the
 hook again and rolled the pods, and a stopped database made `/readyz` answer 503 without
-restarting a pod. That cluster's network plugin does not enforce NetworkPolicy, so the
-policy below was shown to apply, not to block.
+restarting a pod. That cluster's network plugin (kind v0.30.0, Kubernetes 1.34.0) enforces
+NetworkPolicy: from a console pod, TCP 443 to the two identity providers and to a public
+address and the Postgres port were reachable, while port 80 and port 8443 on a public
+address, and the console's own Service on port 80, timed out. So a leader on a port other
+than 443 is blocked until it is added to `networkPolicy.egress.https.ports`. A second
+install, with a 49-character release name, also ran there after the fixes of the final
+review: the hook ran, both pods became ready and `/healthz` and `/readyz` answered. What
+was not run: any ingress controller, and a node drain.
 
-1. Create the Secret. The chart never creates one: a values file and Helm's release history
-   are not a place for the console key. The values below are placeholders.
+1. Create the namespace and the Secret. The chart never creates a Secret: a values file and
+   Helm's release history are not a place for the console key. The values below are
+   placeholders. (`helm install --create-namespace` would also create the namespace, but
+   the Secret has to exist before the install, because the migration hook reads it.)
 
    ```
+   kubectl create namespace fleet
    kubectl -n fleet create secret generic swarmscribe-console \
      --from-literal=database-url='postgresql://console:...@db.internal:5432/swarmscribe_console' \
      --from-literal=console-key="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')" \
@@ -661,7 +682,7 @@ policy below was shown to apply, not to block.
        tenantId: 00000000-0000-0000-0000-000000000000
        clientId: 11111111-1111-1111-1111-111111111111
    ingress:
-     className: nginx
+     className: traefik        # the class of YOUR ingress controller
      tls:
        secretName: console-tls
    networkPolicy:
@@ -669,7 +690,18 @@ policy below was shown to apply, not to block.
        postgres:
          peers:
            - ipBlock:
-               cidr: 10.20.30.40/32
+               cidr: 10.20.30.40/32     # Postgres outside the cluster
+   ```
+
+   For a Postgres inside the cluster, name its pods, not its Service (see "Egress"):
+
+   ```yaml
+   networkPolicy:
+     egress:
+       postgres:
+         peers:
+           - podSelector: {matchLabels: {app: pg}}   # same namespace; add a
+                                                     # namespaceSelector for another one
    ```
 
    For Google, replace the `entra` block with `oidc.google.enabled: true` and
@@ -736,9 +768,28 @@ Values:
 | `replicaCount`, `resources`, `podDisruptionBudget` | scale and availability |
 | `ingress.*`, `networkPolicy.*`, `migrate.*` | described in `values.yaml` |
 
-`helm template` fails, saying why, when `publicUrl`, the image, the Secret, a sign-in
-provider, the Ingress's TLS secret or the Postgres peer of the NetworkPolicy is missing, and
-when a secret is put under `settings`.
+`helm template` fails, saying why, before any hook can run, when:
+
+- `publicUrl`, the image, the Secret, a sign-in provider, the Ingress's TLS secret or the
+  Postgres peer of the NetworkPolicy is missing;
+- `publicUrl` is anything but `https://<lowercase DNS hostname>` (a port, path, query,
+  fragment, user, upper-case letter, space or IP address is refused);
+- a value has the wrong type or range (`values.schema.json`): `replicaCount` is at least 1,
+  `port` and `service.port` are 1 to 65535, `pullPolicy`, `service.type` and `pathType`
+  take their listed values;
+- a secret is put under `settings` or `extraEnv` in any letter case (`key`, `Database_URL`,
+  `SWARMSCRIBE_CONSOLE_KEY`, `*_SECRET`, `GOOGLE_SERVICE_ACCOUNT`), or a name the chart sets
+  itself (`PUBLIC_URL`, `PORT`, `LEADER_CA_FILE`, the `oidc` ones); a `settings` key must
+  be upper case (`^[A-Z][A-Z0-9_]*$`);
+- `ingress.paths` holds a Prefix `/`, which would publish `/healthz` and `/readyz`.
+
+Object names are cut to 55 characters (`fullnameOverride` and `nameOverride` change the
+base), so that `-migrate` and `-sign-in` keep every name and label within 63 even for a
+53-character release name. With two or more replicas the pods are spread across nodes
+softly (`spreadAcrossNodes`; your own `topologySpreadConstraints` replace it), and the
+PodDisruptionBudget lets unready pods be evicted (`unhealthyPodEvictionPolicy:
+AlwaysAllow`, Kubernetes 1.27 and later, so the chart needs 1.27), so a database outage
+cannot stall a node drain.
 
 ### Database connections
 
@@ -756,16 +807,23 @@ check gives up at 3). The console also answers HEAD like GET and 405 to any othe
 and redirects `/healthz/` and `/readyz/` to the canonical path. The Ingress lists explicit
 paths (`ingress.paths`) and does not route `/healthz` or `/readyz`: `/readyz` tells an
 anonymous caller whether the database is up. A route added to the web app needs a new
-entry in `ingress.paths`, for example `- {path: /reports, pathType: Prefix}`; the render
-check (`deploy/helm/swarmscribe-console/ci/check_render.py`) reads the web app's routes
-and fails when one is not covered.
+entry in `ingress.paths`, for example `- {path: /reports, pathType: Prefix}`. The web
+app's top-level routes are listed in one file,
+`packages/console-web/src/app/routePrefixes.json`, which the app itself consults: a path
+whose first segment is not in it is "Page not found", so a page cannot exist without being
+listed. The render check (`deploy/helm/swarmscribe-console/ci/check_render.py`) reads that
+file and fails when `ingress.paths` does not cover a prefix in it. The backend's side is
+a console test (`packages/console/tests/test_route_prefixes.py`): every route the console
+serves starts with `/api/`, `/auth/`, `/healthz` or `/readyz`, so the chart's `/api` and
+`/auth` cannot go stale unnoticed.
 
 During a database outage the console stays alive (liveness does not use the database), its
 pods go unready, and the log stays short on purpose: the poller logs one line per 30
 seconds per cause and `/readyz` logs one line, at most every 30 seconds, saying whether it
 cannot query the database or the migrations are not current. Before C4a's limit this was
 about 1,500 lines a minute per replica. The pods are not restarted, and are ready again
-once the database answers.
+once the database answers. (A pod that starts while the database is unreachable exits and
+is restarted until it answers; one restart was seen.)
 
 ### Egress
 
@@ -785,6 +843,17 @@ the console pods:
   `fe80::/10`, `fec0::/10` and `ff00::/8`. This one rule serves both the leaders and the
   identity providers.
 
+**Peers are matched after Service translation.** Most network plugins compare the peer and
+the port of a packet after the Service's virtual address has been replaced by a pod's. So
+for a Postgres or a leader inside the cluster, name its pods (`podSelector`, with a
+`namespaceSelector` for another namespace) or the pod CIDR, and the pod's own port: never
+the Service's ClusterIP, which nothing is addressed to by then, and never a Service port
+that differs from the pod's. The mistake looks like this: the pre-upgrade hook still
+passes (it runs under the previous release's policy), then the new pods log
+`cannot connect to the database: TimeoutError`, fail their startup probe, and
+`helm upgrade --wait` times out. For the same reason, moving the database and changing
+its peer in one upgrade fails the hook: the hook runs under the old peer.
+
 Private addresses stay reachable, because leaders usually live on them. If every leader is
 outside the cluster, add the cluster's pod and service ranges to
 `networkPolicy.egress.https.extraExcept`. If leaders listen on another port, add it to
@@ -793,8 +862,10 @@ outside the cluster, add the cluster's pod and service ranges to
 What a NetworkPolicy cannot do, so that nobody relies on it for more:
 
 - It does nothing unless the cluster's network plugin enforces NetworkPolicy (Calico,
-  Cilium and most managed clusters' policy add-ons do; kind's default network plugin does
-  not, so a local test shows the object and not the blocking).
+  Cilium, most managed clusters' policy add-ons and, observed here, kind v0.30.0's default
+  network plugin do). Without one the object is accepted and does nothing.
+- With the default `ingress.from: []`, any pod in the cluster can reach the console's port.
+  Name your ingress controller's namespace there to narrow it.
 - It cannot name a DNS host. Identity providers cannot be pinned to their names, and the
   metadata *names* the console refuses are blocked only through the addresses they resolve
   to. To allow only the leaders' networks, narrow `networkPolicy.egress.https.cidrs` to
@@ -827,8 +898,16 @@ back from the identity provider, or for ten minutes. Two things bound it:
   `/auth/login` that carries its own annotations, so the limit does not slow the rest of
   the console. The annotations are your ingress controller's, not the chart's.
 
-A worked example for Traefik, which is maintained and widely used (ingress-nginx, the other
-common choice, is being retired and will get no further fixes). The annotation and the
+**The limit depends on the controller serving two Ingresses for one host as one site.**
+Traefik and ingress-nginx do. GKE Ingress, and the AWS Load Balancer Controller without
+a shared group (`alb.ingress.kubernetes.io/group.name`), give each Ingress its own load
+balancer: the host's DNS reaches only one of them, the main Ingress's `/auth` Prefix serves
+`/auth/login`, and the rate limit silently never applies. Check on your controller that
+`/auth/login` really reaches the sign-in Ingress. The sign-in Ingress also carries the main
+Ingress's annotations (a cert-manager issuer, for example), so a second certificate
+request for the same Secret is possible with cert-manager's annotation on both.
+
+A worked example for Traefik, which is maintained and widely used. The annotation and the
 Middleware below are Traefik's names, not the chart's. Create the Middleware in the
 release's namespace, then name it in the annotation as `<namespace>-<name>@kubernetescrd`:
 
@@ -856,9 +935,10 @@ ingress:
 ```
 
 The chart renders the Ingress with that annotation and nothing else; the Traefik side
-(that the CRDs are installed, and what its counter keys on) was not run here. For
-ingress-nginx the same limit is one annotation on `ingress.signIn.annotations`,
-`nginx.ingress.kubernetes.io/limit-rpm: "30"`.
+(that the CRDs are installed, and what its counter keys on) was not run here. ingress-nginx
+was retired in March 2026 and gets no further fixes, so the chart's examples and CI values
+use neither it nor `className: nginx`; a cluster that still runs it can set its own
+rate-limit annotation on `ingress.signIn.annotations`.
 
 ### Leaders on a private CA
 

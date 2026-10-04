@@ -2,7 +2,13 @@
 # `secrets.existingSecret` and one of `oidc.entra` / `oidc.google`; with the
 # NetworkPolicy on (the default) also `networkPolicy.egress.postgres.peers`.
 
-# Console replicas. Each replica runs its own poller (advisory locks keep one poll
+# Names. fullnameOverride replaces <release>-swarmscribe-console as the base of every object
+# name; either way the base is cut to 55 characters, so that -migrate and -sign-in still fit
+# the 63 a Service name or a label value may have.
+nameOverride: ""
+fullnameOverride: ""
+
+# Console replicas (at least 1). Each replica runs its own poller (advisory locks keep one poll
 # per leader) and opens up to 2 * POLL_CONCURRENCY + 2 + 10 Postgres connections:
 # 28 at the default concurrency of 8. Size the database's max_connections for
 # replicaCount times that, plus one for the migration job.
@@ -18,7 +24,8 @@ image:
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
-# The console's https origin, e.g. https://console.example.org: no path, no port.
+# The console's https origin, exactly https://<lowercase DNS hostname>, e.g.
+# https://console.example.org: no port, path, query, fragment, user, uppercase or IP address.
 # It is SWARMSCRIBE_CONSOLE_PUBLIC_URL, the Ingress host, and the origin the
 # identity provider redirects back to (<publicUrl>/auth/callback).
 publicUrl: ""
@@ -61,7 +68,9 @@ oidc:
 #   POLL_CONCURRENCY: "8"
 #   LOGIN_ATTEMPTS_MAX: "10000"
 #   SESSION_IDLE_SECONDS: "3600"
-# Secrets are refused here (DATABASE_URL, KEY, *_CLIENT_SECRET, GOOGLE_SERVICE_ACCOUNT).
+# Names are upper case (^[A-Z][A-Z0-9_]*$). The render refuses a secret (DATABASE_URL, KEY,
+# *_SECRET, GOOGLE_SERVICE_ACCOUNT, in any letter case) and a name the chart sets itself
+# (PUBLIC_URL, PORT, LEADER_CA_FILE and the oidc ones).
 settings: {}
 
 # Leaders whose TLS certificates come from a private CA: a ConfigMap you created
@@ -73,7 +82,8 @@ leaderCa:
 
 # Extra environment for the console container, as a list of {name, value|valueFrom}.
 # HTTPS_PROXY here applies to identity-provider calls only: calls to leaders never
-# use a proxy.
+# use a proxy. A SWARMSCRIBE_CONSOLE_ name that the chart owns or reads from the Secret
+# (DATABASE_URL, KEY, *_SECRET, PUBLIC_URL, ...) is refused, in any letter case.
 extraEnv: []
 
 # The port the console listens on in the pod: one value for the container port, the
@@ -107,6 +117,11 @@ ingress:
   # A second Ingress for exactly /auth/login, so that a per-client rate limit can
   # be put on starting a sign-in without limiting the rest of the console. The
   # annotations are your ingress controller's own (see the README for examples).
+  # The limit only applies on a controller that serves a second Ingress for the same host
+  # as part of one site (ingress-nginx and Traefik do). On GKE Ingress, and on the AWS Load
+  # Balancer Controller without a shared group (alb.ingress.kubernetes.io/group.name), each
+  # Ingress gets its own load balancer: the host's DNS reaches only one of them and the rate
+  # limit silently never applies.
   signIn:
     enabled: false
     annotations: {}
@@ -132,7 +147,8 @@ resources:
     memory: 512Mi
 
 podDisruptionBudget:
-  # Rendered only when replicaCount is above 1.
+  # Rendered only when replicaCount is above 1. Unready pods stay evictable
+  # (unhealthyPodEvictionPolicy: AlwaysAllow), so a database outage cannot stall a drain.
   enabled: true
   maxUnavailable: 1
 
@@ -168,6 +184,10 @@ networkPolicy:
       port: 5432
       # Required: where the console's Postgres is (NetworkPolicyPeer objects), e.g.
       #   - ipBlock: {cidr: 10.20.30.40/32}
+      # Peers are matched AFTER Service address translation. For a Postgres inside the
+      # cluster use a podSelector (with a namespaceSelector for another namespace), or the
+      # pod CIDR, and the pod's own port: never the Service's ClusterIP, which no packet is
+      # addressed to by then. The migration hook runs under the PREVIOUS release's policy.
       peers: []
     https:
       # Leaders and identity providers. NetworkPolicy cannot name a DNS host, so
@@ -191,5 +211,9 @@ podLabels: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
+# With two or more replicas and no topologySpreadConstraints of your own, the pods are
+# spread across nodes softly (ScheduleAnyway, so one node still schedules them all). Your own
+# topologySpreadConstraints replace this; false turns it off.
+spreadAcrossNodes: true
 topologySpreadConstraints: []
 terminationGracePeriodSeconds: 30

@@ -20,13 +20,13 @@ settings:
 leaderCa:
   existingConfigMap: leader-ca
 ingress:
-  className: nginx
+  className: traefik
   tls:
     secretName: console-tls
   signIn:
     enabled: true
     annotations:
-      nginx.ingress.kubernetes.io/limit-rpm: "30"
+      traefik.ingress.kubernetes.io/router.middlewares: fleet-sign-in-limit@kubernetescrd
 networkPolicy:
   egress:
     postgres:

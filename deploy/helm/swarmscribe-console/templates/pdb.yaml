@@ -7,6 +7,9 @@ metadata:
     {{- include "swarmscribe-console.labels" . | nindent 4 }}
 spec:
   maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  # During a database outage every pod is unready; without this a node drain would hang on
+  # them for as long as the outage lasts (Kubernetes 1.27 and later).
+  unhealthyPodEvictionPolicy: AlwaysAllow
   selector:
     matchLabels:
       {{- include "swarmscribe-console.selectorLabels" . | nindent 6 }}

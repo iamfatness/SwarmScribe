@@ -1,12 +1,20 @@
+{{/* The app name label: the chart name, or nameOverride. */}}
 {{- define "swarmscribe-console.name" -}}
-{{- .Chart.Name | trunc 63 | trimSuffix "-" }}
+{{- regexReplaceAll "-+$" (default .Chart.Name .Values.nameOverride | trunc 63) "" }}
 {{- end }}
 
+{{/* The base of every object name. At most 55 characters, so that the longest suffix the
+chart appends (-migrate, -sign-in: 8) keeps every derived name within 63, the limit for a
+Service name and for a label value (a Job's name becomes its pods' job-name label). A
+release name has up to 53 characters and may hold dots, which a Service name may not. */}}
 {{- define "swarmscribe-console.fullname" -}}
-{{- if contains .Chart.Name .Release.Name }}
-{{- .Release.Name | trunc 63 | trimSuffix "-" }}
+{{- $name := default .Chart.Name .Values.nameOverride }}
+{{- if .Values.fullnameOverride }}
+{{- regexReplaceAll "-+$" (.Values.fullnameOverride | trunc 55) "" }}
+{{- else if contains $name .Release.Name }}
+{{- regexReplaceAll "-+$" (.Release.Name | replace "." "-" | trunc 55) "" }}
 {{- else }}
-{{- printf "%s-%s" .Release.Name .Chart.Name | trunc 63 | trimSuffix "-" }}
+{{- regexReplaceAll "-+$" (printf "%s-%s" (.Release.Name | replace "." "-") $name | trunc 55) "" }}
 {{- end }}
 {{- end }}
 
@@ -39,16 +47,14 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 {{- end }}
 
-{{/* The Ingress host: publicUrl without its scheme. publicUrl is an https origin with no
-port and no path. */}}
+{{/* The Ingress host: publicUrl without its scheme. publicUrl is exactly
+https://<lowercase DNS hostname>: no port, path, query, fragment, userinfo, uppercase
+letters, spaces or IP literal. */}}
 {{- define "swarmscribe-console.host" -}}
 {{- $url := required "publicUrl is required: the console's https origin, e.g. https://console.example.org" .Values.publicUrl }}
-{{- if not (hasPrefix "https://" $url) }}
-{{- fail "publicUrl must start with https://" }}
-{{- end }}
 {{- $host := trimPrefix "https://" $url }}
-{{- if or (contains "/" $host) (contains ":" $host) (eq $host "") }}
-{{- fail "publicUrl is an origin on the default port: https://<host>, with no port and no path" }}
+{{- if or (not (hasPrefix "https://" $url)) (not (regexMatch `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$` $host)) (gt (len $host) 253) (regexMatch `(^|\.)[0-9]+$` $host) }}
+{{- fail (printf "publicUrl must be exactly https://<lowercase DNS hostname>: no port, path, query, fragment, user, uppercase letters or IP address (got %q)" $url) }}
 {{- end }}
 {{- $host }}
 {{- end }}
@@ -60,9 +66,34 @@ port and no path. */}}
 {{- if not (or .Values.oidc.entra.enabled .Values.oidc.google.enabled) }}
 {{- fail "enable oidc.entra or oidc.google (or both): the console has no other sign-in" }}
 {{- end }}
+{{- /* Names the chart sets itself or reads from the Secret, without the prefix. The console
+reads its environment case-insensitively, so every comparison is on the upper-cased name. */}}
+{{- $owned := list "PUBLIC_URL" "PORT" "LEADER_CA_FILE" "ENTRA_TENANT_ID" "ENTRA_CLIENT_ID" "GOOGLE_CLIENT_ID" "GOOGLE_HOSTED_DOMAIN" }}
+{{- $secret := list "DATABASE_URL" "KEY" "GOOGLE_SERVICE_ACCOUNT" }}
 {{- range $name, $_ := .Values.settings }}
-{{- if or (has $name (list "DATABASE_URL" "KEY" "GOOGLE_SERVICE_ACCOUNT" "PUBLIC_URL" "LEADER_CA_FILE" "PORT")) (hasSuffix "_SECRET" $name) }}
-{{- fail (printf "settings.%s is not set here: secrets come from secrets.existingSecret, and PUBLIC_URL, PORT and LEADER_CA_FILE from publicUrl, port and leaderCa" $name) }}
+{{- $upper := upper $name }}
+{{- if or (has $upper $secret) (hasSuffix "_SECRET" $upper) }}
+{{- fail (printf "settings.%s is a secret: secrets come from secrets.existingSecret, never from values" $name) }}
+{{- end }}
+{{- if has $upper $owned }}
+{{- fail (printf "settings.%s is set by the chart: use publicUrl, port, leaderCa or oidc" $name) }}
+{{- end }}
+{{- if not (regexMatch "^[A-Z][A-Z0-9_]*$" $name) }}
+{{- fail (printf "settings key %q must match ^[A-Z][A-Z0-9_]*$ (an upper-case environment name without the SWARMSCRIBE_CONSOLE_ prefix)" $name) }}
+{{- end }}
+{{- end }}
+{{- range .Values.extraEnv }}
+{{- $upper := upper (toString .name) }}
+{{- if hasPrefix "SWARMSCRIBE_CONSOLE_" $upper }}
+{{- $base := trimPrefix "SWARMSCRIBE_CONSOLE_" $upper }}
+{{- if or (has $base $secret) (hasSuffix "_SECRET" $base) (has $base $owned) }}
+{{- fail (printf "extraEnv %s collides with a variable the chart owns or reads from the Secret: use secrets.existingSecret, publicUrl, port, leaderCa or oidc" .name) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- range .Values.ingress.paths }}
+{{- if and (eq .path "/") (ne .pathType "Exact") }}
+{{- fail "ingress.paths must not hold a Prefix (or ImplementationSpecific) \"/\": it would also publish /healthz and /readyz, and /readyz tells an anonymous caller whether the database is up. List the console's routes instead (the default does)" }}
 {{- end }}
 {{- end }}
 {{- if and .Values.ingress.enabled (not .Values.ingress.tls.secretName) }}
@@ -98,32 +129,32 @@ SWARMSCRIBE_CONSOLE_{{ $name }}: {{ $value | toString | quote }}
 - name: SWARMSCRIBE_CONSOLE_DATABASE_URL
   valueFrom:
     secretKeyRef:
-      name: {{ $secret }}
-      key: {{ .Values.secrets.keys.databaseUrl }}
+      name: {{ $secret | quote }}
+      key: {{ .Values.secrets.keys.databaseUrl | quote }}
 - name: SWARMSCRIBE_CONSOLE_KEY
   valueFrom:
     secretKeyRef:
-      name: {{ $secret }}
-      key: {{ .Values.secrets.keys.consoleKey }}
+      name: {{ $secret | quote }}
+      key: {{ .Values.secrets.keys.consoleKey | quote }}
 {{- if .Values.oidc.entra.enabled }}
 - name: SWARMSCRIBE_CONSOLE_ENTRA_CLIENT_SECRET
   valueFrom:
     secretKeyRef:
-      name: {{ $secret }}
-      key: {{ .Values.secrets.keys.entraClientSecret }}
+      name: {{ $secret | quote }}
+      key: {{ .Values.secrets.keys.entraClientSecret | quote }}
 {{- end }}
 {{- if .Values.oidc.google.enabled }}
 - name: SWARMSCRIBE_CONSOLE_GOOGLE_CLIENT_SECRET
   valueFrom:
     secretKeyRef:
-      name: {{ $secret }}
-      key: {{ .Values.secrets.keys.googleClientSecret }}
+      name: {{ $secret | quote }}
+      key: {{ .Values.secrets.keys.googleClientSecret | quote }}
 {{- if .Values.oidc.google.serviceAccount }}
 - name: SWARMSCRIBE_CONSOLE_GOOGLE_SERVICE_ACCOUNT
   valueFrom:
     secretKeyRef:
-      name: {{ $secret }}
-      key: {{ .Values.secrets.keys.googleServiceAccount }}
+      name: {{ $secret | quote }}
+      key: {{ .Values.secrets.keys.googleServiceAccount | quote }}
 {{- end }}
 {{- end }}
 {{- end }}

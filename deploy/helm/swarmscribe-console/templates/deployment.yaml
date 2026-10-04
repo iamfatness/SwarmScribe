@@ -100,7 +100,7 @@ spec:
       volumes:
         - name: leader-ca
           configMap:
-            name: {{ .Values.leaderCa.existingConfigMap }}
+            name: {{ .Values.leaderCa.existingConfigMap | quote }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
@@ -114,7 +114,17 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.topologySpreadConstraints }}
+      {{- if .Values.topologySpreadConstraints }}
       topologySpreadConstraints:
-        {{- toYaml . | nindent 8 }}
+        {{- toYaml .Values.topologySpreadConstraints | nindent 8 }}
+      {{- else if and .Values.spreadAcrossNodes (gt (int .Values.replicaCount) 1) }}
+      # Soft: prefer different nodes, never leave a replica unscheduled for it.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "swarmscribe-console.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: console
       {{- end }}

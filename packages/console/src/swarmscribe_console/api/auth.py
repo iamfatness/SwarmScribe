@@ -28,6 +28,7 @@ from ..oidc import (
     begin_sign_in,
     exchange_code,
     finish_sign_in,
+    trim_pending_sign_ins,
 )
 from ..principals import principals_for
 from ..sessions import (
@@ -126,6 +127,8 @@ async def login(request: Request, provider: str, return_to: str | None = None) -
             ttl=timedelta(seconds=settings.login_attempt_seconds),
             prior_session_hash=prior,
         )
+        await session.flush()  # the new sign-in counts, and is the newest, when trimming
+        await trim_pending_sign_ins(session, keep=settings.login_attempts_max)
         await session.commit()
     response = RedirectResponse(url, status_code=302)
     if brought is not None or ambiguous:

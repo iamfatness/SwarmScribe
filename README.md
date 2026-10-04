@@ -281,6 +281,7 @@ The fleet console is one web service for many leaders. It has its own Postgres
 | `SWARMSCRIBE_CONSOLE_GOOGLE_CLIENT_ID`, `_GOOGLE_CLIENT_SECRET` | Google OAuth web client (both); optional `_GOOGLE_HOSTED_DOMAIN`, `_GOOGLE_SERVICE_ACCOUNT` (Google Groups) |
 | `SWARMSCRIBE_CONSOLE_SESSION_LIFETIME_SECONDS`, `_SESSION_IDLE_SECONDS`, `_LOGIN_ATTEMPT_SECONDS` | optional: session lifetime (default 28800, 8 hours), idle timeout (3600, 1 hour), how long a started sign-in may take (600) |
 | `SWARMSCRIBE_CONSOLE_LEADER_CA_FILE` | optional: a PEM file of CA certificates trusted for calls to leaders, in addition to the public roots (for leaders whose certificates come from a private CA). It applies to leader calls only, which never read `SSL_CERT_FILE`. Calls to the identity providers (sign-in) do read `SSL_CERT_FILE`: that is the supported way to add a CA for them |
+| `SWARMSCRIBE_CONSOLE_LOGIN_ATTEMPTS_MAX` | optional: how many started sign-ins may be pending at once (default 10000; at least 1, and a cap below the number of people signing in at once drops live sign-ins). Beyond it the oldest are dropped, so requests to `/auth/login` cannot fill the database; a flood of about cap divided by sign-in time requests a second can still evict real sign-ins, so rate-limit that path per client at your ingress as well |
 
 Bootstrap the first console administrator with the command that fits your
 sign-in provider (see "Which principals a sign-in yields" below):

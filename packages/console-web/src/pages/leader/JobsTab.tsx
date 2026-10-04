@@ -3,6 +3,7 @@ import { api, leaderPath, query } from "../../api/client";
 import type { JobOut, JobState } from "../../api/types";
 import { useNavigate, useSearchParam } from "../../app/router";
 import { useAction } from "../../app/useAction";
+import { useDialogAction } from "../../app/useDialogAction";
 import { ActionButton } from "../../components/ActionButton";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { Dialog } from "../../components/Dialog";
@@ -48,28 +49,24 @@ function PriorityDialog({
 }) {
   const [value, setValue] = useState(String(job.priority));
   const [invalid, setInvalid] = useState(false);
-  const action = useAction();
+  const action = useDialogAction(onClose);
   const helpId = useId();
-  const submit = async (event: FormEvent) => {
+  const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (action.busy) return;
     const priority = parsePriority(value);
     if (priority === null) {
       setInvalid(true);
       return;
     }
     setInvalid(false);
-    const ok = await action.run(() =>
-      api.post(leaderPath(leaderName, `jobs/${job.id}/priority`), { priority }),
-    );
-    if (ok) {
+    void action.submit(async () => {
+      await api.post(leaderPath(leaderName, `jobs/${job.id}/priority`), { priority });
       onDone();
-      onClose();
-    }
+    });
   };
   return (
-    <Dialog title={`Priority of job ${shortId(job.id)}`} onClose={onClose}>
-      <form noValidate onSubmit={(event) => void submit(event)}>
+    <Dialog title={`Priority of job ${shortId(job.id)}`} onClose={action.close}>
+      <form noValidate onSubmit={submit}>
         <label className="field">
           Priority
           <input
@@ -91,7 +88,7 @@ function PriorityDialog({
         )}
         {action.error !== null && <ErrorPanel error={action.error} />}
         <div className="dialog-buttons">
-          <button type="button" className="button" onClick={onClose}>
+          <button type="button" className="button" onClick={action.close}>
             Cancel
           </button>
           <button

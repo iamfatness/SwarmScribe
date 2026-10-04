@@ -3,7 +3,25 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { reply } from "../../test/fetchMock";
 import { history, leader } from "../../test/fixtures";
+import type { JobOut } from "../../api/types";
 import { renderApp } from "../../test/renderApp";
+
+const JOB: JobOut = {
+  id: "11111111-1111-4111-8111-111111111111",
+  state: "failed",
+  location: "intake",
+  key: "a.wav",
+  priority: 0,
+  attempts: 1,
+  max_attempts: 3,
+  pool: "default",
+  leased_by: null,
+  failure_reason: null,
+  cancelled_by: null,
+  no_speech: null,
+  created_at: "2026-10-04T11:00:00Z",
+  completed_at: null,
+};
 
 describe("leader drill-down", () => {
   it("shows the leader, the person's role and the tabs", async () => {
@@ -85,4 +103,43 @@ describe("leader drill-down", () => {
     expect(jobs).toHaveFocus();
     expect(screen.getByRole("heading", { level: 1, name: "eu-1" })).not.toHaveFocus();
   });
+
+  it("loads the tab of a leader whose name has a dot", async () => {
+    renderApp("/leaders/eu.west-1/jobs", { fleet: [leader({ name: "eu.west-1" })] }).on(
+      "GET /api/leaders/eu.west-1/jobs?limit=100",
+      reply(200, []),
+    );
+    expect(await screen.findByText("This leader has no jobs.")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "eu.west-1" })).toBeInTheDocument();
+  });
+
+  it("answers an unknown tab with the not-found page", async () => {
+    renderApp("/leaders/eu-1/nonsense");
+    expect(await screen.findByRole("heading", { name: /not found/i })).toBeInTheDocument();
+  });
+
+  it("does not apply a slow answer for a leader the person has left", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    renderApp("/leaders/eu-1/jobs", { fleet: [leader(), leader({ name: "us-1" })] })
+      .on("GET /api/leaders/eu-1/jobs?limit=100", async () => {
+        await gate;
+        return reply(200, [{ ...JOB, key: "eu-only.wav" }]);
+      })
+      .on("GET /api/leaders/us-1/jobs?limit=100", reply(200, []))
+      .on("GET /api/leaders/us-1/followers", reply(200, []))
+      .on("GET /api/leaders/eu-1/followers", reply(200, []));
+    const page = within(await screen.findByRole("main"));
+    await userEvent.click(await page.findByRole("link", { name: "Fleet" }));
+    await userEvent.click(await screen.findByRole("link", { name: "us-1" }));
+    await userEvent.click(await screen.findByRole("link", { name: "Jobs" }));
+    expect(await screen.findByText("This leader has no jobs.")).toBeInTheDocument();
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.queryByText("eu-only.wav")).not.toBeInTheDocument();
+    expect(screen.getByText("This leader has no jobs.")).toBeInTheDocument();
+  });
 });
+

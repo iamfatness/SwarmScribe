@@ -22,10 +22,14 @@ interface Held<T> {
 }
 
 /**
- * Loads now, then every `intervalMs` (null: load once, and again on refresh()). A change of
- * `key` starts over without the old key's data. Loads are skipped while the tab is hidden or
- * the person is idle (activity.ts), and run at once when either ends. A failed load keeps the
- * last good data and sets `error`; the next tick tries again.
+ * Loads now, then every `intervalMs`. A change of `key` starts over without the old key's
+ * data. Loads are skipped while the tab is hidden or the person is idle (activity.ts), and run
+ * at once when either ends. A failed load keeps the last good data and sets `error`; the next
+ * tick tries again.
+ *
+ * With a null interval the load is on demand: once on mount, then only on refresh() or a
+ * changed key, never on the tab becoming visible or on resume from idle (every read of a
+ * leader is an audit row on the leader).
  */
 export function usePoll<T>(
   load: (signal: AbortSignal) => Promise<T>,
@@ -93,8 +97,10 @@ export function usePoll<T>(
     };
 
     void run();
-    document.addEventListener("visibilitychange", runIfVisible);
-    const unsubscribe = onResume(() => void run());
+    // On demand (null interval): only mount, refresh() and a changed key load.
+    const onDemand = intervalMs === null;
+    if (!onDemand) document.addEventListener("visibilitychange", runIfVisible);
+    const unsubscribe = onDemand ? () => undefined : onResume(() => void run());
     return () => {
       stopped = true;
       controller.abort();

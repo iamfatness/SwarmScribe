@@ -210,4 +210,37 @@ describe("jobs tab", () => {
       "Only queued or leased jobs can be changed.",
     );
   });
+
+  it("keeps a newer priority dialog open when an earlier one finishes late", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const other = { ...JOB_QUEUED, id: "66666666-6666-4666-8666-666666666666" };
+    const mock = renderApp("/leaders/eu-1/jobs")
+      .on(JOBS, reply(200, [JOB_QUEUED, other]))
+      .on(PRIORITY, async () => {
+        await gate;
+        return reply(200, { ...JOB_QUEUED, priority: 7 });
+      });
+    await userEvent.click(await screen.findByRole("button", { name: "Priority of job 22222222" }));
+    const first = screen.getByRole("dialog", { name: "Priority of job 22222222" });
+    await userEvent.click(within(first).getByRole("button", { name: "Set priority" }));
+    await waitFor(() => expect(mock.callsTo(PRIORITY)).toHaveLength(1));
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Priority of job 66666666" }));
+    expect(screen.getByRole("dialog", { name: "Priority of job 66666666" })).toBeInTheDocument();
+    release();
+    expect(await screen.findByText("Priority of job 22222222 is set.")).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Priority of job 66666666" })).toBeInTheDocument();
+  });
+
+  it("does not reload when the tab becomes visible", async () => {
+    const mock = renderApp("/leaders/eu-1/jobs").on(JOBS, reply(200, [JOB_QUEUED]));
+    await screen.findByRole("rowheader", { name: "22222222" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(mock.callsTo(JOBS)).toHaveLength(1);
+  });
 });

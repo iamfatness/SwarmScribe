@@ -267,6 +267,74 @@ docker compose -f e2e/compose/docker-compose.yml down -v
 Tests use a real Postgres: set `SWARMSCRIBE_TEST_DATABASE_URL`, or leave it
 unset and an embedded one starts automatically in `.pgdata/`.
 
+## Run the fleet console (development)
+
+The fleet console is one web service for many leaders. It has its own Postgres
+(never a leader's). Set:
+
+| Variable | Meaning |
+|---|---|
+| `SWARMSCRIBE_CONSOLE_DATABASE_URL` | the console's own database |
+| `SWARMSCRIBE_CONSOLE_PUBLIC_URL` | the console's https origin, e.g. `https://console.example.org` (sign-in redirects to `<origin>/auth/callback`); plain `http` is accepted only for localhost |
+| `SWARMSCRIBE_CONSOLE_KEY` | 32 random bytes, URL-safe base64: `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Seals leader credentials; losing it means re-entering every credential |
+| `SWARMSCRIBE_CONSOLE_ENTRA_TENANT_ID`, `_ENTRA_CLIENT_ID`, `_ENTRA_CLIENT_SECRET` | Entra ID web app registration (all three) |
+| `SWARMSCRIBE_CONSOLE_GOOGLE_CLIENT_ID`, `_GOOGLE_CLIENT_SECRET` | Google OAuth web client (both); optional `_GOOGLE_HOSTED_DOMAIN`, `_GOOGLE_SERVICE_ACCOUNT` (Google Groups) |
+| `SWARMSCRIBE_CONSOLE_SESSION_LIFETIME_SECONDS`, `_SESSION_IDLE_SECONDS`, `_LOGIN_ATTEMPT_SECONDS` | optional: session lifetime (default 28800, 8 hours), idle timeout (3600, 1 hour), how long a started sign-in may take (600) |
+
+```
+uv run swarmscribe-console migrate
+uv run swarmscribe-console admins add email you@example.org
+uv run swarmscribe-console serve --port 8443
+```
+
+Sign-in uses the same rules as the leader (section "Administrators: sign-in
+and roles"). A person may sign in only if a grant or a console-administrator
+entry names one of their principals: an Entra group id (`entra_group`), a
+Google group (`google_group`), an email or a domain. Group membership is read
+at sign-in; it applies to an open session at the next sign-in (sessions last
+at most 8 hours, 1 hour idle).
+
+Console administrators manage leaders and grants (under `/api/admin`); that
+gives them no role on any leader. A person's role on a leader is the highest
+grant whose scope matches it: `leader:<name>`, `label:<key>=<value>` or `all`.
+
+### Console administrators and grants
+
+`swarmscribe-console admins add <kind> <principal>` (kind: `entra_group`,
+`google_group`, `email` or `domain`) adds a console administrator straight in
+the database, which is how the first one is made: whoever can run it holds the
+database, so it is not behind sign-in. It also works when administrators
+already exist (it adds one more; an existing one is refused as "already").
+`swarmscribe-console admins list` prints `<kind>:<principal>` and who added it.
+Both need a migrated database. Everything else is done by a console
+administrator over the API, which needs the session cookie and, on every
+change, the `X-CSRF-Token` header (from `GET /api/session`):
+
+| Route | Does |
+|---|---|
+| `GET`, `POST /api/admin/leaders`; `PATCH`, `DELETE /api/admin/leaders/{name}`; `PUT /api/admin/leaders/{name}/credential` | the leader registry |
+| `GET`, `POST /api/admin/grants`; `DELETE /api/admin/grants/{grant_id}` | role grants: `{role, scope, principal_kind, principal}`; role is `viewer`, `operator` or `admin` |
+| `GET`, `POST /api/admin/console-admins`; `DELETE /api/admin/console-admins/{admin_id}` | console administrators: `{principal_kind, principal}` |
+
+Principals are stored as lowercase ASCII (an Entra group id as a lowercase
+GUID), exactly as sign-in produces them, so `Person@Example.org` and
+`person@example.org` are one principal. A principal has at most one role per
+scope (a second grant is `409 exists`; remove the first). Removing the last
+console administrator is refused with `409 last_admin`, also when two removals
+race. A grant may name a leader that is not registered yet: grants and leaders
+are administered separately, and a scope only matches registered leaders when a
+role is looked up. Every change is written to the audit log.
+
+### Deployment note: egress
+
+The console refuses leader URLs that are not https or that name loopback,
+link-local, unspecified or multicast addresses, the cloud metadata services
+(including `fd00:ec2::254` and `100.100.100.200` and the names `metadata`,
+`metadata.internal`, `metadata.google.internal`, `instance-data`, `instance-data.ec2.internal`), 6to4,
+Teredo, `fec0::/10` and `0.0.0.0/8`. Private addresses are allowed, so the
+console can reach leaders on a LAN. Add the same blocks to the console host's
+egress policy: the URL check cannot see where a name resolves to later.
+
 ## Develop
 
 ```

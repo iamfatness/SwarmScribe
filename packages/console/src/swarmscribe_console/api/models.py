@@ -1,8 +1,9 @@
 """Request and response bodies of the console's own /api routes. Credentials arrive as
 SecretStr so that they are never part of a repr, and no response model has a credential."""
 
+import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
@@ -45,3 +46,37 @@ class LeaderOut(BaseModel):
     credential_updated_by: str
     credential_revoked: bool
     credential_revoked_at: datetime | None
+
+
+class GrantIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["viewer", "operator", "admin"]
+    scope: str = Field(max_length=400)
+    principal_kind: str = Field(max_length=32)
+    principal: str = Field(max_length=320)
+
+
+class GrantOut(BaseModel):
+    id: uuid.UUID
+    role: str
+    scope: str
+    principal_kind: str
+    principal: str
+    created_by: str
+    created_at: datetime
+
+
+class ConsoleAdminIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    principal_kind: str = Field(max_length=32)
+    principal: str = Field(max_length=320)
+
+
+class ConsoleAdminOut(BaseModel):
+    id: uuid.UUID
+    principal_kind: str
+    principal: str
+    created_by: str
+    created_at: datetime

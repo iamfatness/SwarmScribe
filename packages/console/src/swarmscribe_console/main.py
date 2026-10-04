@@ -5,10 +5,12 @@ import sys
 from collections.abc import Sequence
 
 from pydantic import ValidationError
-from swarmscribe_leader.db.session import make_engine
+from swarmscribe_leader.db.session import make_engine, make_sessionmaker
 
+from . import grants
 from .config import Settings
 from .db.migrate import current_revision, head_revision, is_known_revision, upgrade
+from .errors import ConsoleError
 
 LOGGING = {
     "version": 1,
@@ -67,6 +69,34 @@ async def _schema_problem(settings: Settings) -> str | None:
     )
 
 
+CLI_ACTOR = "swarmscribe-console cli"
+
+
+async def _admins(settings: Settings, args: argparse.Namespace) -> int:
+    engine = make_engine(settings.database_url.get_secret_value())
+    try:
+        async with make_sessionmaker(engine)() as session:
+            if args.admins_command == "add":
+                try:
+                    admin = await grants.add_console_admin(
+                        session,
+                        principal_kind=args.kind,
+                        principal=args.principal,
+                        actor=CLI_ACTOR,
+                    )
+                except ConsoleError as exc:
+                    print(f"error: {exc.message}", file=sys.stderr)
+                    return 1
+                await session.commit()
+                print(f"console administrator added: {admin.principal_kind}:{admin.principal}")
+                return 0
+            for admin in await grants.list_console_admins(session):
+                print(f"{admin.principal_kind}:{admin.principal}\t{admin.created_by}")
+            return 0
+    finally:
+        await engine.dispose()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="swarmscribe-console")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -74,6 +104,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     serve = commands.add_parser("serve", help="run the console")
     serve.add_argument("--host", default="0.0.0.0")
     serve.add_argument("--port", type=int, default=8080)
+    admins = commands.add_parser("admins", help="manage console administrators")
+    admin_commands = admins.add_subparsers(dest="admins_command", required=True)
+    add = admin_commands.add_parser("add", help="add a console administrator")
+    add.add_argument("kind", choices=grants.PRINCIPAL_KINDS)
+    add.add_argument("principal")
+    admin_commands.add_parser("list", help="list console administrators")
     args = parser.parse_args(argv)
     settings = _load_settings()
     if settings is None:
@@ -83,6 +119,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         upgrade(settings.database_url.get_secret_value())
         print(f"database is at revision {head_revision()}")
         return 0
+
+    if args.command == "admins":
+        problem = asyncio.run(_schema_problem(settings))
+        if problem is not None:
+            print(f"error: {problem}", file=sys.stderr)
+            return 2
+        return asyncio.run(_admins(settings, args))
 
     problem = asyncio.run(_schema_problem(settings))
     if problem is not None:

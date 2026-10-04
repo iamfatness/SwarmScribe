@@ -10,16 +10,19 @@ keys cannot contain `=`, so a scope splits at its first `=` and a value may cont
 
 import logging
 import re
+import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from sqlalchemy import exists, select, tuple_
+from sqlalchemy import exists, func, select, text, tuple_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from swarmscribe_leader.auth.roles import RANK, Role, highest
 
+from . import audit
 from .db.models import ConsoleAdmin, RoleGrant
-from .errors import Invalid
+from .errors import Conflict, Invalid, NotFound
 
 logger = logging.getLogger(__name__)
 
@@ -188,4 +191,131 @@ async def has_any_access(session: AsyncSession, principals: Iterable[str]) -> bo
     principals = list(principals)
     return bool(await grants_held(session, principals)) or await is_console_admin(
         session, principals
+    )
+
+
+_ADMINS_LOCK = 0x53430011  # serialises console-admin removals: never remove the last one
+ROLES = ("viewer", "operator", "admin")
+
+
+async def list_grants(session: AsyncSession) -> list[RoleGrant]:
+    return list(
+        (
+            await session.scalars(
+                select(RoleGrant).order_by(
+                    RoleGrant.scope, RoleGrant.principal_kind, RoleGrant.principal
+                )
+            )
+        ).all()
+    )
+
+
+async def add_grant(
+    session: AsyncSession,
+    *,
+    role: str,
+    scope: str,
+    principal_kind: str,
+    principal: str,
+    actor: str,
+) -> RoleGrant:
+    if role not in ROLES:
+        raise Invalid("role is viewer, operator or admin")
+    canonical = str(parse_scope(scope))
+    value = normalize_principal(principal_kind, principal)
+    grant = RoleGrant(
+        role=role,
+        scope=canonical,
+        principal_kind=principal_kind,
+        principal=value,
+        created_by=actor,
+    )
+    session.add(grant)
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        raise Conflict(
+            "that principal already has a grant on that scope; remove it first", code="exists"
+        ) from exc
+    audit.record(
+        session,
+        actor=actor,
+        action="grant.add",
+        target=str(grant.id),
+        detail={
+            "role": role,
+            "scope": canonical,
+            "principal": principal_key(principal_kind, value),
+        },
+    )
+    return grant
+
+
+async def remove_grant(session: AsyncSession, grant_id: uuid.UUID, *, actor: str) -> None:
+    grant = await session.get(RoleGrant, grant_id, with_for_update=True)
+    if grant is None:
+        raise NotFound("no such grant")
+    await session.delete(grant)
+    audit.record(
+        session,
+        actor=actor,
+        action="grant.remove",
+        target=str(grant_id),
+        detail={
+            "role": grant.role,
+            "scope": grant.scope,
+            "principal": principal_key(grant.principal_kind, grant.principal),
+        },
+    )
+
+
+async def list_console_admins(session: AsyncSession) -> list[ConsoleAdmin]:
+    return list(
+        (
+            await session.scalars(
+                select(ConsoleAdmin).order_by(ConsoleAdmin.principal_kind, ConsoleAdmin.principal)
+            )
+        ).all()
+    )
+
+
+async def add_console_admin(
+    session: AsyncSession, *, principal_kind: str, principal: str, actor: str
+) -> ConsoleAdmin:
+    value = normalize_principal(principal_kind, principal)
+    admin = ConsoleAdmin(principal_kind=principal_kind, principal=value, created_by=actor)
+    session.add(admin)
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        raise Conflict(
+            "that principal is already a console administrator", code="exists"
+        ) from exc
+    audit.record(
+        session,
+        actor=actor,
+        action="console_admin.add",
+        target=str(admin.id),
+        detail={"principal": principal_key(principal_kind, value)},
+    )
+    return admin
+
+
+async def remove_console_admin(session: AsyncSession, admin_id: uuid.UUID, *, actor: str) -> None:
+    await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _ADMINS_LOCK})
+    admin = await session.get(ConsoleAdmin, admin_id)
+    if admin is None:
+        raise NotFound("no such console administrator")
+    remaining = await session.scalar(select(func.count()).select_from(ConsoleAdmin))
+    if remaining <= 1:
+        raise Conflict(
+            "this is the last console administrator; add another first", code="last_admin"
+        )
+    await session.delete(admin)
+    audit.record(
+        session,
+        actor=actor,
+        action="console_admin.remove",
+        target=str(admin_id),
+        detail={"principal": principal_key(admin.principal_kind, admin.principal)},
     )

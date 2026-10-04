@@ -7,6 +7,8 @@ dependencies = []
 
 [tool.uv.workspace]
 members = ["packages/*"]
+# The web app is an npm package; uv refuses a workspace member without a pyproject.toml.
+exclude = ["packages/console-web"]
 
 [tool.uv.sources]
 swarmscribe-protocol = { workspace = true }

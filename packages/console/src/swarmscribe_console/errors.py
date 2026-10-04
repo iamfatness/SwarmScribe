@@ -55,3 +55,50 @@ class Unavailable(ConsoleError):
     status = 503
     code = "unavailable"
     retry_after = 10
+
+
+class PayloadTooLarge(ConsoleError):
+    status = 413
+    code = "too_large"
+
+
+class BadGateway(ConsoleError):
+    """A leader answered something the console cannot pass on."""
+
+    status = 502
+    code = "bad_gateway"
+
+
+class CredentialRejected(ConsoleError):
+    """The leader does not know the stored credential (a 401 that is not "revoked")."""
+
+    status = 502
+    code = "leader_credential_rejected"
+
+
+class LeaderUnavailable(Unavailable):
+    status = 503
+    code = "leader_unreachable"
+    retry_after = 15
+
+
+class CredentialRevoked(ConsoleError):
+    """The leader revoked this console's credential; a console administrator must replace
+    it (PUT /api/admin/leaders/{name}/credential)."""
+
+    status = 503
+    code = "leader_credential_revoked"
+
+
+class CredentialUnreadableError(ConsoleError):
+    status = 503
+    code = "leader_credential_unreadable"
+
+
+class PassedThrough(ConsoleError):
+    """A leader's own error, passed to the browser with its status and code."""
+
+    def __init__(self, status: int, code: str, message: str, retry_after: int | None = None):
+        super().__init__(message, code=code)
+        self.status = status
+        self.retry_after = retry_after

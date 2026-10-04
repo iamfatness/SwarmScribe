@@ -1,7 +1,11 @@
 """Constants and helpers shared by the console's test files. conftest.py puts this folder on
 sys.path; test files import from here, never from conftest."""
 
+import asyncio
 import base64
+import copy
+from collections.abc import Awaitable, Callable
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
@@ -88,3 +92,68 @@ async def sign_in(client, idp, *, provider="entra", return_to=None, **claims) ->
     started = await client.get("/auth/login", params=params)
     assert started.status_code == 302, started.text
     return await client.get(idp.authorize(started.headers["location"], **claims))
+
+
+STATUS = {
+    "jobs": {"queued": 3, "leased": 1, "completed": 10, "failed": 0, "cancelled": 0},
+    "pools": [{"pool": "default", "queued": 3, "leased": 1}],
+    "followers": {"active": 2, "draining": 0, "revoked": 0, "gone": 0},
+    "follower_pools": [{"pool": "default", "active": 2, "draining": 0, "revoked": 0, "gone": 0}],
+    "completed_last_hour": 7,
+    "completed_last_day": 30,
+    "oldest_queued_age_s": 420,
+    "failed_attempts_last_day": 1,
+    "locations": [],
+}
+# C1 + C1b: a revoked credential's code is credential_revoked; an unknown one's unauthorized.
+REVOKED_BODY = {
+    "code": "credential_revoked",
+    "message": "this console credential has been revoked",
+}
+UNKNOWN_BODY = {"code": "unauthorized", "message": "unknown console credential"}
+
+
+class FakeLeader:
+    """Leaders as the console sees them over HTTPS, told apart by host. Records every
+    request. `modes[host]` makes a host slow, down, revoked or unknown-credential;
+    `replies[(method, path)] = (status, body, headers)` programs an answer (a dict or list
+    body is JSON, bytes are sent as they are); otherwise GET .../v1/admin/status answers
+    `status` and anything else is a leader-style 404."""
+
+    def __init__(self):
+        self.requests: list[httpx.Request] = []
+        self.bodies: list[bytes] = []
+        self.modes: dict[str, str] = {}
+        self.replies: dict[tuple[str, str], tuple[int, Any, dict[str, str]]] = {}
+        self.status: dict[str, Any] = copy.deepcopy(STATUS)
+        self.delay = 1.0
+        self.on_request: Callable[[httpx.Request], Awaitable[None]] | None = None
+
+    async def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        self.bodies.append(await request.aread())
+        if self.on_request is not None:
+            await self.on_request(request)
+        mode = self.modes.get(request.url.host, "ok")
+        if mode == "down":
+            raise httpx.ConnectError("connection refused", request=request)
+        if mode == "slow":
+            await asyncio.sleep(self.delay)
+        challenge = {"WWW-Authenticate": 'Console error="invalid_token"'}
+        if mode == "revoked":
+            return httpx.Response(401, json=REVOKED_BODY, headers=challenge)
+        if mode == "unknown":
+            return httpx.Response(401, json=UNKNOWN_BODY, headers=challenge)
+        reply = self.replies.get((request.method, request.url.path))
+        if reply is not None:
+            status, body, headers = reply
+            if isinstance(body, bytes):
+                return httpx.Response(status, content=body, headers=headers)
+            return httpx.Response(status, json=body, headers=headers)
+        if request.method == "GET" and request.url.path.endswith("/v1/admin/status"):
+            return httpx.Response(200, json=self.status)
+        return httpx.Response(404, json={"code": "not_found", "message": "Not Found"})
+
+    @property
+    def transport(self) -> httpx.MockTransport:
+        return httpx.MockTransport(self.handler)

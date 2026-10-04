@@ -66,11 +66,38 @@ class Settings(BaseSettings):
     session_idle_seconds: int = Field(default=3600, gt=0)
     login_attempt_seconds: int = Field(default=600, gt=0)
 
+    # The poller and the proxy (fleet console spec 5.3, 5.4).
+    poll_interval_seconds: float = Field(default=15.0, gt=0)
+    poll_timeout_seconds: float = Field(default=5.0, gt=0)
+    poll_tick_seconds: float = Field(default=1.0, gt=0)
+    poll_concurrency: int = Field(default=8, gt=0)
+    unreachable_after_failures: int = Field(default=3, gt=0)
+    history_hours: int = Field(default=24, gt=0, le=24 * 7)
+    prune_interval_seconds: float = Field(default=3600.0, gt=0)
+    proxy_timeout_seconds: float = Field(default=10.0, gt=0)
+
+    static_dir: Path | None = None  # the built web app (C3): a folder holding index.html
+
     @field_validator("database_url")
     @classmethod
     def _database_url_is_set(cls, value: SecretStr) -> SecretStr:
         if not value.get_secret_value().strip():
             raise ValueError("database_url is empty; set the console's own database URL")
+        return value
+
+    @field_validator("static_dir", mode="before")
+    @classmethod
+    def _blank_static_dir_is_unset(cls, value: Any) -> Any:
+        # Compose/Kubernetes pass an unset variable as an empty string.
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("static_dir")
+    @classmethod
+    def _static_dir_holds_the_app(cls, value: Path | None) -> Path | None:
+        if value is not None and not (value / "index.html").is_file():
+            raise ValueError("static_dir must be a folder holding the web app's index.html")
         return value
 
     @field_validator("public_url")

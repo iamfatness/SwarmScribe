@@ -29,7 +29,7 @@ from swarmscribe_console.config import Settings  # noqa: E402
 from swarmscribe_console.crypto import ConsoleKeys  # noqa: E402
 from swarmscribe_console.db.migrate import upgrade  # noqa: E402
 from swarmscribe_console.db.models import (  # noqa: E402
-    Base,  # noqa: E402
+    Base,
     ConsoleAdmin,
     RoleGrant,
 )

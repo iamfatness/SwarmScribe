@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, or_
+from sqlalchemy import delete, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import Response
 from swarmscribe_leader.auth.secrets import hash_secret, new_secret
@@ -82,10 +82,23 @@ async def find_session(
     if row is None:
         return None
     if now >= row.expires_at or now >= row.last_seen_at + idle:
-        await session.delete(row)
+        await session.execute(
+            delete(ConsoleSession).where(ConsoleSession.id_hash == row.id_hash)
+        )
         return None
-    if now - row.last_seen_at >= TOUCH_EVERY:
-        row.last_seen_at = now
+    last_seen_at = row.last_seen_at
+    if now - last_seen_at >= TOUCH_EVERY:
+        # A statement, not an ORM attribute write: if a logout or expiry deleted the row since
+        # it was read, nothing matches and the person is signed out (no StaleDataError/500).
+        touched = await session.execute(
+            update(ConsoleSession)
+            .where(ConsoleSession.id_hash == row.id_hash)
+            .values(last_seen_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        if touched.rowcount == 0:
+            return None
+        last_seen_at = now
     return SignedIn(
         session_id=cookie,
         provider=row.provider,
@@ -95,7 +108,7 @@ async def find_session(
         principals=frozenset(row.principals),
         created_at=row.created_at,
         expires_at=row.expires_at,
-        idle_expires_at=min(row.last_seen_at + idle, row.expires_at),
+        idle_expires_at=min(last_seen_at + idle, row.expires_at),
     )
 
 

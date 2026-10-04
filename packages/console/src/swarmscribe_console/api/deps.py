@@ -1,8 +1,8 @@
 """Request dependencies: the database session, the signed-in person and the CSRF check.
 
 Every /api route takes `Person`, so the CSRF rule cannot be forgotten on a new route: a
-POST, PUT, PATCH or DELETE needs exactly one X-CSRF-Token equal to the session's token, and
-an Origin header, if sent, must be the console's own."""
+request with any method but GET, HEAD or OPTIONS needs exactly one X-CSRF-Token equal to
+the session's token, and an Origin header, if sent, must be the console's own."""
 
 from collections.abc import AsyncIterator
 from datetime import timedelta
@@ -17,7 +17,7 @@ from ..crypto import ConsoleKeys
 from ..errors import CsrfRejected, Unauthenticated
 from ..sessions import SESSION_COOKIE, SignedIn, find_session
 
-STATE_CHANGING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 CSRF_HEADER = "x-csrf-token"
 
 
@@ -61,7 +61,12 @@ async def signed_in(request: Request) -> SignedIn:
 
 
 async def checked(request: Request, person: Annotated[SignedIn, Depends(signed_in)]) -> SignedIn:
-    if request.method in STATE_CHANGING:
+    if request.method not in SAFE_METHODS:
+        # Defence in depth: a browser says when the request is not from the console's own
+        # origin; "none" is a user-initiated navigation or a non-browser client.
+        site = request.headers.get("sec-fetch-site")
+        if site is not None and site not in ("same-origin", "none"):
+            raise CsrfRejected("this request did not come from the console")
         origins = request.headers.getlist("origin")
         if origins and origins != [settings_of(request).public_url]:
             raise CsrfRejected("this request did not come from the console")

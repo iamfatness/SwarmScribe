@@ -16,7 +16,7 @@ from swarmscribe_protocol import ErrorBody
 from .. import audit
 from ..errors import ConsoleError, Unauthenticated
 from ..sessions import clear_session_cookie
-from .deps import STATE_CHANGING
+from .deps import SAFE_METHODS
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ async def audit_refused(request: Request, code: str) -> None:
     person = getattr(request.state, "person", None)
     if (
         person is None
-        or request.method not in STATE_CHANGING
+        or request.method in SAFE_METHODS
         or getattr(request.state, "audited", False)
     ):
         return
@@ -87,6 +87,6 @@ def install(app: FastAPI) -> None:
         return error_response("invalid_request", summary[:500], 422)
 
     @app.exception_handler(Exception)
-    async def unhandled(_request: Request, exc: Exception) -> JSONResponse:
-        logger.error("unhandled error: %s", type(exc).__name__, exc_info=exc)
+    async def unhandled(_request: Request, _exc: Exception) -> JSONResponse:
+        # Logged once, by the app's ContainErrors wrapper (type and route only).
         return error_response("internal", "internal error", 500)

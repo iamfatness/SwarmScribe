@@ -1,12 +1,21 @@
+import logging.config
 from datetime import timedelta
 
+import httpx
 import pytest
 from console_testkit import ENTRA_ISSUER, all_rows_text, cookie_attributes
-from fastapi.routing import APIRoute
-from sqlalchemy import select, update
-from swarmscribe_console.api.deps import STATE_CHANGING
+from fastapi import APIRouter, Depends, FastAPI
+from sqlalchemy import delete, select, update
+from swarmscribe_console.api.deps import SAFE_METHODS, checked
+from swarmscribe_console.api.guard import (
+    UnguardedRoute,
+    api_routes,
+    assert_guarded,
+    unguarded,
+)
+from swarmscribe_console.app import create_app
 from swarmscribe_console.db.models import AuditEntry, ConsoleSession
-from swarmscribe_console.sessions import SESSION_COOKIE
+from swarmscribe_console.sessions import SESSION_COOKIE, find_session
 from swarmscribe_leader.auth.secrets import hash_secret
 from swarmscribe_leader.clock import utcnow
 
@@ -170,33 +179,117 @@ async def test_csrf_failures_are_refused_audited_and_change_nothing(
     assert all(csrf not in str(e.detail) and other_csrf not in str(e.detail) for e in entries)
 
 
-def _api_routes(routes, prefix=""):
-    """Every APIRoute, flattening the nested routers FastAPI's include_router creates."""
-    for route in routes:
-        if isinstance(route, APIRoute):
-            yield route
-        elif hasattr(route, "original_router"):
-            yield from _api_routes(
-                route.original_router.routes, prefix + route.include_context.prefix
-            )
-
-
 async def test_every_state_changing_api_route_needs_the_csrf_token(app, client, factory):
-    """Structural: walks every route, including those later tasks add."""
+    """Structural: walks every route by full path, including those later tasks add."""
     await factory.person(client)
     checked = 0
-    for route in _api_routes(app.routes):
-        if not route.path.startswith("/api"):
+    for full_path, route, _ in api_routes(app.routes):
+        if not full_path.startswith("/api"):
             continue
-        for method in sorted(route.methods & STATE_CHANGING):
-            path = route.path
+        for method in sorted(route.methods - SAFE_METHODS):
+            path = full_path
             for name in route.param_convertors:
                 path = path.replace(f"{{{name}:path}}", "x/x").replace(f"{{{name}}}", "x")
             answer = await client.request(method, path)
-            assert answer.status_code == 403, (method, route.path, answer.text)
-            assert answer.json()["code"] == "csrf_failed", (method, route.path)
+            assert answer.status_code == 403, (method, path, answer.text)
+            assert answer.json()["code"] == "csrf_failed", (method, path)
             checked += 1
     assert checked >= 1
+
+
+def _throwaway(prefix, *, guarded):
+    router = APIRouter()
+    deps = [Depends(checked)] if guarded else []
+
+    @router.post("/leaders", dependencies=deps)
+    async def create():
+        return {}
+
+    throwaway = FastAPI()
+    throwaway.include_router(router, prefix=prefix)
+    return throwaway
+
+
+def test_the_walker_finds_and_flags_a_prefixed_route_without_the_dependency():
+    found = _throwaway("/api/x", guarded=False)
+    assert [p for p, _, _ in api_routes(found.routes)] == ["/api/x/leaders"]
+    assert unguarded(found.routes) == ["POST /api/x/leaders"]
+    with pytest.raises(UnguardedRoute, match="POST /api/x/leaders"):
+        assert_guarded(found.routes)
+    assert unguarded(_throwaway("/api/x", guarded=True).routes) == []
+
+
+def test_the_walker_fails_loudly_on_an_api_route_it_cannot_inspect():
+    odd = FastAPI()
+    odd.mount("/api/files", FastAPI())
+    with pytest.raises(UnguardedRoute, match="cannot inspect"):
+        list(api_routes(odd.routes))
+
+
+def test_the_app_refuses_to_build_with_an_unguarded_route(make_settings, monkeypatch):
+    from swarmscribe_console.api import session as session_api
+
+    router = APIRouter(prefix="/api/forgetful")
+
+    @router.delete("/thing")
+    async def forgetful():
+        return {}
+
+    monkeypatch.setattr(session_api, "router", router)
+    with pytest.raises(UnguardedRoute, match="DELETE /api/forgetful/thing"):
+        create_app(make_settings())
+
+
+async def test_csrf_applies_to_every_method_but_get_head_options(app, client, factory):
+    await factory.person(client)
+    for method in ("POST", "PUT", "PATCH", "DELETE", "PURGE", "PROPFIND"):
+        answer = await client.request(method, "/api/session/logout")
+        assert answer.status_code in (403, 405), method
+    assert (await client.get("/api/session")).status_code == 200
+    assert SAFE_METHODS == {"GET", "HEAD", "OPTIONS"}
+
+
+async def test_a_cross_site_fetch_is_refused_even_with_a_valid_token(client, factory):
+    csrf = await factory.person(client)
+    for site in ("cross-site", "same-site"):
+        answer = await client.post(
+            "/api/session/logout", headers={"X-CSRF-Token": csrf, "Sec-Fetch-Site": site}
+        )
+        assert answer.status_code == 403, site
+    assert (await client.get("/api/session")).status_code == 200
+    ok = await client.post(
+        "/api/session/logout", headers={"X-CSRF-Token": csrf, "Sec-Fetch-Site": "same-origin"}
+    )
+    assert ok.status_code == 204
+
+
+async def test_logout_racing_the_last_seen_update_is_signed_out_not_a_500(
+    factory, sessionmaker, client
+):
+    await factory.person(client)
+    cookie = client.cookies.get(SESSION_COOKIE)
+    await _age(sessionmaker, last_seen_at=utcnow() - timedelta(minutes=5))
+
+    class Racing:
+        """Deletes the row (a concurrent logout) right after find_session reads it."""
+
+        def __init__(self, inner):
+            self.inner = inner
+
+        async def get(self, *args):
+            row = await self.inner.get(*args)
+            async with sessionmaker() as other:
+                await other.execute(delete(ConsoleSession))
+                await other.commit()
+            return row
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    async with sessionmaker() as session:
+        found = await find_session(Racing(session), cookie, now=utcnow(), idle=timedelta(hours=1))
+        await session.commit()
+    assert found is None
 
 
 # --- headers ----------------------------------------------------------------------------
@@ -290,8 +383,8 @@ async def test_two_session_cookies_are_refused_not_guessed_between(client, facto
 
 async def test_there_is_no_state_changing_get(app, client, factory):
     csrf = await factory.person(client)
-    for route in _api_routes(app.routes):
-        assert not (route.methods & {"GET", "HEAD"}) or not route.path.endswith("logout")
+    for path, route, _ in api_routes(app.routes):
+        assert not (route.methods & {"GET", "HEAD"}) or "logout" not in path
     answer = await client.get("/api/session/logout")
     assert answer.status_code == 405
     assert answer.headers["content-security-policy"]
@@ -300,8 +393,6 @@ async def test_there_is_no_state_changing_get(app, client, factory):
 
 
 async def test_a_server_error_still_carries_the_security_headers(app, make_settings):
-    import httpx
-
     @app.get("/api/boom")
     async def boom():
         raise RuntimeError("secret-detail")
@@ -327,6 +418,7 @@ def test_serve_starts_uvicorn_without_an_access_log(monkeypatch, migrated_databa
     console_env(monkeypatch, migrated_database_url)
     started = {}
     monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: started.update(kwargs))
+    monkeypatch.setattr(logging.config, "dictConfig", lambda config: None)
     assert main(["serve", "--host", "127.0.0.1", "--port", "9"]) == 0
     assert started["access_log"] is False
     assert started["log_config"] is None
@@ -344,3 +436,33 @@ def test_serve_refuses_a_database_it_cannot_reach(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "cannot connect to the database" in err
     assert "hunter2" not in err
+
+
+@pytest.mark.parametrize("case", ["413", "422"])
+async def test_refusals_from_outside_the_routes_carry_the_security_headers(app, client, case):
+    @app.get("/api/needs-a-number")
+    async def needs(n: int):
+        return {}
+
+    if case == "413":
+        answer = await client.post("/api/session/logout", content=b"x" * (1024 * 1024 + 1))
+        assert answer.status_code == 413
+    else:
+        answer = await client.get("/api/needs-a-number?n=x")
+        assert answer.status_code == 422
+    assert "frame-ancestors 'none'" in answer.headers["content-security-policy"]
+    assert answer.headers["cache-control"] == "no-store"
+
+
+async def test_an_unhandled_error_is_logged_once_by_type_and_route_only(app, caplog):
+    @app.get("/api/boom2")
+    async def boom():
+        raise RuntimeError("secret-detail")
+
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=True)
+    with caplog.at_level(logging.INFO):
+        async with httpx.AsyncClient(transport=transport, base_url="https://console.test") as c:
+            assert (await c.get("/api/boom2")).status_code == 500
+    lines = [r.getMessage() for r in caplog.records if "unhandled" in r.getMessage()]
+    assert lines == ["unhandled error: RuntimeError at /api/boom2"]
+    assert "secret-detail" not in caplog.text

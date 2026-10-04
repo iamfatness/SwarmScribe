@@ -70,3 +70,45 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+  web-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SWARMSCRIBE_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      # Playwright's webServer starts the harness from the repository root.
+      E2E_HARNESS_COMMAND: uv run python packages/console-web/e2e/harness/serve.py
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: packages/console-web/package-lock.json
+      - name: Install, build and run the end-to-end tests
+        working-directory: packages/console-web
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npm run build
+          npm run e2e
+      - name: Keep the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: packages/console-web/playwright-report
+          retention-days: 7

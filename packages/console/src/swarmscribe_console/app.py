@@ -22,6 +22,7 @@ from .api import admin as admin_api
 from .api import auth as auth_api
 from .api import errors as api_errors
 from .api import fleet as fleet_api
+from .api import proxy as proxy_api
 from .api import session as session_api
 from .api.guard import assert_guarded
 from .api.security import SecurityHeaders
@@ -200,5 +201,6 @@ def create_app(
     app.include_router(session_api.router)
     app.include_router(admin_api.router)
     app.include_router(fleet_api.router)
+    app.include_router(proxy_api.router)  # after fleet: its /leaders/{name}/history wins
     assert_guarded(app.routes)  # a route added without the CSRF dependency fails the build
     return app

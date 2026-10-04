@@ -11,8 +11,9 @@ done the way an operator does it:
 3. a console administrator signs in through the browser flow, grants a role, and registers
    both leaders with those credentials;
 4. the poller shows both leaders reachable and a proxied read works on each;
-5. one leader is killed: within a minute it is shown unreachable, while the other keeps
-   answering a proxied read and takes an action (a join token is created on it).
+5. one leader is killed: within 60 s (measured; the run fails with the number if not) it
+   is shown unreachable, while the other keeps answering a proxied read and takes an
+   action (a join token is created on it).
 
 CI runs this after `docker compose up` (.github/workflows/ci.yml, job console-compose-e2e):
 
@@ -331,8 +332,20 @@ def read_jobs(browser: Browser, leader: str) -> httpx.Response:
     return browser.get(f"/api/leaders/{leader}/jobs", params={"limit": "5"})
 
 
+RERUN_HINT = (
+    "this scenario kills a leader and cannot be run twice on the same stack: "
+    "run `docker compose -f e2e/console-compose/docker-compose.yml down -v` first, then `up -d`"
+)
+
+
+def require_a_fresh_stack() -> None:
+    running = compose("ps", "--status", "running", "--services").stdout.split()
+    expect(KILLED in running, f"{KILLED} is not running; {RERUN_HINT}")
+
+
 def run(kill_leader) -> float:
     """The scenario. Returns how many seconds after the kill the leader showed unreachable."""
+    require_a_fresh_stack()
     wait_until_ready(time.monotonic() + READY_WITHIN_SECONDS)
     credentials = {leader: console_credential(leader) for leader in LEADERS}
 
@@ -374,7 +387,7 @@ def run(kill_leader) -> float:
             )
             expect(
                 registered.status_code == 201,
-                f"registering {leader} answered {registered.status_code}",
+                f"registering {leader} answered {registered.status_code}; {RERUN_HINT}",
             )
             expect(
                 credentials[leader] not in registered.text, "the API returned a credential"
@@ -388,8 +401,8 @@ def run(kill_leader) -> float:
             expect(jobs.status_code == 200, f"reading {leader}'s jobs answered {jobs.status_code}")
         wait_for_container_health(time.monotonic() + 60.0)
 
+        killed_at = time.monotonic()  # before the kill returns: the measure is never short
         kill_leader(KILLED)
-        killed_at = time.monotonic()
         while True:
             seen = fleet(browser)
             # Nothing else stops working while one leader is down (spec, section 1).
@@ -398,14 +411,22 @@ def run(kill_leader) -> float:
                 still.status_code == 200,
                 f"{SURVIVOR} stopped answering through the console ({still.status_code})",
             )
+            elapsed = time.monotonic() - killed_at
             if seen[KILLED]["health"] == "unreachable":
                 break
             expect(
-                time.monotonic() - killed_at < UNREACHABLE_WITHIN_SECONDS,
-                f"{KILLED} is still shown {seen[KILLED]['health']} a minute after it died",
+                elapsed <= UNREACHABLE_WITHIN_SECONDS,
+                f"{KILLED} is still shown {seen[KILLED]['health']} {elapsed:.1f} s after it "
+                f"died (limit {UNREACHABLE_WITHIN_SECONDS:.0f} s)",
             )
             time.sleep(1)
-        elapsed = time.monotonic() - killed_at
+        # The check above only sees iterations that did not find it unreachable: the answer
+        # that did must be inside the limit too.
+        expect(
+            elapsed <= UNREACHABLE_WITHIN_SECONDS,
+            f"{KILLED} was shown unreachable {elapsed:.1f} s after it died "
+            f"(limit {UNREACHABLE_WITHIN_SECONDS:.0f} s)",
+        )
         expect(seen[SURVIVOR]["health"] == "reachable", f"{SURVIVOR} is not shown reachable")
 
         dead = read_jobs(browser, KILLED)

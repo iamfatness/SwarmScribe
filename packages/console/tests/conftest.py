@@ -443,3 +443,13 @@ async def leader_client(fake_leader):
     made = LeaderClient(transport=fake_leader.transport)
     yield made
     await made.aclose()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_log_limits():
+    """The repeated-failure log limiter is process-wide; each test starts with a clean one."""
+    from swarmscribe_console import logsafe
+
+    logsafe._repeats.clear()
+    yield
+    logsafe._repeats.clear()

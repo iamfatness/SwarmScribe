@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import logging.config
+import os
 import sys
 from collections.abc import Sequence
 
@@ -136,13 +137,25 @@ async def _admins(settings: Settings, args: argparse.Namespace) -> int:
         await engine.dispose()
 
 
+def _default_port() -> int:
+    raw = os.environ.get("SWARMSCRIBE_CONSOLE_PORT") or "8080"
+    try:
+        port = int(raw)
+    except ValueError:
+        raise SystemExit("error: SWARMSCRIBE_CONSOLE_PORT must be a port number") from None
+    if not 0 < port < 65536:
+        raise SystemExit("error: SWARMSCRIBE_CONSOLE_PORT must be a port number")
+    return port
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="swarmscribe-console")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("migrate", help="bring the console database schema up to date")
     serve = commands.add_parser("serve", help="run the console")
     serve.add_argument("--host", default="0.0.0.0")
-    serve.add_argument("--port", type=int, default=8080)
+    # The default is SWARMSCRIBE_CONSOLE_PORT (the image's HEALTHCHECK reads the same variable).
+    serve.add_argument("--port", type=int, default=_default_port())
     admins = commands.add_parser("admins", help="manage console administrators")
     admin_commands = admins.add_subparsers(dest="admins_command", required=True)
     add = admin_commands.add_parser("add", help="add a console administrator")

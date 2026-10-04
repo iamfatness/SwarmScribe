@@ -6,7 +6,6 @@ SecretStr: never shown in repr, logs or validation errors."""
 import base64
 import binascii
 import json
-import ssl
 import uuid
 from pathlib import Path
 from typing import Any
@@ -115,7 +114,9 @@ class Settings(BaseSettings):
         if value is None:
             return None
         try:
-            ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(cafile=str(value))
+            from .leader_client import leader_tls_context  # loads (and caches) the file
+
+            leader_tls_context(value)
         except OSError:  # missing, unreadable, or no certificate in it (ssl.SSLError)
             raise ValueError(
                 "leader_ca_file must be a readable PEM file of CA certificates"

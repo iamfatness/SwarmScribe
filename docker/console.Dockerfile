@@ -38,7 +38,8 @@ COPY packages/leader packages/leader
 COPY packages/console packages/console
 # --no-editable: the three packages are installed into the environment as wheels, so the
 # final image needs /app/.venv and nothing of the source tree.
-RUN uv sync --frozen --no-dev --package swarmscribe-console --no-editable
+RUN uv sync --frozen --no-dev --package swarmscribe-console --no-editable  && rm -f /app/.venv/.lock
+# uv's lock file is created world-writable and has no use at run time.
 
 # --- the image --------------------------------------------------------------------------
 FROM python:3.12-slim-bookworm@sha256:54c85f3c47607a77f32adec749d3c81d1348bf25833671f512b26a9b6d778cb3

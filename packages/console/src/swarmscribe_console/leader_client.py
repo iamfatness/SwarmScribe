@@ -11,6 +11,7 @@ checked with the leader's own parse_delegation before anything is sent. A 2xx an
 JSON is a LeaderBadAnswer (the proxy maps it to 502 bad_gateway). Nothing here logs."""
 
 import asyncio
+import functools
 import json
 import re
 import ssl
@@ -136,11 +137,13 @@ class LeaderBadAnswer(Exception):
     """The leader answered more than MAX_BODY_BYTES, or a success that is not JSON."""
 
 
+@functools.lru_cache(maxsize=4)
 def leader_tls_context(ca_file: Path | None) -> ssl.SSLContext | None:
     """How a leader's certificate is verified. None: httpx's default, the public roots
     (certifi's) it ships with. With `ca_file` (SWARMSCRIBE_CONSOLE_LEADER_CA_FILE): those roots plus
     the CA certificates in that PEM file, for leaders on a private CA. Verification and host-name
-    checking are never turned off, and the environment (SSL_CERT_FILE) is never read."""
+    checking are never turned off, and the environment (SSL_CERT_FILE) is never read.
+    The file is read once per process: Settings validation and the client share this context."""
     if ca_file is None:
         return None
     context = httpx.create_ssl_context(trust_env=False)

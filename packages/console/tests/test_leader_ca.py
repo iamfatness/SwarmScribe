@@ -203,6 +203,23 @@ def test_the_ca_file_adds_to_the_public_roots(tmp_path):
     assert context.check_hostname is True
 
 
+def test_the_ca_file_is_loaded_once_for_validation_and_the_client(tmp_path, monkeypatch):
+    ca_file, _, _ = write_ca_and_server(tmp_path, x509.DNSName("leader.example"))
+    loads = 0
+    real = ssl.SSLContext.load_verify_locations
+
+    def counting(self, *args, **kwargs):
+        nonlocal loads
+        loads += kwargs.get("cafile") == str(ca_file)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(ssl.SSLContext, "load_verify_locations", counting)
+    configured = settings(leader_ca_file=str(ca_file))
+    LeaderClient(ca_file=configured.leader_ca_file)
+    LeaderClient(ca_file=configured.leader_ca_file)
+    assert loads == 1
+
+
 # --- real TLS ---------------------------------------------------------------------------
 
 

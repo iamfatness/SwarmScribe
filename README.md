@@ -292,7 +292,8 @@ uv run swarmscribe-console migrate
 # Entra ID sign-in: a group's object id (Entra gives group ids only, never an email)
 uv run swarmscribe-console admins add entra_group <group-object-id>
 
-# Google sign-in: an email, or a Workspace domain
+# Google sign-in (never on an Entra-only console, which refuses `email`): an email, or
+# a Workspace domain
 uv run swarmscribe-console admins add email you@example.org
 
 uv run swarmscribe-console serve --port 8443
@@ -447,7 +448,11 @@ nowhere.
 `2 * concurrency + 2` and `max_overflow` is 10 for web requests, so 18 pooled
 and up to 28 connections per replica at the default. Size the database's
 `max_connections` for the replicas times that (the reasoning is in
-`packages/console/README.md`).
+`packages/console/README.md`). Sizing: replicas x (2 x concurrency + 2 + 10), plus what
+other clients of the same server need and the server's own reserve (Postgres keeps
+`superuser_reserved_connections`, 3 by default). Behind a pooler such as PgBouncer in
+transaction mode, set the pooler's server-side limit to that product, and note that the
+poller's advisory locks are held per session and need session pooling.
 
 **Web app.** The web app is `packages/console-web` (React and TypeScript, built
 with Vite). `npm run build` there writes `packages/console-web/dist`; point
@@ -510,9 +515,27 @@ arguments:
 ```
 docker build -t swarmscribe-console -f docker/console.Dockerfile .
 docker run --rm --env-file console.env swarmscribe-console migrate
-docker run --rm --env-file console.env swarmscribe-console admins add email you@example.org
-docker run -d --read-only --tmpfs /tmp -p 8080:8080 --env-file console.env swarmscribe-console
+# the first administrator on an Entra ID console: a group's object id
+docker run --rm --env-file console.env swarmscribe-console admins add entra_group <group-object-id>
+docker run -d --read-only --cap-drop ALL -p 8080:8080 --env-file console.env swarmscribe-console
 ```
+
+A console that signs in with Google adds its first administrator with an email instead
+(`admins add email you@example.org`, or a Workspace domain); an Entra-only console refuses
+`email`. The image needs no writable path and no tmpfs.
+
+The port is `SWARMSCRIBE_CONSOLE_PORT` (default 8080); the `HEALTHCHECK` reads the same
+variable. To serve on another port set the variable rather than passing `serve --port`,
+which the `HEALTHCHECK` cannot see. Probes must use GET (Kubernetes `httpGet` does).
+`HEAD` on `/healthz` and `/readyz` answers like GET without a body, any other method is 405,
+and `/healthz/` and `/readyz/` redirect to the canonical path; the web app's page is never
+returned for a probe. Do not publish the probes on a public ingress: `/readyz` tells an
+anonymous caller whether the database is up.
+
+**During a database outage** the console logs one line per 30 seconds per cause (the
+exception type, with its stack once) from the poller, and `/readyz` logs one line, at most
+every 30 seconds, saying either that it cannot query the database or that the migrations are
+not current. The responses to the probe stay fixed.
 
 `console.env` holds the `SWARMSCRIBE_CONSOLE_*` variables from the table above. Put TLS in
 front of it: the console's cookies are `Secure`, and its public URL must be `https://`
@@ -546,6 +569,10 @@ docker compose -f e2e/console-compose/docker-compose.yml up -d
 uv run python e2e/console-compose/run_e2e.py run
 docker compose -f e2e/console-compose/docker-compose.yml --profile tools down -v
 ```
+
+The scenario kills a leader, so it runs once per stack: a second run stops at once and says
+to `down -v` first. It fails, with the measured number, if the leader takes more than 60
+seconds to show unreachable.
 
 The test changes nothing in the console, the leader or the admin CLI to make this
 possible. All three use Entra ID's fixed address, so inside the Compose network the

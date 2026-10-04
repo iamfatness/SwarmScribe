@@ -10,6 +10,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from swarmscribe_leader.db.session import to_async_url
 
+UNDEFINED_TABLE = "42P01"
 MIGRATIONS = Path(__file__).parent / "migrations"
 
 
@@ -41,5 +42,10 @@ async def current_revision(engine: AsyncEngine) -> str | None:
     async with engine.connect() as conn:
         try:
             return await conn.scalar(text("select version_num from alembic_version"))
-        except DBAPIError:
-            return None
+        except DBAPIError as exc:
+            # Only "no alembic_version table" means "not migrated". Any other failure (a
+            # permission error, a dropped connection) is the caller's to see, so a readiness
+            # probe can tell "cannot query" from "migrations not current".
+            if getattr(exc.orig, "sqlstate", None) == UNDEFINED_TABLE:
+                return None
+            raise

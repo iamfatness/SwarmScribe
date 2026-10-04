@@ -1,9 +1,13 @@
 import asyncio
+import contextlib
+import logging
+import time
 
 import httpx
 import pytest
 from console_testkit import PUBLIC_URL
 from sqlalchemy import text
+from swarmscribe_console import logsafe
 from swarmscribe_console.api import health as health_module
 from swarmscribe_console.app import create_app
 from swarmscribe_console.db.migrate import head_revision
@@ -188,6 +192,161 @@ async def test_the_web_app_does_not_shadow_the_probes(
     assert answer.headers["content-type"].startswith("application/json")
 
 
+@contextlib.asynccontextmanager
+async def _served_with_web_app(tmp_path, make_settings, idp, fake_leader, **overrides):
+    """The app as the image runs it: with a static directory, whose fallback once answered a
+    probe it did not match."""
+    (tmp_path / "index.html").write_text("<!doctype html><title>console</title>")
+    application = create_app(
+        make_settings(static_dir=str(tmp_path), **overrides),
+        background=False,
+        fetch=idp.fetch,
+        idp_transport=idp.transport,
+        leader_transport=fake_leader.transport,
+    )
+    async with application.router.lifespan_context(application):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=application), base_url=PUBLIC_URL
+        ) as made:
+            yield made
+
+
+async def test_head_probes_with_the_web_app_answer_like_get(
+    tmp_path, engine, make_settings, idp, fake_leader
+):
+    async with _served_with_web_app(tmp_path, make_settings, idp, fake_leader) as made:
+        ready = await made.head("/readyz")
+        alive = await made.head("/healthz")
+    assert ready.status_code == 200 and ready.content == b""
+    assert ready.headers["content-type"].startswith("application/json")
+    assert alive.status_code == 200 and alive.content == b""
+
+
+async def test_head_readyz_with_the_web_app_is_503_when_the_database_is_down(
+    tmp_path, make_settings, idp, fake_leader
+):
+    async with _served_with_web_app(
+        tmp_path,
+        make_settings,
+        idp,
+        fake_leader,
+        database_url="postgresql://console:secret-pw@127.0.0.1:1/none",
+    ) as made:
+        ready = await made.head("/readyz")
+        alive = await made.head("/healthz")
+        got = await made.get("/readyz")
+    assert ready.status_code == 503
+    assert ready.headers["content-type"].startswith("application/json")
+    assert alive.status_code == 200
+    assert got.status_code == 503
+
+
+@pytest.mark.parametrize("path", ["/healthz/", "/readyz/"])
+async def test_a_trailing_slash_is_never_the_web_app(
+    path, tmp_path, engine, make_settings, idp, fake_leader
+):
+    async with _served_with_web_app(tmp_path, make_settings, idp, fake_leader) as made:
+        for send in (made.get, made.head):
+            answer = await send(path)
+            assert answer.status_code == 308
+            assert answer.headers["location"] == path.rstrip("/")
+            assert b"<title>console</title>" not in answer.content
+        followed = await made.get(path, follow_redirects=True)
+    assert followed.status_code == 200
+    assert followed.headers["content-type"].startswith("application/json")
+
+
+@pytest.mark.parametrize("path", ["/healthz", "/readyz"])
+async def test_a_probe_cannot_be_posted_to_with_the_web_app(
+    path, tmp_path, engine, make_settings, idp, fake_leader
+):
+    async with _served_with_web_app(tmp_path, make_settings, idp, fake_leader) as made:
+        for send in (made.post, made.put, made.delete):
+            assert (await send(path)).status_code == 405
+
+
+async def test_a_failed_readiness_check_is_logged_once_and_says_why(client, monkeypatch, caplog):
+    monkeypatch.setattr(logsafe, "_clock", lambda: 1.0)
+    clock = Clock()
+    monkeypatch.setattr(health_module.time, "monotonic", clock)
+
+    async def refused(engine):
+        raise ConnectionRefusedError("postgresql://console:secret-pw@db/none")
+
+    monkeypatch.setattr(health_module, "current_revision", refused)
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(5):
+            clock.now += 2  # past the answer's one-second reuse: the check really runs
+            assert (await client.get("/readyz")).status_code == 503
+    lines = [r.getMessage() for r in caplog.records if "readiness" in r.getMessage()]
+    assert lines == ["readiness check cannot query the database: ConnectionRefusedError"]
+    assert "secret-pw" not in caplog.text
+
+
+async def test_a_schema_that_is_behind_is_logged_as_such_not_as_unqueryable(
+    app, client, monkeypatch, caplog
+):
+    monkeypatch.setattr(logsafe, "_clock", lambda: 1.0)
+    app.state.head_revision = "9999_not_applied_yet"
+    with caplog.at_level(logging.DEBUG):
+        assert (await client.get("/readyz")).status_code == 503
+    lines = [r.getMessage() for r in caplog.records if "readiness" in r.getMessage()]
+    assert len(lines) == 1 and "migrations are not current" in lines[0]
+    assert "cannot query" not in lines[0]
+
+
+async def test_a_query_that_fails_after_connecting_is_cannot_query_not_not_current(
+    client, engine, monkeypatch, caplog
+):
+    """current_revision used to turn any database error into "no revision"; only a missing
+    version table means the migrations have not run."""
+    monkeypatch.setattr(logsafe, "_clock", lambda: 1.0)
+    async with engine.begin() as conn:
+        await conn.execute(text("ALTER TABLE alembic_version RENAME TO alembic_version_away"))
+        await conn.execute(
+            text("CREATE VIEW alembic_version AS SELECT 1/0 AS version_num")
+        )
+    try:
+        with caplog.at_level(logging.DEBUG):
+            answer = await client.get("/readyz")
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP VIEW alembic_version"))
+            await conn.execute(
+                text("ALTER TABLE alembic_version_away RENAME TO alembic_version")
+            )
+    assert (answer.status_code, answer.json()) == (503, {"status": "database unreachable"})
+    assert "cannot query the database" in caplog.text
+
+
 @pytest.mark.parametrize("path", ["/healthz", "/readyz"])
 async def test_a_probe_cannot_be_posted_to(client, path):
     assert (await client.post(path)).status_code == 405
+
+
+async def test_readyz_answers_503_on_time_when_cancelling_the_query_hangs(client, monkeypatch):
+    """A frozen database: the driver waits for it even to cancel. The probe still answers in
+    time, and a second probe does not start a second stuck query."""
+    monkeypatch.setattr(health_module, "READY_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(health_module, "READY_CACHE_SECONDS", 0.0)
+    started = 0
+    release = asyncio.Event()
+
+    async def frozen(engine):
+        nonlocal started
+        started += 1
+        while not release.is_set():  # ignores cancellation, like a driver stuck in cleanup
+            try:
+                await asyncio.wait_for(release.wait(), 5)
+            except asyncio.CancelledError:
+                continue
+
+    monkeypatch.setattr(health_module, "current_revision", frozen)
+    began = time.monotonic()
+    answer = await client.get("/readyz")
+    assert (answer.status_code, answer.json()) == (503, {"status": "database unreachable"})
+    assert time.monotonic() - began < 2
+    assert (await client.get("/readyz")).status_code == 503
+    assert started == 1  # the stuck query is not stacked
+    release.set()
+    await asyncio.sleep(0.1)

@@ -34,10 +34,13 @@ export function ActionButton({
       <button
         type="button"
         className={danger ? "button button-danger" : "button"}
-        disabled={!allowed || busy}
+        disabled={!allowed}
+        aria-disabled={busy || undefined}
         aria-label={name}
         aria-describedby={allowed ? undefined : noteId}
-        onClick={onClick}
+        onClick={() => {
+          if (!busy) onClick();
+        }}
       >
         {children}
       </button>

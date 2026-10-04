@@ -233,7 +233,7 @@ main {
   text-decoration: none;
 }
 
-.button:hover:not(:disabled) {
+.button:hover:not(:disabled):not([aria-disabled="true"]) {
   background: var(--surface-2);
 }
 
@@ -253,7 +253,8 @@ main {
   color: var(--bad-fg);
 }
 
-.button:disabled {
+.button:disabled,
+.button[aria-disabled="true"] {
   cursor: not-allowed;
   border-style: dashed;
   color: var(--muted);
@@ -584,6 +585,11 @@ td.actions {
   border-radius: var(--radius);
   background: var(--bg);
   color: var(--text);
+  overscroll-behavior: contain;
+}
+
+html:has(dialog[open]) {
+  overflow: hidden;
 }
 
 .dialog::backdrop {

@@ -1,0 +1,120 @@
+{{- include "swarmscribe-console.validate" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "swarmscribe-console.fullname" . }}
+  labels:
+    {{- include "swarmscribe-console.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "swarmscribe-console.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: console
+  template:
+    metadata:
+      labels:
+        {{- include "swarmscribe-console.labels" . | nindent 8 }}
+        app.kubernetes.io/component: console
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # A changed setting restarts the pods.
+        checksum/settings: {{ include "swarmscribe-console.settings" . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "swarmscribe-console.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "swarmscribe-console.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: console
+          image: {{ include "swarmscribe-console.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve", "--host", "0.0.0.0", "--port", {{ .Values.port | toString | quote }}]
+          ports:
+            - name: http
+              containerPort: {{ .Values.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "swarmscribe-console.fullname" . }}
+          env:
+            {{- include "swarmscribe-console.secretEnv" . | nindent 12 }}
+            {{- if .Values.leaderCa.existingConfigMap }}
+            - name: SWARMSCRIBE_CONSOLE_LEADER_CA_FILE
+              value: /etc/swarmscribe/leader-ca/{{ .Values.leaderCa.key }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          securityContext:
+            {{- include "swarmscribe-console.containerSecurityContext" . | nindent 12 }}
+          # httpGet is GET, which is what the console's probes are for. /healthz: the process
+          # answers (startup and liveness; never /readyz). /readyz: the database answers and
+          # its schema is this console's or newer; it gives up on the database after 3 s, so the
+          # timeout is 5 s or more. Neither asks an identity provider or a leader.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.leaderCa.existingConfigMap }}
+          volumeMounts:
+            - name: leader-ca
+              mountPath: /etc/swarmscribe/leader-ca
+              readOnly: true
+          {{- end }}
+      {{- if .Values.leaderCa.existingConfigMap }}
+      volumes:
+        - name: leader-ca
+          configMap:
+            name: {{ .Values.leaderCa.existingConfigMap }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

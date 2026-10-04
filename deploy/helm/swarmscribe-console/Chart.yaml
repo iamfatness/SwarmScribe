@@ -1,0 +1,7 @@
+apiVersion: v2
+name: swarmscribe-console
+description: The SwarmScribe fleet console - one web console for many leader deployments
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"

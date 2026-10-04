@@ -139,3 +139,25 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose -f e2e/console-compose/docker-compose.yml --profile tools down -v
+
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: azure/setup-helm@v5
+        with:
+          version: v4.3.0
+      - name: Lint the console chart
+        run: >-
+          helm lint deploy/helm/swarmscribe-console
+          -f deploy/helm/swarmscribe-console/ci/test-values.yaml --strict
+      - name: Validate the rendered manifests against the Kubernetes schemas
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz             | tar -xz -C "$RUNNER_TEMP" kubeconform
+          helm template console deploy/helm/swarmscribe-console --namespace fleet             -f deploy/helm/swarmscribe-console/ci/test-values.yaml > "$RUNNER_TEMP/rendered.yaml"
+          "$RUNNER_TEMP/kubeconform" -strict -summary -kubernetes-version 1.33.0 "$RUNNER_TEMP/rendered.yaml"
+      - name: Check what the chart renders
+        run: >-
+          uv run --no-project --with pyyaml
+          python deploy/helm/swarmscribe-console/ci/check_render.py --only core

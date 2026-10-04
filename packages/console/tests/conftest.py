@@ -6,9 +6,16 @@ from pathlib import Path
 # console_testkit (shared constants and helpers) sits beside this file.
 sys.path.insert(0, str(Path(__file__).parent))
 
+import base64  # noqa: E402
+import hashlib  # noqa: E402
+import json  # noqa: E402
+import secrets  # noqa: E402
+import time  # noqa: E402
 from datetime import timedelta  # noqa: E402
+from urllib.parse import parse_qsl, urlencode  # noqa: E402
 
 import httpx  # noqa: E402
+import jwt as pyjwt  # noqa: E402
 import pytest  # noqa: E402
 from console_testkit import (  # noqa: E402
     ENTRA_CLIENT,
@@ -16,6 +23,7 @@ from console_testkit import (  # noqa: E402
     ENTRA_SECRET,
     ENTRA_TENANT,
     GOOGLE_CLIENT,
+    GOOGLE_ISSUER,
     GOOGLE_SECRET,
     MASTER_KEY,
     PUBLIC_URL,
@@ -23,6 +31,8 @@ from console_testkit import (  # noqa: E402
     recreate,
     with_database,
 )
+from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
+from jwt.algorithms import RSAAlgorithm  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from swarmscribe_console.app import create_app  # noqa: E402
 from swarmscribe_console.config import Settings  # noqa: E402
@@ -34,6 +44,7 @@ from swarmscribe_console.db.models import (  # noqa: E402
     RoleGrant,
 )
 from swarmscribe_console.sessions import SESSION_COOKIE, create_session  # noqa: E402
+from swarmscribe_leader.auth.roles import RoleLookupFailed  # noqa: E402
 from swarmscribe_leader.clock import utcnow  # noqa: E402
 from swarmscribe_leader.db.session import make_engine, make_sessionmaker  # noqa: E402
 
@@ -109,8 +120,14 @@ def make_settings(migrated_database_url):
 
 
 @pytest.fixture
-async def app(engine, make_settings):
-    application = create_app(make_settings())
+async def app(engine, make_settings, idp, graph, google_groups):
+    application = create_app(
+        make_settings(),
+        fetch=idp.fetch,
+        idp_transport=idp.transport,
+        graph=graph,
+        google_groups=google_groups,
+    )
     async with application.router.lifespan_context(application):
         yield application
 
@@ -190,3 +207,350 @@ class Factory:
 @pytest.fixture
 def factory(sessionmaker, keys):
     return Factory(sessionmaker, keys)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+@pytest.fixture(scope="session")
+def signing_keys():
+    return {
+        name: rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        for name in ("entra", "google", "rogue")
+    }
+
+
+class FakeIdentityProviders:
+    """Entra ID and Google as the console sees them: discovery documents and JWKS through an
+    injected fetcher; the person's visit to the authorization page (`authorize`); and the
+    token endpoint the console posts the code to (`transport`). Every token it hands out is
+    kept in `issued`, so tests can check none of them is stored."""
+
+    SECRETS = {"entra": ENTRA_SECRET, "google": GOOGLE_SECRET}
+    CLIENTS = {"entra": ENTRA_CLIENT, "google": GOOGLE_CLIENT}
+
+    def __init__(self, keys):
+        self.keys = keys
+        self.codes: dict[str, dict] = {}
+        self.exchanges: list[dict[str, str]] = []
+        self.issued: list[str] = []
+        self.token_status = 200
+        self.token_html = False  # a 200 answer that is a web page
+
+    def _jwks(self, provider: str) -> dict:
+        jwk = json.loads(RSAAlgorithm.to_jwk(self.keys[provider].public_key()))
+        jwk.update(kid=f"{provider}-key-1", use="sig", alg="RS256")
+        return {"keys": [jwk]}
+
+    async def fetch(self, url: str) -> dict:
+        entra_jwks = f"https://login.microsoftonline.com/{ENTRA_TENANT}/discovery/v2.0/keys"
+        google_jwks = "https://www.googleapis.com/oauth2/v3/certs"
+        documents = {
+            f"{ENTRA_ISSUER}/.well-known/openid-configuration": {
+                "issuer": ENTRA_ISSUER,
+                "jwks_uri": entra_jwks,
+            },
+            entra_jwks: self._jwks("entra"),
+            "https://accounts.google.com/.well-known/openid-configuration": {
+                "issuer": GOOGLE_ISSUER,
+                "jwks_uri": google_jwks,
+            },
+            google_jwks: self._jwks("google"),
+        }
+        return documents[url]
+
+    def _defaults(self, provider: str) -> dict:
+        if provider == "entra":
+            return {
+                "iss": ENTRA_ISSUER,
+                "aud": ENTRA_CLIENT,
+                "tid": ENTRA_TENANT,
+                "sub": "entra-person-1",
+                "oid": "00000000-0000-4000-8000-0000000000a1",
+                "email": "person@example.org",
+                "groups": [],
+            }
+        return {
+            "iss": GOOGLE_ISSUER,
+            "aud": GOOGLE_CLIENT,
+            "sub": "google-person-1",
+            "email": "person@example.org",
+            "email_verified": True,
+        }
+
+    def id_token(self, provider: str, *, signed_with: str | None = None, **claims) -> str:
+        now = int(time.time())
+        payload = {"iat": now, "nbf": now, "exp": now + 3600, **self._defaults(provider)}
+        payload.update(claims)
+        payload = {k: v for k, v in payload.items() if v is not None}
+        key = self.keys[signed_with or provider]
+        return pyjwt.encode(
+            payload, key, algorithm="RS256", headers={"kid": f"{provider}-key-1"}
+        )
+
+    def authorize(self, location: str, **claims) -> str:
+        """The person signs in at the provider. Returns the path and query the provider
+        sends the browser back to."""
+        url = httpx.URL(location)
+        params = dict(url.params)
+        provider = "entra" if url.host == "login.microsoftonline.com" else "google"
+        code = secrets.token_urlsafe(24)
+        self.codes[code] = {
+            "provider": provider,
+            "claims": {"nonce": params["nonce"], **claims},
+            "challenge": params["code_challenge"],
+            "redirect_uri": params["redirect_uri"],
+        }
+        back = httpx.URL(params["redirect_uri"])
+        return f"{back.path}?{urlencode({'code': code, 'state': params['state']})}"
+
+    async def _token_endpoint(self, request: httpx.Request) -> httpx.Response:
+        form = dict(parse_qsl((await request.aread()).decode()))
+        self.exchanges.append(form)
+        if self.token_html:
+            return httpx.Response(
+                200,
+                text="<html><body>Service unavailable</body></html>",
+                headers={"content-type": "text/html"},
+            )
+        if self.token_status != 200:
+            return httpx.Response(self.token_status, json={"error": "invalid_grant"})
+        grant = self.codes.pop(form.get("code", ""), None)
+        if grant is None:
+            return httpx.Response(400, json={"error": "invalid_grant"})
+        provider = grant["provider"]
+        challenge = (
+            base64.urlsafe_b64encode(hashlib.sha256(form["code_verifier"].encode()).digest())
+            .rstrip(b"=")
+            .decode()
+        )
+        if (
+            form.get("grant_type") != "authorization_code"
+            or challenge != grant["challenge"]
+            or form.get("redirect_uri") != grant["redirect_uri"]
+            or form.get("client_id") != self.CLIENTS[provider]
+            or form.get("client_secret") != self.SECRETS[provider]
+        ):
+            return httpx.Response(400, json={"error": "invalid_grant"})
+        id_token = self.id_token(provider, **grant["claims"])
+        access = f"access-{secrets.token_urlsafe(16)}"
+        refresh = f"refresh-{secrets.token_urlsafe(16)}"
+        self.issued += [id_token, access, refresh]
+        return httpx.Response(
+            200,
+            json={
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "id_token": id_token,
+                "access_token": access,
+                "refresh_token": refresh,
+            },
+        )
+
+    @property
+    def transport(self) -> httpx.MockTransport:
+        return httpx.MockTransport(self._token_endpoint)
+
+
+@pytest.fixture
+def idp(signing_keys):
+    return FakeIdentityProviders(signing_keys)
+
+
+class FakeGraph:
+    def __init__(self):
+        self.groups: dict[str, set[str]] = {}
+        self.failing = False
+
+    async def member_object_ids(self, user_object_id: str) -> set[str]:
+        if self.failing:
+            raise RoleLookupFailed("Microsoft Graph could not be asked: ConnectError")
+        return set(self.groups.get(user_object_id, set()))
+
+
+class FakeGoogleGroups:
+    def __init__(self):
+        self.groups: dict[str, set[str]] = {}
+        self.failing = False
+
+    async def group_emails(self, email: str) -> set[str]:
+        if self.failing:
+            raise RoleLookupFailed("Google Cloud Identity could not be asked: ConnectError")
+        return set(self.groups.get(email, set()))
+
+
+@pytest.fixture
+def graph():
+    return FakeGraph()
+
+
+@pytest.fixture
+def google_groups():
+    return FakeGoogleGroups()

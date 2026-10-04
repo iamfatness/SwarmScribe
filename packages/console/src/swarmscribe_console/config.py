@@ -135,7 +135,12 @@ class Settings(BaseSettings):
     @field_validator("google_hosted_domain")
     @classmethod
     def _domain_lowercase(cls, value: str | None) -> str | None:
-        return value.removeprefix("@").lower() if value else value
+        if value is None:
+            return None
+        domain = value.removeprefix("@").lower()
+        if not domain:  # "@" must not collapse to "" (which a truthiness test reads as unset)
+            raise ValueError("google_hosted_domain is empty; unset it or name a domain")
+        return domain
 
     @model_validator(mode="after")
     def _sign_in_is_complete(self) -> "Settings":

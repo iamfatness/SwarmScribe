@@ -1,17 +1,27 @@
 import logging
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
 from starlette.types import ASGIApp, Receive, Scope, Send
 from swarmscribe_leader.api.body_limit import BodyLimit
+from swarmscribe_leader.auth.oidc import Fetch, TokenVerifier, http_fetch
+from swarmscribe_leader.auth.roles import (
+    GoogleCloudIdentity,
+    GoogleGroupsClient,
+    GraphClient,
+    MicrosoftGraph,
+)
 from swarmscribe_leader.db.session import make_engine, make_sessionmaker
 
+from .api import auth as auth_api
 from .api import errors as api_errors
 from .api import session as session_api
 from .api.guard import assert_guarded
 from .api.security import SecurityHeaders
 from .config import Settings
 from .crypto import ConsoleKeys
+from .oidc import web_providers
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +49,29 @@ class _ConsoleApp(FastAPI):
         return SecurityHeaders(ContainErrors(super().build_middleware_stack()))
 
 
-def create_app(settings: Settings) -> FastAPI:
+def _graph(settings: Settings) -> GraphClient | None:
+    if settings.entra_client_id and settings.entra_tenant_id and settings.entra_client_secret:
+        return MicrosoftGraph(
+            settings.entra_tenant_id, settings.entra_client_id, settings.entra_client_secret
+        )
+    return None
+
+
+def _google_groups(settings: Settings) -> GoogleGroupsClient | None:
+    key = settings.google_service_account_key()
+    return GoogleCloudIdentity(key) if key is not None else None
+
+
+def create_app(
+    settings: Settings,
+    *,
+    fetch: Fetch | None = None,
+    idp_transport: httpx.AsyncBaseTransport | None = None,
+    graph: GraphClient | None = None,
+    google_groups: GoogleGroupsClient | None = None,
+) -> FastAPI:
+    """`fetch`, `idp_transport`, `graph` and `google_groups` replace the identity providers
+    and directories in tests; real ones are built from the settings otherwise."""
     engine = make_engine(settings.database_url.get_secret_value())
     sessionmaker = make_sessionmaker(engine)
 
@@ -61,8 +93,19 @@ def create_app(settings: Settings) -> FastAPI:
     app.state.engine = engine
     app.state.sessionmaker = sessionmaker
     app.state.keys = ConsoleKeys(settings.key_bytes())
+    providers = web_providers(settings)
+    app.state.web_providers = providers
+    app.state.verifier = TokenVerifier(
+        [provider.verification for provider in providers.values()], fetch=fetch or http_fetch
+    )
+    app.state.idp_transport = idp_transport
+    app.state.graph = graph if graph is not None else _graph(settings)
+    app.state.google_groups = (
+        google_groups if google_groups is not None else _google_groups(settings)
+    )
     api_errors.install(app)
     app.add_middleware(BodyLimit)
+    app.include_router(auth_api.router)  # /auth/*: before a session exists, so no Person guard
     app.include_router(session_api.router)
     assert_guarded(app.routes)  # a route added without the CSRF dependency fails the build
     return app

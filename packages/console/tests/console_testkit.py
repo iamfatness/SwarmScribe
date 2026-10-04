@@ -75,3 +75,13 @@ async def all_rows_text(engine) -> str:
             rows = await conn.execute(text(f"select row_to_json(t)::text from {table.name} t"))
             parts.extend(row[0] for row in rows)
     return "\n".join(parts)
+
+
+async def sign_in(client, idp, *, provider="entra", return_to=None, **claims) -> httpx.Response:
+    """The whole browser sign-in: the console's /auth/login, the provider, the callback."""
+    params = {"provider": provider}
+    if return_to is not None:
+        params["return_to"] = return_to
+    started = await client.get("/auth/login", params=params)
+    assert started.status_code == 302, started.text
+    return await client.get(idp.authorize(started.headers["location"], **claims))

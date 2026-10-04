@@ -178,4 +178,7 @@ class LoginAttempt(Base):
     nonce: Mapped[str] = mapped_column(Text)
     code_verifier: Mapped[str] = mapped_column(Text)
     return_to: Mapped[str] = mapped_column(Text)
+    # SHA-256 of the session cookie the browser sent when it started signing in, if any: the
+    # callback ends that session without needing to see the (SameSite=Strict) cookie.
+    prior_session_hash: Mapped[str | None] = mapped_column(String(64))
     expires_at: Mapped[datetime]

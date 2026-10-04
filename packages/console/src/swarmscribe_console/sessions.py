@@ -119,6 +119,13 @@ async def end_session(session: AsyncSession, cookie: str | None) -> None:
         )
 
 
+async def end_session_by_hash(session: AsyncSession, id_hash: str | None) -> None:
+    """End the session whose id hash is `id_hash` (kept when a sign-in began, so that the
+    callback can end it without seeing the cookie)."""
+    if id_hash:
+        await session.execute(delete(ConsoleSession).where(ConsoleSession.id_hash == id_hash))
+
+
 async def prune_expired(session: AsyncSession, *, now: datetime, idle: timedelta) -> int:
     """Delete ended sessions and abandoned sign-ins. Returns how many rows went."""
     ended = await session.execute(

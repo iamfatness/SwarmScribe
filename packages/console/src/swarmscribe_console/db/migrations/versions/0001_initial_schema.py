@@ -163,6 +163,7 @@ def upgrade() -> None:
         sa.Column("nonce", sa.Text(), nullable=False),
         sa.Column("code_verifier", sa.Text(), nullable=False),
         sa.Column("return_to", sa.Text(), nullable=False),
+        sa.Column("prior_session_hash", sa.String(length=64), nullable=True),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("state_hash"),
     )

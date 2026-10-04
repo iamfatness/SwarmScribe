@@ -10,14 +10,16 @@ of the callback; the access and refresh tokens the provider returns are dropped 
 import base64
 import hashlib
 import hmac
+import logging
 import secrets
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
 import httpx
 from pydantic import SecretStr
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from swarmscribe_leader.auth.oidc import (
     ENTRA_AUTHORITY,
@@ -38,6 +40,10 @@ GOOGLE_AUTHORIZE = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN = "https://oauth2.googleapis.com/token"
 EXCHANGE_TIMEOUT_SECONDS = 10.0
 MAX_CODE_CHARS = 4096
+TRIM_WARNING_SECONDS = 60.0
+
+logger = logging.getLogger(__name__)
+_last_trim_warning = float("-inf")
 
 
 @dataclass(frozen=True)
@@ -148,6 +154,52 @@ async def begin_sign_in(
         provider, redirect_uri=redirect_uri, state=state, nonce=nonce, verifier=verifier
     )
     return url, browser
+
+
+async def trim_pending_sign_ins(session: AsyncSession, *, keep: int) -> int:
+    """Drop the oldest pending sign-ins beyond the newest `keep`. Returns how many went.
+
+    /auth/login needs no session and stores a row each time, so without a bound anyone could
+    fill the table. The newest are kept: under a flood, a person who signs in promptly still
+    finishes, and the flood evicts itself.
+
+    Only the victims are selected FOR UPDATE: rows strictly older than the `keep`-th newest.
+    Locking an OFFSET subquery would lock every row it passes over (all of them, while under
+    the cap) and make concurrent trims delete nothing. Victims another transaction has locked
+    are skipped, never waited for. The caller has flushed its own new row, and commits."""
+    # Rows tied with the boundary's expires_at survive (strict <), so a tie can leave the table
+    # a few rows over the cap. The value is the app's clock to the microsecond plus a constant,
+    # so ties are rare and harmless; a tie-break column would not change the value either.
+    if keep < 1:
+        raise ValueError("keep must be at least 1")
+    boundary = (
+        select(LoginAttempt.expires_at)
+        .order_by(LoginAttempt.expires_at.desc())
+        .offset(keep - 1)
+        .limit(1)
+        .scalar_subquery()  # NULL when there are fewer than `keep` rows: nothing is older
+    )
+    victims = (
+        select(LoginAttempt.state_hash)
+        .where(LoginAttempt.expires_at < boundary)
+        .with_for_update(skip_locked=True)
+    )
+    dropped = await session.execute(
+        delete(LoginAttempt)
+        .where(LoginAttempt.state_hash.in_(victims))
+        .execution_options(synchronize_session=False)
+    )
+    if dropped.rowcount:
+        global _last_trim_warning
+        now = time.monotonic()
+        if now - _last_trim_warning >= TRIM_WARNING_SECONDS:  # one line a minute at most
+            _last_trim_warning = now
+            logger.warning(
+                "more than %d sign-ins are pending; the oldest were dropped "
+                "(rate-limit /auth/login at the ingress)",
+                keep,
+            )
+    return dropped.rowcount
 
 
 @dataclass(frozen=True)

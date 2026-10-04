@@ -8,3 +8,4 @@ dist/
 *.tmp
 .pgdata/
 e2e/compose/work/
+e2e/console-compose/work/

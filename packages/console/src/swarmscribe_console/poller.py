@@ -36,7 +36,7 @@ from .leader_client import (
     is_revoked,
 )
 from .leaders import sealing_context
-from .logsafe import log_contained
+from .logsafe import log_limited
 from .sessions import prune_expired
 
 logger = logging.getLogger(__name__)
@@ -209,7 +209,9 @@ async def poll_leader(
     except Exception as exc:
         # Anything else (a RecursionError from a deeply nested answer, a transport bug) still
         # counts as a failure and advances the cadence; only type and frames are logged.
-        log_contained(logger, f"polling leader {name} failed", exc)
+        log_limited(
+            logger, f"polling leader {name} failed", exc, key=f"poll:{name}:{type(exc).__name__}"
+        )
         outcome = "error"
     await _record(sessionmaker, leader_id, base_url, sealed, outcome, payload, now=now)
     return outcome
@@ -269,7 +271,12 @@ async def poll_due_leaders(
     for row, result in zip(rows, results, strict=True):
         if isinstance(result, BaseException):
             # Type and frames only: the text of a database or transport error can hold values.
-            log_contained(logger, f"polling leader {row.name} failed", result)
+            log_limited(
+                logger,
+                f"polling leader {row.name} failed",
+                result,
+                key=f"poll:{row.name}:{type(result).__name__}",
+            )
             outcomes[row.name] = "error"
         elif result != "skipped":
             outcomes[row.name] = result

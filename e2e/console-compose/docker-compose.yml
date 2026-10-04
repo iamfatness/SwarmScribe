@@ -1,0 +1,191 @@
+# The fleet console and everything it talks to (fleet console spec, section 9): Postgres,
+# a stand-in for Entra ID, two real leaders with a database each, and the console image.
+# Both images are built beforehand and run_e2e.py drives the test (see
+# .github/workflows/ci.yml, job console-compose-e2e). Every value here is test-only.
+name: swarmscribe-console-e2e
+
+x-entra: &entra
+  tenant: &tenant 0f0e0d0c-0b0a-4908-8706-050403020100
+  console-client: &console-client 11111111-1111-4111-8111-111111111111
+  console-secret: &console-secret console-compose-client-secret
+  leader-client: &leader-client 22222222-2222-4222-8222-222222222222
+  # The same group ids as in fake_idp.py (CONSOLE_ADMINS, LEADER_ADMINS).
+  console-admins: &console-admins c0c0c0c0-0000-4000-8000-000000000001
+  leader-admins: &leader-admins c0c0c0c0-0000-4000-8000-000000000003
+
+x-leader-environment: &leader-environment
+  SWARMSCRIBE_LINK_KEY: console-compose-link-key-0123456789abcdef
+  SWARMSCRIBE_ENTRA_TENANT_ID: *tenant
+  SWARMSCRIBE_ENTRA_CLIENT_ID: *leader-client
+  SWARMSCRIBE_ROLE_ADMIN_ENTRA_GROUPS: *leader-admins
+  # The test CA: the leaders fetch Entra's signing keys from the stand-in.
+  SSL_CERT_FILE: /certs/ca.pem
+
+x-leader: &leader
+  image: swarmscribe-leader:e2e
+  pull_policy: never
+  command: ["python", "/e2e/serve_tls.py"]
+  volumes:
+    - ./work/certs:/certs:ro
+    - ./serve_tls.py:/e2e/serve_tls.py:ro
+  healthcheck:
+    test:
+      - CMD
+      - python
+      - -c
+      - "import ssl, sys, urllib.request; c = ssl.create_default_context(cafile='/certs/ca.pem'); sys.exit(0 if urllib.request.urlopen('https://localhost:8443/readyz', timeout=2, context=c).status == 200 else 1)"
+    interval: 2s
+    timeout: 3s
+    retries: 45
+
+x-console: &console
+  image: swarmscribe-console:e2e
+  pull_policy: never
+  # As in the Helm chart: a read-only root filesystem, no capabilities, and the image's own
+  # non-root user.
+  read_only: true
+  cap_drop: ["ALL"]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: ["/tmp"]
+  volumes:
+    - ./work/certs:/certs:ro
+  environment:
+    SWARMSCRIBE_CONSOLE_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/console
+    SWARMSCRIBE_CONSOLE_PUBLIC_URL: http://localhost:18080
+    # bytes 0..31; a test key.
+    SWARMSCRIBE_CONSOLE_KEY: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8
+    SWARMSCRIBE_CONSOLE_ENTRA_TENANT_ID: *tenant
+    SWARMSCRIBE_CONSOLE_ENTRA_CLIENT_ID: *console-client
+    SWARMSCRIBE_CONSOLE_ENTRA_CLIENT_SECRET: *console-secret
+    # Unset in Compose and Kubernetes arrives as an empty string: it must mean "none".
+    SWARMSCRIBE_CONSOLE_GOOGLE_CLIENT_ID: ""
+    # Leaders: the test CA, through the console's own setting (leader calls ignore
+    # SSL_CERT_FILE). Identity provider: the standard variable.
+    SWARMSCRIBE_CONSOLE_LEADER_CA_FILE: /certs/ca.pem
+    SSL_CERT_FILE: /certs/ca.pem
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./initdb.sql:/docker-entrypoint-initdb.d/initdb.sql:ro
+    healthcheck:
+      # Over TCP: the server that runs initdb.sql listens on the socket only, so this
+      # passes only once the three databases exist.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d leader_b"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  fake-idp:
+    image: swarmscribe-leader:e2e
+    pull_policy: never
+    command: ["python", "/e2e/fake_idp.py"]
+    environment:
+      FAKE_IDP_TENANT: *tenant
+      FAKE_IDP_CONSOLE_CLIENT_ID: *console-client
+      FAKE_IDP_CONSOLE_CLIENT_SECRET: *console-secret
+      FAKE_IDP_CONSOLE_REDIRECT_URI: http://localhost:18080/auth/callback
+      FAKE_IDP_LEADER_CLIENT_ID: *leader-client
+    volumes:
+      - ./work/certs:/certs:ro
+      - ./fake_idp.py:/e2e/fake_idp.py:ro
+    networks:
+      default:
+        # The console, the leaders and swarmscribe-admin reach Entra ID at its real name.
+        aliases: ["login.microsoftonline.com"]
+    ports:
+      - "18443:443"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import ssl, sys, urllib.request; c = ssl.create_default_context(cafile='/certs/ca.pem'); sys.exit(0 if urllib.request.urlopen('https://localhost/healthz', timeout=2, context=c).status == 200 else 1)"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  leader-a-migrate:
+    image: swarmscribe-leader:e2e
+    pull_policy: never
+    command: ["swarmscribe-leader", "migrate"]
+    environment: &leader-a-environment
+      <<: *leader-environment
+      SWARMSCRIBE_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/leader_a
+      SWARMSCRIBE_PUBLIC_URL: https://leader-a:8443
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  leader-a:
+    <<: *leader
+    environment: *leader-a-environment
+    depends_on:
+      leader-a-migrate:
+        condition: service_completed_successfully
+      fake-idp:
+        condition: service_healthy
+
+  leader-b-migrate:
+    image: swarmscribe-leader:e2e
+    pull_policy: never
+    command: ["swarmscribe-leader", "migrate"]
+    environment: &leader-b-environment
+      <<: *leader-environment
+      SWARMSCRIBE_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/leader_b
+      SWARMSCRIBE_PUBLIC_URL: https://leader-b:8443
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  leader-b:
+    <<: *leader
+    environment: *leader-b-environment
+    depends_on:
+      leader-b-migrate:
+        condition: service_completed_successfully
+      fake-idp:
+        condition: service_healthy
+
+  # `swarmscribe-admin`, for run_e2e.py: `docker compose run admin-cli ...`. Not started by
+  # `up`.
+  admin-cli:
+    image: swarmscribe-leader:e2e
+    pull_policy: never
+    profiles: ["tools"]
+    environment:
+      SSL_CERT_FILE: /certs/ca.pem
+    volumes:
+      - ./work/certs:/certs:ro
+
+  console-migrate:
+    <<: *console
+    command: ["migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # The documented bootstrap: the first console administrator, added from the command line.
+  console-bootstrap:
+    <<: *console
+    command: ["admins", "add", "entra_group", *console-admins]
+    depends_on:
+      console-migrate:
+        condition: service_completed_successfully
+
+  console:
+    <<: *console
+    ports:
+      - "18080:8080"
+    depends_on:
+      console-bootstrap:
+        condition: service_completed_successfully
+      fake-idp:
+        condition: service_healthy
+      leader-a:
+        condition: service_healthy
+      leader-b:
+        condition: service_healthy

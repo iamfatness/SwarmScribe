@@ -18,12 +18,12 @@
 - "Database URL, storage credentials and the link-signing key come from Kubernetes Secrets; never baked into images" (master spec 10). The chart renders no Secret and no secret value.
 - "Schema changes go through Alembic migrations, run as a Helm pre-upgrade job" (master spec 9) and "Migration `Job` as a pre-upgrade hook" (master spec 12). The console's Job is a pre-install *and* pre-upgrade hook, because the console refuses to start on an unmigrated database.
 - "`Deployment`, 2+ replicas, `PodDisruptionBudget`, `Service`, `Ingress`" is the master spec's shape for the leader (section 12); the console's chart has the same shape. Default `replicaCount: 2`.
-- "Chart — `helm lint` and template rendering in CI" (master spec 14).
+- "Chart — `helm lint` and template rendering in CI" (master spec 14); run locally first.
 - "TLS everywhere" (fleet console spec 7): the Ingress cannot be rendered without TLS, and `publicUrl` must be `https://`.
 - The egress rules are those of the README's "Deployment note: egress", which is the one place they are written down: loopback, link-local, metadata (`169.254.169.254`, `fd00:ec2::254`, `100.100.100.200`), unspecified, multicast, reserved, `0.0.0.0/8`, `fec0::/10`, 6to4 `2002::/16`, Teredo `2001::/32`, NAT64 `64:ff9b::/96` and IPv4-mapped forms are refused; private addresses are allowed.
 - The chart is for the console only. The leader's chart and the follower image are separate roadmap items (roadmap 4 and 6) and are not built here.
 - The pods run as the image's user 10001 with a read-only root filesystem, no capabilities, no privilege escalation, the `RuntimeDefault` seccomp profile and no service-account token.
-- **Helm is not installed on the Windows development machine**; each task says how to get it into a scratch folder. kubeconform needs network access to fetch schemas. CI is the authority.
+- **Helm and kubeconform run locally.** Neither is installed on the Windows development machine, but both are standalone binaries: fetch them into a scratch folder outside the repository (see "Helm and kubeconform on the Windows machine"; checked 2026-10-04: Helm v4.3.0 and kubeconform v0.8.0 download and run there, and `kubectl` is already on the PATH with Docker Desktop). So every "CI only" or "CI is the authority" statement in this plan is a local run first: lint, render, kubeconform and `check_render.py` are all run before each commit, and CI repeats them. kubeconform needs network access to fetch schemas. Docker is available too, so the C4a image is built and loaded locally (ruling 13).
 - On the Windows machine, `uv` is run as `python -m uv`. The commands below are written `uv run ...`.
 - Start from an up-to-date `main` that has C4a merged, on a new branch `fleet-console-c4b`.
 
@@ -35,7 +35,7 @@ Those marked **(owner)** are the owner's to overturn.
 2. **The chart never creates a Secret.** `secrets.existingSecret` is required. A values file and Helm's release history are not a place for the console key or a database password. This narrows the spec's "Helm values: … Postgres URL, console key": they are values that name a Secret's keys. **(owner)**
 3. **Non-secret settings go in a ConfigMap**, read by the Deployment with `envFrom`. A checksum annotation restarts the pods when it changes.
 4. **The migration is a Job with `helm.sh/hook: pre-install,pre-upgrade`.** A hook runs before the release's own ConfigMap and ServiceAccount exist on a first install, so the Job carries the same settings inline and uses the namespace's default ServiceAccount with no token. Not an init container: replicas starting together must not run Alembic concurrently.
-5. **Probes:** startup and liveness on `/healthz`, readiness on `/readyz`. Liveness never depends on the database, so a database outage does not restart every pod.
+5. **Probes:** all three are `httpGet` (GET). Startup and liveness use `/healthz`; the startup probe never uses `/readyz`, which can take up to 3 s while the database is down. Readiness uses `/readyz` with `timeoutSeconds` of 5 or more (the console's own database check gives up at 3 s). Liveness never depends on the database, so a database outage does not restart every pod. The console answers HEAD like GET and 405 to any other method, but the probes use GET and the chart's README says so. **The Ingress must not route `/healthz` or `/readyz`** (ruling 14): `/readyz` tells an anonymous caller whether the database is up.
 6. **PodDisruptionBudget `maxUnavailable: 1`, rendered only for more than one replica.** A budget on a single replica blocks node drains.
 7. **The Ingress host is derived from `publicUrl`** (one value, so they cannot disagree), TLS is required, and `publicUrl` must be `https://<host>` with no port or path.
 8. **Sign-in rate limit: a second Ingress for exactly `/auth/login`** that carries its own annotations (`ingress.signIn`). The chart stays neutral about the controller: ingress-nginx is being retired and its annotations are not a standard, so the annotation names are the operator's. The in-app cap from C4a bounds the table whatever the ingress does. **(owner)**: which controller the project documents first.
@@ -43,7 +43,9 @@ Those marked **(owner)** are the owner's to overturn.
 10. **`168.63.129.16` (the Azure platform address) is in the `except` list** although the console's own URL check does not refuse it. It is not link-local, serves VM configuration, and no leader lives there. **(owner)**: whether to add it to `leaders.py`'s refused addresses as well (recommended; a one-line change with a test, not part of this plan).
 11. **CI: `helm lint --strict`, `kubeconform -strict` on the rendered manifests, and a render check script** (`ci/check_render.py`), in a job named `chart`. The script, not pytest: pytest's `testpaths` is `packages`, and the check needs Helm, which developers' machines do not have. A `kind` install is not part of C4. **(owner)**: recommended as a follow-up once an image is published.
 12. **No in-chart Postgres.** The master spec's "optional in-chart Postgres … for evaluation only" belongs to the main chart; the console's Compose test already covers evaluation.
-13. **Image reference:** `image.repository` defaults to `swarmscribe-console`, the tag to the chart's `appVersion`, and `image.digest` wins over the tag. No image is published yet (C4a ruling 14).
+13. **Image reference: no working default, because the image is not published** (C4a ruling 14). `image.repository` and `image.tag` are required values with no default: the render fails with a message if either is empty (`image.digest` wins over the tag, and still needs the repository). The chart's `appVersion` is not used as a tag. The docs say to build the image and load it into the cluster (`docker build -t swarmscribe-console:<tag> -f docker/console.Dockerfile .`, then `kind load docker-image`, `minikube image load`, or a push to the operator's own registry), with `image.pullPolicy: IfNotPresent` or `Never` for a loaded image. Publishing the image (a registry, tags, a version label) is a follow-up, not part of this plan. `ci/test-values.yaml` sets `swarmscribe-console` and `local` so the check can render.
+14. **The Ingress routes explicit paths, never a Prefix `/`.** A Prefix `/` would also send `/healthz` and `/readyz` to the internet. The console's own routes are few, so `ingress.paths` lists them: `/` (Exact), and Prefix `/leaders`, `/admin`, `/sign-in`, `/assets`, `/api`, `/auth` (the web app's routes in `packages/console-web/src/App.tsx`, its asset folder, and the two backend prefixes). `check_render.py` applies the Ingress matching rules (Exact, and Prefix by path element) to `/healthz`, `/healthz/`, `/readyz` and `/readyz/` and fails if any is matched. A new web app route needs a new entry; the README says so.
+15. **A database outage floods the log unless it is limited** (observed in C4a: about 1,500 lines a minute from the poller). C4a rate-limits the poller's repeated failure to one line per 30 s per cause and `/readyz`'s failure line to one per 30 s. The operations guide says what the lines look like, so an operator reading a quiet log during an outage knows that is by design.
 
 ## Review Focus
 
@@ -81,7 +83,7 @@ Also modified: `.github/workflows/ci.yml` (job `chart`), `README.md` and `packag
 
 ### Helm and kubeconform on the Windows machine
 
-Neither is installed. Put them in a scratch folder outside the repository (Git Bash):
+Neither is installed, and neither needs installing: fetch the standalone binaries into a scratch folder outside the repository (Git Bash). These are the local runs that replace "CI only":
 
 ```bash
 mkdir -p /tmp/chart-tools && cd /tmp/chart-tools
@@ -237,8 +239,10 @@ def check_pod(spec: dict, container: str, problems: list[str], where: str) -> di
             problems.append(f"{where}: {needed} is missing")
     if "requests" not in found.get("resources", {}):
         problems.append(f"{where}: no resource requests")
-    if "/tmp" not in {m["mountPath"] for m in found.get("volumeMounts", [])}:
-        problems.append(f"{where}: no writable /tmp")
+    # The image writes nothing at run time (C4a ran it read-only with no tmpfs), so there is
+    # no /tmp volume; the check keeps one from coming back out of habit.
+    if any(mount["mountPath"] == "/tmp" for mount in found.get("volumeMounts", [])):
+        problems.append(f"{where}: a /tmp volume the image does not need")
     return found
 
 
@@ -254,15 +258,19 @@ def check_core(docs: list[dict]) -> list[str]:
     console = check_pod(deployment["spec"]["template"]["spec"], "console", problems, "Deployment")
     if console["args"][:1] != ["serve"]:
         problems.append("Deployment: the container does not run `serve`")
-    if console["image"] != "swarmscribe-console:0.1.0":
-        problems.append("Deployment: the image tag does not default to the chart's appVersion")
+    if console["image"] != "swarmscribe-console:local":
+        problems.append("Deployment: the image is not image.repository:image.tag")
     for probe, path in (
         ("startupProbe", "/healthz"),
         ("livenessProbe", "/healthz"),
         ("readinessProbe", "/readyz"),
     ):
         if console.get(probe, {}).get("httpGet", {}).get("path") != path:
-            problems.append(f"Deployment: {probe} does not ask {path}")
+            problems.append(f"Deployment: {probe} does not ask {path} with GET (httpGet)")
+    if console["readinessProbe"].get("timeoutSeconds", 1) < 5:
+        problems.append("Deployment: the readiness timeout is under 5 s (the check takes up to 3)")
+    if "/readyz" in str(console["startupProbe"]) or "/readyz" in str(console["livenessProbe"]):
+        problems.append("Deployment: startup or liveness asks /readyz")
     ca = [e for e in console["env"] if e["name"] == "SWARMSCRIBE_CONSOLE_LEADER_CA_FILE"]
     if not ca or ca[0].get("value") != "/etc/swarmscribe/leader-ca/ca.pem":
         problems.append("Deployment: the leader CA file is not set from leaderCa")
@@ -285,6 +293,8 @@ def check_core(docs: list[dict]) -> list[str]:
     if "Secret" in kinds(docs):
         problems.append("the chart renders a Secret; it must only reference one")
 
+    refused(problems, "no image repository", "image.repository=")
+    refused(problems, "no image tag", "image.tag=")
     refused(problems, "no publicUrl", "publicUrl=")
     refused(problems, "an http publicUrl", "publicUrl=http://console.example.org")
     refused(problems, "a publicUrl with a port", "publicUrl=https://console.example.org:8443")
@@ -330,6 +340,20 @@ def check_migrate(docs: list[dict]) -> list[str]:
     return problems
 
 
+def routes(entry: dict, request_path: str) -> bool:
+    """Whether an Ingress path entry would route `request_path`: Exact is a string match;
+    Prefix matches by whole path elements (/leaders matches /leaders/x, not /leaders-x), and
+    a Prefix of / matches everything."""
+    path = entry["path"]
+    if entry["pathType"] == "Exact":
+        return request_path == path
+    if path == "/":
+        return True
+    wanted = [part for part in path.split("/") if part]
+    got = [part for part in request_path.split("/") if part]
+    return got[: len(wanted)] == wanted
+
+
 def check_ingress(docs: list[dict]) -> list[str]:
     problems: list[str] = []
     ingress = one(docs, "Ingress")
@@ -337,6 +361,11 @@ def check_ingress(docs: list[dict]) -> list[str]:
         problems.append("Ingress: TLS is not for the public URL's host")
     if ingress["spec"]["rules"][0]["host"] != "console.example.org":
         problems.append("Ingress: the host is not the public URL's")
+    for probe in ("/healthz", "/healthz/", "/readyz", "/readyz/"):
+        for rule in ingress["spec"]["rules"]:
+            for entry in rule["http"]["paths"]:
+                if routes(entry, probe):
+                    problems.append(f"Ingress: {entry['path']} ({entry['pathType']}) routes {probe}")
     limit = "nginx.ingress.kubernetes.io/limit-rpm"
     if limit in ingress["metadata"].get("annotations", {}):
         problems.append("Ingress: the sign-in annotations are on the whole console")
@@ -465,7 +494,7 @@ if __name__ == "__main__":
 Create `deploy/helm/swarmscribe-console/ci/test-values.yaml`:
 
 ```yaml
-# Values the chart is linted and rendered with in CI. Nothing here is a real secret.
+# Values the chart is linted and rendered with, locally and in CI. Nothing here is a real secret.
 publicUrl: https://console.example.org
 secrets:
   existingSecret: swarmscribe-console
@@ -479,6 +508,9 @@ oidc:
     clientId: console.apps.googleusercontent.com
     hostedDomain: example.org
     serviceAccount: true
+image:
+  repository: swarmscribe-console
+  tag: local
 settings:
   POLL_CONCURRENCY: "8"
 leaderCa:
@@ -540,9 +572,10 @@ Create `deploy/helm/swarmscribe-console/values.yaml` (complete now; the template
 # replicaCount times that, plus one for the migration job.
 replicaCount: 2
 
+# The image is not published: there is no working default. Build it and load it into
+# the cluster (README, "The image"), then name it here. Both are required.
 image:
-  repository: swarmscribe-console
-  # Defaults to the chart's appVersion.
+  repository: ""
   tag: ""
   # "sha256:..." pins the image by digest and wins over the tag.
   digest: ""
@@ -619,6 +652,18 @@ ingress:
     # Required when the Ingress is enabled: the console is served over TLS only.
     # cert-manager can create it from an annotation above.
     secretName: ""
+  # The paths sent to the console. Never a Prefix "/": it would also publish /healthz and
+  # /readyz (the probes; /readyz tells an anonymous caller whether the database is up).
+  # These are the web app's routes (packages/console-web/src/App.tsx), its asset folder and
+  # the backend's /api and /auth. A new web app route needs a new entry here.
+  paths:
+    - {path: /, pathType: Exact}
+    - {path: /leaders, pathType: Prefix}
+    - {path: /admin, pathType: Prefix}
+    - {path: /sign-in, pathType: Prefix}
+    - {path: /assets, pathType: Prefix}
+    - {path: /api, pathType: Prefix}
+    - {path: /auth, pathType: Prefix}
   # A second Ingress for exactly /auth/login, so that a per-client rate limit can
   # be put on starting a sign-in without limiting the rest of the console. The
   # annotations are your ingress controller's own (see the README for examples).
@@ -739,10 +784,11 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
 {{- define "swarmscribe-console.image" -}}
+{{- $repository := required "image.repository is required: the console image is not published; build it and load it into the cluster (see the README)" .Values.image.repository }}
 {{- if .Values.image.digest }}
-{{- printf "%s@%s" .Values.image.repository .Values.image.digest }}
+{{- printf "%s@%s" $repository .Values.image.digest }}
 {{- else }}
-{{- printf "%s:%s" .Values.image.repository (default .Chart.AppVersion .Values.image.tag) }}
+{{- printf "%s:%s" $repository (required "image.tag is required: the console image is not published; build it and name its tag (see the README)" .Values.image.tag) }}
 {{- end }}
 {{- end }}
 
@@ -974,8 +1020,10 @@ spec:
             {{- end }}
           securityContext:
             {{- include "swarmscribe-console.containerSecurityContext" . | nindent 12 }}
-          # /healthz: the process answers. /readyz: the database answers and its schema is
-          # this console's or newer. Neither asks an identity provider or a leader.
+          # httpGet is GET, which is what the console's probes are for. /healthz: the process
+          # answers (startup and liveness; never /readyz). /readyz: the database answers and
+          # its schema is this console's or newer; it gives up on the database after 3 s, so the
+          # timeout is 5 s or more. Neither asks an identity provider or a leader.
           startupProbe:
             httpGet:
               path: /healthz
@@ -998,18 +1046,14 @@ spec:
             failureThreshold: 3
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.leaderCa.existingConfigMap }}
           volumeMounts:
-            - name: tmp
-              mountPath: /tmp
-            {{- if .Values.leaderCa.existingConfigMap }}
             - name: leader-ca
               mountPath: /etc/swarmscribe/leader-ca
               readOnly: true
-            {{- end }}
+          {{- end }}
+      {{- if .Values.leaderCa.existingConfigMap }}
       volumes:
-        - name: tmp
-          emptyDir: {}
-        {{- if .Values.leaderCa.existingConfigMap }}
         - name: leader-ca
           configMap:
             name: {{ .Values.leaderCa.existingConfigMap }}
@@ -1062,7 +1106,8 @@ The SwarmScribe fleet console is at {{ .Values.publicUrl }}
    application(s) at your identity provider.
 
 2. Add the first console administrator (once). Entra ID sign-in takes a group's object id;
-   Google sign-in takes an email or a Workspace domain:
+   Google sign-in takes an email or a Workspace domain (`admins add email you@example.org`);
+   an Entra-only console refuses `email`, so never use it there:
 
    kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "swarmscribe-console.fullname" . }} --      swarmscribe-console admins add entra_group <group-object-id>
 
@@ -1197,12 +1242,6 @@ spec:
             {{- include "swarmscribe-console.containerSecurityContext" . | nindent 12 }}
           resources:
             {{- toYaml .Values.migrate.resources | nindent 12 }}
-          volumeMounts:
-            - name: tmp
-              mountPath: /tmp
-      volumes:
-        - name: tmp
-          emptyDir: {}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -1245,7 +1284,7 @@ git commit -m "Console chart: run the migration as a pre-install and pre-upgrade
 
 **Interfaces:**
 - Consumes: `swarmscribe-console.host`, `.fullname`, `.labels`; values `ingress.enabled`, `.className`, `.annotations`, `.tls.secretName`, `.signIn.enabled`, `.signIn.annotations`. The Service's port name `http`.
-- Produces: Ingress `console-swarmscribe-console` (path `/`, `Prefix`) and, when `ingress.signIn.enabled`, Ingress `console-swarmscribe-console-sign-in` (path `/auth/login`, `Exact`) with `ingress.annotations` plus `ingress.signIn.annotations` (the latter win).
+- Produces: Ingress `console-swarmscribe-console` (the explicit `ingress.paths`: `/` Exact and the web app's and API's prefixes; never a Prefix `/`, which would publish `/healthz` and `/readyz`) and, when `ingress.signIn.enabled`, Ingress `console-swarmscribe-console-sign-in` (path `/auth/login`, `Exact`) with `ingress.annotations` plus `ingress.signIn.annotations` (the latter win).
 
 - [ ] **Step 1: Run the check to see it fail**
 
@@ -1281,13 +1320,15 @@ spec:
     - host: {{ $host | quote }}
       http:
         paths:
-          - path: /
-            pathType: Prefix
+          {{- range .Values.ingress.paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
             backend:
               service:
                 name: {{ $service }}
                 port:
                   name: http
+          {{- end }}
 {{- if .Values.ingress.signIn.enabled }}
 ---
 # Exactly /auth/login, so the annotations here (a per-client rate limit) apply to starting
@@ -1480,7 +1521,7 @@ Expected: `the rendered chart holds every required property (core, migrate, ingr
 In `templates/_helpers.tpl`, temporarily change `- 169.254.0.0/16` to `- 169.254.0.0/24` and run the check again.
 Expected: `FAILED: NetworkPolicy: 169.254.169.254 is reachable` and `FAILED: NetworkPolicy: 169.254.170.2 is reachable`. Restore the line and run the check once more to see it pass.
 
-- [ ] **Step 6: Run the whole check in CI and commit**
+- [ ] **Step 6: Run the whole check locally, then commit (CI repeats it)**
 
 In `.github/workflows/ci.yml`, job `chart`, remove ` --only core,migrate,ingress` so the last step runs every section:
 
@@ -1528,12 +1569,21 @@ One console serves one organisation and any number of leaders. It needs:
 ### The image
 
 `docker/console.Dockerfile` (section "Console image" above) builds `swarmscribe-console`.
-No image is published yet: build it and push it to your own registry.
+No image is published yet, so the chart has no working default for `image.repository` and
+`image.tag`: both are required, and the render fails saying so. Build the image and put it
+where the cluster can pull it, or load it into the cluster. Publishing an image is a
+follow-up.
 
 ```
-docker build -t registry.example.org/swarmscribe-console:0.1.0 -f docker/console.Dockerfile .
-docker push registry.example.org/swarmscribe-console:0.1.0
+docker build -t swarmscribe-console:0.1.0 -f docker/console.Dockerfile .
+# a local cluster:        kind load docker-image swarmscribe-console:0.1.0
+#                         (or: minikube image load swarmscribe-console:0.1.0)
+# a registry of your own: docker tag swarmscribe-console:0.1.0 registry.example.org/swarmscribe-console:0.1.0
+#                         docker push registry.example.org/swarmscribe-console:0.1.0
 ```
+
+Use `image.pullPolicy: Never` (or `IfNotPresent`) for a loaded image. The image needs no
+writable path, so the chart mounts no `/tmp`.
 
 ### Kubernetes, with the Helm chart
 
@@ -1559,8 +1609,9 @@ separate piece of work). CI lints and renders it with Helm 4.3.0.
 
    ```yaml
    image:
-     repository: registry.example.org/swarmscribe-console
+     repository: swarmscribe-console   # or your registry's name for it
      tag: "0.1.0"
+     pullPolicy: IfNotPresent
    publicUrl: https://console.example.org
    secrets:
      existingSecret: swarmscribe-console
@@ -1635,7 +1686,22 @@ secret is put under `settings`.
 
 Each replica pools `2 * POLL_CONCURRENCY + 2` connections and may open 10 more for web
 requests: 18 pooled and up to 28 at the default concurrency of 8. With two replicas that
-is up to 56, plus one for the migration job. Size Postgres's `max_connections` for it.
+is up to 56, plus one for the migration job. Size Postgres's `max_connections` for it
+(and for Postgres's own reserved connections).
+
+### Probes, the Ingress and a database outage
+
+The probes are `httpGet` (GET). The console also answers HEAD like GET and 405 to any
+other method, and redirects `/healthz/` and `/readyz/` to the canonical path. The
+Ingress lists explicit paths (`ingress.paths`) and does not route `/healthz` or `/readyz`:
+`/readyz` tells an anonymous caller whether the database is up. A route added to the web
+app needs a new entry in `ingress.paths`.
+
+During a database outage the console stays alive (liveness does not use the database),
+its pods go unready, and the log stays short on purpose: the poller logs one line per 30
+seconds per cause and `/readyz` logs one line, at most every 30 seconds, saying whether it
+cannot query the database or the migrations are not current. Before C4a's limit this was
+about 1,500 lines a minute per replica.
 
 ### Egress
 
@@ -1818,4 +1884,4 @@ git commit -m "README: deploy the fleet console (image, Helm chart, egress, sign
 
 **Review Focus.** Each of the six lines is asserted by `check_render.py` in the section its task turns on.
 
-**What was verified while writing, and what was not.** The whole chart as given here was linted with Helm 4.3.0 (`--strict`), rendered, validated with kubeconform 0.8.0 against the Kubernetes 1.33.0 schemas (9 resources valid) and passed `check_render.py`, in a scratch folder on the Windows machine; the Task 1 state (four templates) passes `--only core`; the mutation in Task 4's Step 5 fails the check as described; `helm package` leaves `ci/` out. Not verified: an install on a real cluster. Nothing here has shown that the hook Job runs before the pods, that the probes pass, or that a network plugin enforces the policy as rendered.
+**What was verified while writing, and what was not.** The whole chart as given here was linted with Helm 4.3.0 (`--strict`), rendered, validated with kubeconform 0.8.0 against the Kubernetes 1.33.0 schemas (9 resources valid) and passed `check_render.py`, in a scratch folder on the Windows machine; the Task 1 state (four templates) passes `--only core`; the mutation in Task 4's Step 5 fails the check as described; `helm package` leaves `ci/` out. Not verified: an install on a real cluster. Helm v4.3.0 and kubeconform v0.8.0 were fetched as standalone binaries into a scratch folder on the Windows machine and run there; no step of this plan is "CI only". The edits of 2026-10-04 (no `/tmp` volume, required image values, explicit Ingress paths, GET probes) were written against C4a's final image and have not been re-rendered since. Nothing here has shown that the hook Job runs before the pods, that the probes pass, or that a network plugin enforces the policy as rendered.

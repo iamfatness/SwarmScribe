@@ -280,6 +280,8 @@ The fleet console is one web service for many leaders. It has its own Postgres
 | `SWARMSCRIBE_CONSOLE_ENTRA_TENANT_ID`, `_ENTRA_CLIENT_ID`, `_ENTRA_CLIENT_SECRET` | Entra ID web app registration (all three) |
 | `SWARMSCRIBE_CONSOLE_GOOGLE_CLIENT_ID`, `_GOOGLE_CLIENT_SECRET` | Google OAuth web client (both); optional `_GOOGLE_HOSTED_DOMAIN`, `_GOOGLE_SERVICE_ACCOUNT` (Google Groups) |
 | `SWARMSCRIBE_CONSOLE_SESSION_LIFETIME_SECONDS`, `_SESSION_IDLE_SECONDS`, `_LOGIN_ATTEMPT_SECONDS` | optional: session lifetime (default 28800, 8 hours), idle timeout (3600, 1 hour), how long a started sign-in may take (600) |
+| `SWARMSCRIBE_CONSOLE_LEADER_CA_FILE` | optional: a PEM file of CA certificates trusted for calls to leaders, in addition to the public roots (for leaders whose certificates come from a private CA). It applies to leader calls only, which never read `SSL_CERT_FILE`. It is read at start, so restart the console after rotating the file. Calls to the identity providers (sign-in) read the standard `SSL_CERT_FILE`, which REPLACES the public roots for those calls: if you set it, the file must be a full bundle (the public roots plus any private CA), or sign-in at the real Entra ID or Google stops working. Most deployments should leave it unset |
+| `SWARMSCRIBE_CONSOLE_LOGIN_ATTEMPTS_MAX` | optional: how many started sign-ins may be pending at once (default 10000; at least 100, since a smaller cap would drop sign-ins that are still in progress; the cost of each sign-in grows with the cap). Beyond it the oldest are dropped, so requests to `/auth/login` cannot fill the database; a flood of about cap divided by sign-in time requests a second can still evict real sign-ins, so rate-limit that path per client at your ingress as well |
 
 Bootstrap the first console administrator with the command that fits your
 sign-in provider (see "Which principals a sign-in yields" below):
@@ -290,7 +292,8 @@ uv run swarmscribe-console migrate
 # Entra ID sign-in: a group's object id (Entra gives group ids only, never an email)
 uv run swarmscribe-console admins add entra_group <group-object-id>
 
-# Google sign-in: an email, or a Workspace domain
+# Google sign-in (never on an Entra-only console, which refuses `email`): an email, or
+# a Workspace domain
 uv run swarmscribe-console admins add email you@example.org
 
 uv run swarmscribe-console serve --port 8443
@@ -445,7 +448,11 @@ nowhere.
 `2 * concurrency + 2` and `max_overflow` is 10 for web requests, so 18 pooled
 and up to 28 connections per replica at the default. Size the database's
 `max_connections` for the replicas times that (the reasoning is in
-`packages/console/README.md`).
+`packages/console/README.md`). Sizing: replicas x (2 x concurrency + 2 + 10), plus what
+other clients of the same server need and the server's own reserve (Postgres keeps
+`superuser_reserved_connections`, 3 by default). Behind a pooler such as PgBouncer in
+transaction mode, set the pooler's server-side limit to that product, and note that the
+poller's advisory locks are held per session and need session pooling.
 
 **Web app.** The web app is `packages/console-web` (React and TypeScript, built
 with Vite). `npm run build` there writes `packages/console-web/dist`; point
@@ -493,6 +500,87 @@ address later. Add the same blocks to the console host's egress policy: deny
 its traffic to loopback, link-local and metadata addresses (`169.254.169.254`,
 `fd00:ec2::254`, `100.100.100.200`) and allow only the leaders' networks (the
 poller's egress policy itself is C4's).
+
+### Console image
+
+`docker/console.Dockerfile` builds `swarmscribe-console`, the console's backend serving
+the built web app. A Node stage builds `packages/console-web`; a Python stage installs the
+console and the two packages it imports (leader and protocol) with `uv`; the final image
+holds only that environment and `dist/` (`SWARMSCRIBE_CONSOLE_STATIC_DIR=/app/web`). It
+carries no engine and no model libraries. It runs as user 10001, writes nothing (the root
+filesystem can be read-only), listens on port 8080 and has a `HEALTHCHECK` on `/healthz`.
+`serve` is the default command; `migrate` and `admins ...` are run by replacing the
+arguments:
+
+```
+docker build -t swarmscribe-console -f docker/console.Dockerfile .
+docker run --rm --env-file console.env swarmscribe-console migrate
+# the first administrator on an Entra ID console: a group's object id
+docker run --rm --env-file console.env swarmscribe-console admins add entra_group <group-object-id>
+docker run -d --read-only --cap-drop ALL -p 8080:8080 --env-file console.env swarmscribe-console
+```
+
+A console that signs in with Google adds its first administrator with an email instead
+(`admins add email you@example.org`, or a Workspace domain); an Entra-only console refuses
+`email`. The image needs no writable path and no tmpfs.
+
+The port is `SWARMSCRIBE_CONSOLE_PORT` (default 8080); the `HEALTHCHECK` reads the same
+variable. To serve on another port set the variable rather than passing `serve --port`,
+which the `HEALTHCHECK` cannot see. Probes must use GET (Kubernetes `httpGet` does).
+`HEAD` on `/healthz` and `/readyz` answers like GET without a body, any other method is 405,
+and `/healthz/` and `/readyz/` redirect to the canonical path; the web app's page is never
+returned for a probe. Do not publish the probes on a public ingress: `/readyz` tells an
+anonymous caller whether the database is up.
+
+**During a database outage** the console logs one line per 30 seconds per cause (the
+exception type, with its stack once) from the poller, and `/readyz` logs one line, at most
+every 30 seconds, saying either that it cannot query the database or that the migrations are
+not current. The responses to the probe stay fixed.
+
+`console.env` holds the `SWARMSCRIBE_CONSOLE_*` variables from the table above. Put TLS in
+front of it: the console's cookies are `Secure`, and its public URL must be `https://`
+(plain `http` is accepted for localhost only).
+
+The console answers two probes without a session. `/healthz` is 200 while the process
+runs. `/readyz` is 200 when the database answers and its schema is this console's, or a
+newer one (a rolling upgrade has migrated it and this replica is about to be replaced);
+otherwise it is 503 with `database unreachable` or `database migrations are not current`.
+Neither asks an identity provider or a leader, so their outages do not take the console
+out of service.
+
+### Console Compose test
+
+`e2e/console-compose/` runs that image, read-only and as its own user, with Postgres, a
+stand-in for Entra ID and two real leaders that have a database each. It does what an
+operator does: the first console administrator is added with `swarmscribe-console admins
+add`; a leader administrator signs in with `swarmscribe-admin login` and runs
+`swarmscribe-admin console create` on each leader; a console administrator signs in
+through the browser flow, grants a role and registers both leaders. Then one leader is
+killed: within a minute the console shows it unreachable, while the other still answers a
+proxied read and takes an action. It runs in GitHub Actions (job `console-compose-e2e`);
+locally, with Docker:
+
+```
+docker build -t swarmscribe-leader:e2e -f e2e/compose/Dockerfile .
+docker build -t swarmscribe-console:e2e -f docker/console.Dockerfile .
+bash docker/check-console-image.sh swarmscribe-console:e2e
+uv run python e2e/console-compose/run_e2e.py certs
+docker compose -f e2e/console-compose/docker-compose.yml up -d
+uv run python e2e/console-compose/run_e2e.py run
+docker compose -f e2e/console-compose/docker-compose.yml --profile tools down -v
+```
+
+The scenario kills a leader, so it runs once per stack: a second run stops at once and says
+to `down -v` first. It fails, with the measured number, if the leader takes more than 60
+seconds to show unreachable.
+
+The test changes nothing in the console, the leader or the admin CLI to make this
+possible. All three use Entra ID's fixed address, so inside the Compose network the
+stand-in holds the name `login.microsoftonline.com` (a network alias) with a certificate
+from a CA the test makes for itself (`run_e2e.py certs`), which the containers trust
+through `SSL_CERT_FILE` (it replaces the public roots there, which is what the test wants:
+only the stand-in is reached). The leaders serve TLS from the same CA, and the console
+trusts it for them through `SWARMSCRIBE_CONSOLE_LEADER_CA_FILE`.
 
 ## Develop
 

@@ -22,6 +22,7 @@ from .api import admin as admin_api
 from .api import auth as auth_api
 from .api import errors as api_errors
 from .api import fleet as fleet_api
+from .api import health as health_api
 from .api import proxy as proxy_api
 from .api import session as session_api
 from .api.guard import assert_guarded
@@ -29,6 +30,7 @@ from .api.security import SecurityHeaders
 from .background import run_exclusive
 from .config import Settings
 from .crypto import ConsoleKeys
+from .db.migrate import head_revision
 from .leader_client import LeaderClient
 from .logsafe import contained, log_contained
 from .oidc import web_providers
@@ -115,7 +117,7 @@ def create_app(
     )
     sessionmaker = make_sessionmaker(engine)
     keys = ConsoleKeys(settings.key_bytes())
-    leader_client = LeaderClient(transport=leader_transport)
+    leader_client = LeaderClient(transport=leader_transport, ca_file=settings.leader_ca_file)
     poller_config = PollerConfig.from_settings(settings)
     session_idle = timedelta(seconds=settings.session_idle_seconds)
 
@@ -182,6 +184,8 @@ def create_app(
     )
     app.state.settings = settings
     app.state.engine = engine
+    app.state.head_revision = head_revision()
+    app.state.readiness = health_api.ReadinessProbe(engine)
     app.state.sessionmaker = sessionmaker
     app.state.keys = keys
     app.state.leader_client = leader_client
@@ -198,6 +202,7 @@ def create_app(
     )
     api_errors.install(app)
     app.add_middleware(BodyLimit)
+    app.include_router(health_api.router)  # /healthz, /readyz: probes, no session
     app.include_router(auth_api.router)  # /auth/*: before a session exists, so no Person guard
     app.include_router(session_api.router)
     app.include_router(admin_api.router)

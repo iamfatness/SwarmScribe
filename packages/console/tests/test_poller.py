@@ -6,6 +6,7 @@ from datetime import timedelta
 import pytest
 from console_testkit import CREDENTIAL, STATUS
 from sqlalchemy import select, text
+from swarmscribe_console import logsafe
 from swarmscribe_console.app import create_app
 from swarmscribe_console.crypto import ConsoleKeys
 from swarmscribe_console.db.models import AuditEntry, ConsoleSession, Leader, Snapshot
@@ -503,6 +504,8 @@ async def test_a_failing_background_step_is_contained_and_logs_no_text(
 
     monkeypatch.setattr("swarmscribe_console.app.poll_due_leaders", boom)
     monkeypatch.setattr("swarmscribe_console.app.prune", boom)
+    ticks = iter(range(0, 10_000_000, 31))  # every failure is past the 30 s repeat window
+    monkeypatch.setattr(logsafe, "_clock", lambda: next(ticks))
     application = create_app(
         make_settings(poll_tick_seconds=0.05, prune_interval_seconds=0.05),
         background=True,
@@ -598,3 +601,44 @@ async def test_a_slow_batch_is_stamped_with_the_time_it_started(
     stamps = sorted(s.taken_at for s in await _snapshots(sessionmaker))
     assert stamps[0] == now
     assert stamps[1] - now >= timedelta(seconds=0.25)
+
+
+async def test_a_failure_that_repeats_is_logged_once_per_30_seconds_per_cause(
+    engine, make_settings, idp, fake_leader, caplog, monkeypatch
+):
+    """A database outage fails the poller every tick; the log must not flood."""
+    now = 1000.0
+    monkeypatch.setattr(logsafe, "_clock", lambda: now)
+
+    async def down(*_args, **_kwargs):
+        raise ConnectionRefusedError(SECRET)
+
+    monkeypatch.setattr("swarmscribe_console.app.poll_due_leaders", down)
+    application = create_app(
+        make_settings(poll_tick_seconds=0.02, prune_interval_seconds=3600),
+        background=True,
+        fetch=idp.fetch,
+        idp_transport=idp.transport,
+        leader_transport=fake_leader.transport,
+    )
+    with caplog.at_level(logging.DEBUG):
+        async with application.router.lifespan_context(application):
+            await asyncio.sleep(0.5)  # roughly 25 failing ticks
+            assert caplog.text.count("background task poller failed") == 1
+            now += 31.0  # the window has passed: one more line, saying what it held back
+            await asyncio.sleep(0.3)
+    lines = [r.getMessage() for r in caplog.records if "poller failed" in r.getMessage()]
+    assert len(lines) == 2
+    assert "similar suppressed" not in lines[0]
+    assert "similar suppressed" in lines[1]
+    assert SECRET not in caplog.text
+
+
+def test_different_causes_are_limited_separately(monkeypatch, caplog):
+    monkeypatch.setattr(logsafe, "_clock", lambda: 5.0)
+    log = logging.getLogger("t")
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(5):
+            logsafe.log_limited(log, "x", ValueError("a"), key="x:ValueError")
+            logsafe.log_limited(log, "x", KeyError("a"), key="x:KeyError")
+    assert len(caplog.records) == 2

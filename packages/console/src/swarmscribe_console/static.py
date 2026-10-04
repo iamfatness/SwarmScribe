@@ -1,7 +1,7 @@
 """The built web app (C3), served by the console under its security headers (fleet console
 spec 3, 7). An extensionless path that is not a file gets index.html, so the web app's own
-routes survive a reload; /api/ and /auth/ never do, and StaticFiles keeps every path inside
-the folder."""
+routes survive a reload; /api/, /auth/ and the probes (/healthz, /readyz) never do, and
+StaticFiles keeps every path inside the folder."""
 
 import re
 
@@ -11,7 +11,8 @@ from starlette.staticfiles import StaticFiles
 from starlette.types import Scope
 
 _NEVER_THE_APP = ("/api/", "/auth/")
-_EXACTLY = ("/api", "/auth")
+_EXACTLY = ("/api", "/auth", "/healthz", "/readyz")
+_PROBE_SLASH = ("/healthz/", "/readyz/")
 
 # Cache-Control. Anything the browser must re-check (index.html, the fallback, a file whose
 # name carries no content hash) is `no-cache`: it may be stored but is revalidated every
@@ -43,6 +44,7 @@ class SpaFiles(StaticFiles):
                 exc.status_code != 404
                 or full.startswith(_NEVER_THE_APP)
                 or full in _EXACTLY
+                or full in _PROBE_SLASH
                 or "." in last
                 or ".." in path.split("/")
             ):

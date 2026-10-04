@@ -124,7 +124,7 @@ function GrantsContent() {
                           type="button"
                           className="button button-danger"
                           onClick={() => setRemoving(grant)}
-                          aria-label={`Remove grant for ${grant.principal}`}
+                          aria-label={`Remove grant: ${grant.role} on ${grant.scope} for ${grant.principal_kind}:${grant.principal}`}
                         >
                           Remove
                         </button>

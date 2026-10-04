@@ -94,7 +94,7 @@ function AdminsContent() {
                         type="button"
                         className="button button-danger"
                         onClick={() => setRemoving(admin)}
-                        aria-label={`Remove ${admin.principal}`}
+                        aria-label={`Remove console administrator ${admin.principal_kind}:${admin.principal}`}
                       >
                         Remove
                       </button>

@@ -243,9 +243,11 @@ main {
   color: var(--accent-on);
 }
 
-.button-primary:hover:not(:disabled) {
+.button-primary:hover:not(:disabled):not([aria-disabled="true"]) {
+  /* As specific as the .button hover above, which otherwise wins and paints a primary button
+     light grey under its white text (1.16:1, found by axe with the pointer over it). */
   background: var(--accent);
-  filter: brightness(1.1);
+  text-decoration: underline;
 }
 
 .button-danger {

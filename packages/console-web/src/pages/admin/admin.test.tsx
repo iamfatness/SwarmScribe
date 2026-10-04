@@ -169,7 +169,7 @@ describe("administration pages", () => {
         principal: "example.org",
       }),
     );
-    await userEvent.click(screen.getByRole("button", { name: "Remove grant for example.org" }));
+    await userEvent.click(screen.getByRole("button", { name: "Remove grant: operator on label:region=eu for domain:example.org" }));
     await userEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Remove grant" }));
     await waitFor(() => expect(mock.callsTo(`DELETE /api/admin/grants/${GRANT.id}`)).toHaveLength(1));
   });
@@ -181,7 +181,7 @@ describe("administration pages", () => {
         `DELETE /api/admin/console-admins/${ADMIN.id}`,
         fail(409, "last_admin", "the last console administrator cannot be removed"),
       );
-    await userEvent.click(await screen.findByRole("button", { name: `Remove ${ADMIN.principal}` }));
+    await userEvent.click(await screen.findByRole("button", { name: `Remove console administrator entra_group:${ADMIN.principal}` }));
     await userEvent.click(
       within(screen.getByRole("alertdialog")).getByRole("button", { name: "Remove administrator" }),
     );

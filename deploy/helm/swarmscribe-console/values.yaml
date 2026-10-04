@@ -137,8 +137,17 @@ podDisruptionBudget:
   maxUnavailable: 1
 
 networkPolicy:
-  # Needs a network plugin that enforces NetworkPolicy (Calico, Cilium, ...).
-  # Without one this object is accepted and does nothing.
+  # What a NetworkPolicy cannot do:
+  #  - It cannot match names. It allows by address and port only, so leaders and identity
+  #    providers share one rule (TCP 443 to anywhere except the refused ranges). The host
+  #    names the console refuses (metadata.google.internal, ...) are blocked through the
+  #    addresses they resolve to, all in 169.254.0.0/16 or listed below.
+  #  - It needs a network plugin that enforces it (Calico, Cilium, ...). Without one this
+  #    object is accepted and does nothing.
+  #  - It cannot block loopback inside the pod, and on a first install the migration hook
+  #    runs before this policy exists.
+  # It selects every pod of the release (console and migration Job), allows ingress only on
+  # `port`, and egress to DNS, Postgres and HTTPS.
   enabled: true
   ingress:
     # Peers allowed to reach the console's port (NetworkPolicyPeer objects), for

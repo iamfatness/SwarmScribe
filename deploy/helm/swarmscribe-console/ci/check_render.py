@@ -376,6 +376,9 @@ def check_network(docs: list[dict]) -> list[str]:
         problems.append("NetworkPolicy: Postgres is not allowed")
     if policy["ingress"][0]["ports"] != [{"protocol": "TCP", "port": 8080}]:
         problems.append("NetworkPolicy: ingress is not limited to the console's port")
+    moved = one(render("--set", "port=9090"), "NetworkPolicy")["spec"]["ingress"][0]["ports"]
+    if moved != [{"protocol": "TCP", "port": 9090}]:
+        problems.append("NetworkPolicy: ingress does not follow the port value")
 
     # The API server refuses an `except` outside its `cidr`: a narrowed range gets none.
     narrowed = render("--set", "networkPolicy.egress.https.cidrs={10.0.0.0/8}")

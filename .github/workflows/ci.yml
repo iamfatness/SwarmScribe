@@ -160,4 +160,4 @@ jobs:
       - name: Check what the chart renders
         run: >-
           uv run --no-project --with pyyaml
-          python deploy/helm/swarmscribe-console/ci/check_render.py --only core,migrate,ingress
+          python deploy/helm/swarmscribe-console/ci/check_render.py

@@ -9,6 +9,9 @@ import httpx
 from sqlalchemy import text
 from swarmscribe_console.db.models import Base
 
+ADMIN_PRINCIPAL = "email:admin@example.org"
+CREDENTIAL = "c" * 20 + "_-" + "D" * 21  # 43 URL-safe characters, as C1 makes them
+
 MASTER_KEY = bytes(range(32))
 TEST_KEY = base64.urlsafe_b64encode(MASTER_KEY).rstrip(b"=").decode("ascii")
 

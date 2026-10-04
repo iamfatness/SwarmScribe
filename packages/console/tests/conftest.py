@@ -18,6 +18,7 @@ import httpx  # noqa: E402
 import jwt as pyjwt  # noqa: E402
 import pytest  # noqa: E402
 from console_testkit import (  # noqa: E402
+    CREDENTIAL,
     ENTRA_CLIENT,
     ENTRA_ISSUER,
     ENTRA_SECRET,
@@ -41,6 +42,7 @@ from swarmscribe_console.db.migrate import upgrade  # noqa: E402
 from swarmscribe_console.db.models import (  # noqa: E402
     Base,
     ConsoleAdmin,
+    Leader,
     RoleGrant,
 )
 from swarmscribe_console.sessions import SESSION_COOKIE, create_session  # noqa: E402
@@ -201,6 +203,27 @@ class Factory:
     async def console_admin(self, kind, principal) -> ConsoleAdmin:
         return await self._save(
             ConsoleAdmin(principal_kind=kind, principal=principal, created_by="t")
+        )
+
+    async def leader(
+        self,
+        name="eu-1",
+        *,
+        base_url=None,
+        labels=None,
+        credential=CREDENTIAL,
+        enabled=True,
+    ) -> Leader:
+        return await self._save(
+            Leader(
+                name=name,
+                base_url=base_url or f"https://{name}.leaders.example",
+                labels=labels or {},
+                enabled=enabled,
+                credential=self.keys.seal_credential(name, credential),
+                credential_updated_by="t",
+                added_by="t",
+            )
         )
 
 

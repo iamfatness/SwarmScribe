@@ -48,6 +48,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const signOut = useCallback(async () => {
     try {
       await api.post("/api/session/logout");
+    } catch {
+      // Leave anyway. If the session survived, the sign-in page's own probe says so and
+      // offers the way back; rethrowing here would only be an unhandled rejection.
     } finally {
       setCsrfToken(null);
       goToSignedOut();

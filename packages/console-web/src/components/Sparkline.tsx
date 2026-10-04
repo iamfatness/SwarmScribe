@@ -85,7 +85,8 @@ export function describe(g: Geometry): string {
   return parts.join(" ");
 }
 
-export function Sparkline({ points, now }: { points: HistoryPoint[]; now: number }) {
+/** `name` (the leader) leads the accessible name, so each chart in a table is told apart. */
+export function Sparkline({ points, now, name }: { points: HistoryPoint[]; now: number; name?: string }) {
   const titleId = useId();
   const g = geometry(points, now);
   return (
@@ -98,7 +99,7 @@ export function Sparkline({ points, now }: { points: HistoryPoint[]; now: number
       height={HEIGHT}
       preserveAspectRatio="none"
     >
-      <title id={titleId}>{describe(g)}</title>
+      <title id={titleId}>{name === undefined ? describe(g) : `${name}: ${describe(g)}`}</title>
       <line className="sparkline-axis" x1={PAD} x2={WIDTH - PAD} y1={HEIGHT - PAD} y2={HEIGHT - PAD} />
       {g.segments.map((d) => (
         <path key={d} className="sparkline-line" d={d} />

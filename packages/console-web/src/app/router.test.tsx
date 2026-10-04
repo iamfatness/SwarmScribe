@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { Link, RouterProvider, matchPath, useLocation } from "./router";
@@ -31,5 +31,34 @@ describe("router", () => {
     await userEvent.click(screen.getByRole("link", { name: "Jobs" }));
     expect(screen.getByText("at /leaders/eu-1/jobs?state=failed")).toBeInTheDocument();
     expect(window.location.pathname).toBe("/leaders/eu-1/jobs");
+  });
+
+  it("follows the browser's back and forward buttons", async () => {
+    render(
+      <RouterProvider>
+        <Where />
+      </RouterProvider>,
+    );
+    window.history.pushState(null, "", "/elsewhere?x=1");
+    act(() => {
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    expect(await screen.findByText("at /elsewhere?x=1")).toBeInTheDocument();
+  });
+
+  it("leaves modified clicks to the browser (new tab, new window)", async () => {
+    render(
+      <RouterProvider>
+        <Link to="/leaders/eu-1/jobs">Jobs</Link>
+        <Where />
+      </RouterProvider>,
+    );
+    const link = screen.getByRole("link", { name: "Jobs" });
+    for (const modifier of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { altKey: true }]) {
+      // fireEvent.click returns false when something called preventDefault.
+      expect(fireEvent.click(link, modifier)).toBe(true);
+    }
+    expect(fireEvent.click(link, { button: 1 })).toBe(true);
+    expect(screen.getByText("at /")).toBeInTheDocument();
   });
 });

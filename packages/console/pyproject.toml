@@ -1,0 +1,33 @@
+[project]
+name = "swarmscribe-console"
+version = "0.1.0"
+description = "SwarmScribe fleet console: sign-in, leader registry, poller and action proxy"
+requires-python = ">=3.11"
+dependencies = [
+    "swarmscribe-protocol",
+    "swarmscribe-leader",
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30,<1",
+    "sqlalchemy[asyncio]>=2.0.30,<3",
+    "asyncpg>=0.29,<1",
+    "alembic>=1.13,<2",
+    "pydantic-settings>=2.4,<3",
+    "pyjwt[crypto]>=2.10,<3",
+    "httpx>=0.27,<1",
+    # AES-GCM and HKDF for leader credentials and CSRF tokens (already locked via pyjwt[crypto]).
+    "cryptography>=42",
+]
+
+[project.scripts]
+swarmscribe-console = "swarmscribe_console.main:run"
+
+[tool.uv.sources]
+swarmscribe-protocol = { workspace = true }
+swarmscribe-leader = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/swarmscribe_console"]

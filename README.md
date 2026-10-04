@@ -364,6 +364,59 @@ sign in; the `admins add` command is the way back in.) A grant may name a leader
 that is not registered yet: a scope only matches registered leaders when a role
 is looked up. Every change is written to the audit log.
 
+### Leaders in the console
+
+On each leader, a leader administrator creates a credential for the console:
+
+```
+swarmscribe-admin console create --name fleet --max-role operator
+```
+
+Prefer `operator`: the leader trusts the console's word for who the person is,
+so the cap is the only bound on what a leaked credential can do. Use `admin`
+only if people must create join tokens or locations from the console.
+
+A console administrator then registers the leader (`POST /api/admin/leaders`
+with its name, `https://` URL, labels and the credential). The URL rules, the
+egress policy and what a URL change or rotation resets are in "Console
+administrators and grants" and "Deployment note: egress" in this section, and
+are not repeated here. The credential is sealed with `SWARMSCRIBE_CONSOLE_KEY`,
+bound to the leader's name and URL, and never shown again.
+
+**Rotation.** Console names are never reused on a leader. Create a new one
+(`console create --name fleet-2 ...`), replace the credential in the console in
+place (`PUT /api/admin/leaders/<name>/credential`), then revoke the old one
+(`console revoke fleet`).
+
+**Polling.** Every 15 seconds the console reads each leader's status as
+`system:poller` (viewer); the leader does not audit these reads. A leader that
+fails three polls in a row is shown unreachable (within a minute). A leader
+that answers `401 credential_revoked` is shown as revoked and not polled again
+until its credential is replaced. Snapshots are kept for 24 hours; the overview
+shows each leader's queue, completions in the last hour and day, failures,
+followers by pool, the oldest queued job's age and scan errors, all from the
+latest successful one. The 24-hour history is bucketed with `date_bin`, so the
+console's Postgres must be **14 or later**.
+
+**Actions.** The web app calls `/api/leaders/<name>/...`; the console checks the
+person's role there, then forwards the call with the person as actor, and the
+leader applies its own cap and role checks. Every action is audited in the
+console and in the leader. A join token's plaintext is shown once and kept
+nowhere.
+
+**Connections.** The engine's pool is sized from
+`SWARMSCRIBE_CONSOLE_POLL_CONCURRENCY` (default 8): `pool_size` is
+`2 * concurrency + 2` and `max_overflow` is 10 for web requests, so 18 pooled
+and up to 28 connections per replica at the default. Size the database's
+`max_connections` for the replicas times that (the reasoning is in
+`packages/console/README.md`).
+
+**Web app.** `SWARMSCRIBE_CONSOLE_STATIC_DIR` points at the built web app (C3):
+a folder holding `index.html`; blank means none. The console serves it under
+its Content Security Policy (scripts and styles from its own origin only, no
+inline). A path that is not a file and has no extension gets `index.html` so the
+app's own routes survive a reload; `/api` and `/auth` never do.
+
 ### Deployment note: egress
 
 This is the one place the leader-URL rules and the egress policy are written

@@ -33,6 +33,7 @@ from .leader_client import LeaderClient
 from .logsafe import contained, log_contained
 from .oidc import web_providers
 from .poller import PRUNE_LOCK, PollerConfig, poll_due_leaders, prune
+from .static import SpaFiles
 
 logger = logging.getLogger(__name__)
 
@@ -202,5 +203,8 @@ def create_app(
     app.include_router(admin_api.router)
     app.include_router(fleet_api.router)
     app.include_router(proxy_api.router)  # after fleet: its /leaders/{name}/history wins
+    if settings.static_dir is not None:
+        # Last of the routes, so every API and sign-in route is matched first.
+        app.mount("/", SpaFiles(directory=settings.static_dir, html=True), name="web")
     assert_guarded(app.routes)  # a route added without the CSRF dependency fails the build
     return app

@@ -54,6 +54,10 @@ _BAD_PATH_CHARS = re.compile(r"[\\@#?\x00-\x20\x7f-\U0010ffff]")
 _ENCODED_SEPARATOR = re.compile(r"%(?:2f|5c|00)", re.IGNORECASE)
 
 
+def _no_constants(_name: str) -> None:
+    raise ValueError("NaN and Infinity are not JSON")
+
+
 def _checked_url(base_url: str, path: str) -> str:
     """base_url + path, or ValueError. A path is `/` then segments: no second leading slash,
     backslash, `@`, `#`, `?` (queries go in params), control character, encoded slash or
@@ -198,8 +202,8 @@ class LeaderClient:
             try:
                 if "json" not in response.headers.get("content-type", ""):
                     raise ValueError
-                body = json.loads(raw)
-            except ValueError:
+                body = json.loads(raw, parse_constant=_no_constants)
+            except (ValueError, RecursionError):  # RecursionError: absurdly nested JSON
                 if 200 <= response.status_code < 300:
                     raise LeaderBadAnswer(
                         f"leader {target.name} answered something not JSON"

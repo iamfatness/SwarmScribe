@@ -11,11 +11,12 @@ leader is called, and a fresh one writes the audit entry afterwards."""
 
 import json
 import re
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, NoReturn
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, field_validator
 from swarmscribe_leader.api.admin_models import LocationIn, PriorityIn, TokenIn
 from swarmscribe_leader.auth.roles import at_least
 from swarmscribe_leader.clock import utcnow
@@ -60,8 +61,26 @@ MAX_QUERY_CHARS = 200
 MAX_RETRY_AFTER = 3600
 LEADER_INVALID_TEXT = "the leader did not accept the request as sent"
 _CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+class ConsoleLocationIn(LocationIn):
+    """The leader's LocationIn with one check replaced. The leader's `root` rule uses the path
+    rules of the machine it runs on, which here would be the console's. The leader is the
+    authority on its own operating system, so the console accepts a root that is absolute
+    under either POSIX or Windows rules and leaves the final word to the leader. Every other
+    field, `extra="forbid"` and the mode check are the leader's own (a validator named like
+    the parent's replaces it)."""
+
+    @field_validator("root")
+    @classmethod
+    def _absolute_folder(cls, value: str) -> str:
+        if any(ord(ch) < 0x20 for ch in value) or not (
+            PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()
+        ):
+            raise ValueError("root must be an absolute folder path")
+        return value
+
+
 BODY_MODELS: dict[str, type[BaseModel]] = {
-    "locations.add": LocationIn,
+    "locations.add": ConsoleLocationIn,
     "jobs.priority": PriorityIn,
     "tokens.create": TokenIn,
 }
@@ -240,11 +259,29 @@ async def proxied(
         await refuse(CredentialRejected(f"leader {leader_name} does not accept the credential"))
     if 200 <= reply.status < 300:
         if reply.body is None and reply.status != 204:
-            await refuse(BadGateway(f"leader {leader_name} answered success with no content"))
+            await refuse(
+                BadGateway(
+                    f"leader {leader_name} answered success with no content; "
+                    "whether the action happened is unknown"
+                )
+            )
+        # Build the answer first: a body that cannot be rendered is a bad gateway, audited
+        # as one, never an "ok" entry followed by a 500.
+        try:
+            answer: Response = (
+                Response(status_code=204)
+                if reply.status == 204
+                else JSONResponse(reply.body, status_code=reply.status)
+            )
+        except (ValueError, TypeError, RecursionError):
+            await refuse(
+                BadGateway(
+                    f"leader {leader_name} answered something not usable; "
+                    "whether the action happened is unknown"
+                )
+            )
         await _audit(
             request, person, route, leader_name, target, "ok", _detail(route, role, reply.body)
         )
-        if reply.status == 204:
-            return Response(status_code=204)
-        return JSONResponse(reply.body, status_code=reply.status)
+        return answer
     await refuse(_passed_through(reply))

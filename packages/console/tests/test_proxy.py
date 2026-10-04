@@ -579,3 +579,117 @@ async def test_a_join_token_is_not_in_any_audit_detail_or_other_answer(
     assert TOKEN_PLAINTEXT not in rows
     assert TOKEN_PLAINTEXT not in repr(await _audit(sessionmaker))
     assert TOKEN_PLAINTEXT not in caplog.text
+
+
+# --- review fix round 1 ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b'{"x": NaN}', b'{"x": Infinity}', b"[" * 200_000 + b"]" * 200_000],
+    ids=["nan", "infinity", "deeply-nested"],
+)
+async def test_an_unrenderable_leader_success_is_a_502_with_a_bad_gateway_audit(
+    signed_in_as, eu, fake_leader, sessionmaker, content
+):
+    fake_leader.replies[("POST", f"/v1/admin/jobs/{JOB}/retry")] = (
+        200,
+        content,
+        {"Content-Type": "application/json"},
+    )
+    client = await signed_in_as("operator")
+    answer = await client.post(f"/api/leaders/eu-1/jobs/{JOB}/retry")
+    assert (answer.status_code, answer.json()["code"]) == (502, "bad_gateway")
+    entries = await _audit(sessionmaker)
+    assert [(e.action, e.outcome) for e in entries] == [("jobs.retry", "bad_gateway")]
+
+
+async def test_a_body_that_cannot_be_rendered_is_audited_as_bad_gateway_not_ok(
+    signed_in_as, eu, fake_leader, sessionmaker, monkeypatch
+):
+    import swarmscribe_console.api.proxy as api_proxy
+
+    def refusing(content, **kwargs):
+        raise ValueError("cannot render")
+
+    monkeypatch.setattr(api_proxy, "JSONResponse", refusing)
+    fake_leader.replies[("POST", f"/v1/admin/jobs/{JOB}/retry")] = (200, {"id": JOB}, {})
+    client = await signed_in_as("operator")
+    answer = await client.post(f"/api/leaders/eu-1/jobs/{JOB}/retry")
+    assert (answer.status_code, answer.json()["code"]) == (502, "bad_gateway")
+    assert [e.outcome for e in await _audit(sessionmaker)] == ["bad_gateway"]
+
+
+async def test_an_empty_success_is_audited_as_bad_gateway(
+    signed_in_as, eu, fake_leader, sessionmaker
+):
+    fake_leader.replies[("POST", f"/v1/admin/jobs/{JOB}/retry")] = (200, b"", {})
+    client = await signed_in_as("operator")
+    answer = await client.post(f"/api/leaders/eu-1/jobs/{JOB}/retry")
+    assert answer.status_code == 502
+    assert "unknown" in answer.json()["message"]
+    assert [e.outcome for e in await _audit(sessionmaker)] == ["bad_gateway"]
+
+
+@pytest.mark.parametrize("root", ["/srv/audio", "D:\\recordings"], ids=["posix", "windows"])
+async def test_a_location_root_absolute_on_either_os_is_forwarded_intact(
+    signed_in_as, eu, fake_leader, root
+):
+    fake_leader.replies[("POST", "/v1/admin/locations")] = (201, {"name": "loc1"}, {})
+    client = await signed_in_as("admin")
+    sent = {"name": "loc1", "root": root}
+    answer = await client.post("/api/leaders/eu-1/locations", json=sent)
+    assert answer.status_code == 201
+    assert json.loads(fake_leader.bodies[0]) == sent  # no channel_labels, no defaults added
+
+
+async def test_a_full_location_body_is_forwarded_as_sent(signed_in_as, eu, fake_leader):
+    fake_leader.replies[("POST", "/v1/admin/locations")] = (201, {"name": "loc1"}, {})
+    client = await signed_in_as("admin")
+    sent = {
+        "name": "loc1",
+        "root": "/srv/audio",
+        "input_prefix": "in/",
+        "output_prefix": "out/",
+        "pool": "gpu",
+        "required_device": "any",
+        "scan_interval_s": 60,
+        "channel_mode": "stereo_split",
+        "channel_labels": ["host", "guest"],
+    }
+    answer = await client.post("/api/leaders/eu-1/locations", json=sent)
+    assert answer.status_code == 201, answer.text
+    assert json.loads(fake_leader.bodies[0]) == sent
+
+
+@pytest.mark.parametrize("root", ["audio/x", "", "relative\\x", "/srv/\nx"])
+async def test_a_relative_location_root_is_refused_with_fixed_text(
+    signed_in_as, eu, fake_leader, root
+):
+    client = await signed_in_as("admin")
+    answer = await client.post("/api/leaders/eu-1/locations", json={"name": "l", "root": root})
+    assert answer.status_code == 422
+    assert "audio/x" not in answer.text
+    assert fake_leader.requests == []
+
+
+async def test_a_mono_location_with_channel_labels_set_is_refused(signed_in_as, eu, fake_leader):
+    client = await signed_in_as("admin")
+    answer = await client.post(
+        "/api/leaders/eu-1/locations",
+        json={"name": "l", "root": "/srv/a", "channel_labels": ["a", "b"]},
+    )
+    assert answer.status_code == 422
+    assert fake_leader.requests == []
+
+
+async def test_a_token_body_with_every_field_is_forwarded_as_sent(signed_in_as, eu, fake_leader):
+    fake_leader.replies[("POST", "/v1/admin/tokens")] = (
+        201,
+        {"id": TOKEN_ID, "token": TOKEN_PLAINTEXT, "pool": "gpu"},
+        {},
+    )
+    client = await signed_in_as("admin")
+    sent = {"pool": "gpu", "expires_in_seconds": 3600, "max_uses": 5}
+    assert (await client.post("/api/leaders/eu-1/tokens", json=sent)).status_code == 201
+    assert json.loads(fake_leader.bodies[0]) == sent

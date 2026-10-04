@@ -105,6 +105,8 @@ Hostile and malformed input the spec implies but does not spell out. Each line n
 - **Proxied answers:** 2xx passes through with its status and JSON body; a 4xx/5xx carrying `{code, message}` (code `[a-z][a-z0-9_]{0,63}`) passes through with its status, code, message (≤ 500 characters) and a numeric `Retry-After` (≤ 3600); anything else is `502 bad_gateway`. A leader 401 is never passed through (Review Focus 10). Unreachable is `503 leader_unreachable` with `Retry-After: 15`. A console-disabled leader is `409 leader_disabled`; an unreadable stored credential `503 leader_credential_unreadable`.
 - **Audit:** every proxied `POST` writes one console audit entry: actor, action (table above), leader name, target (`job_id=…` etc.), outcome (`ok` or the error code), detail `{role}` plus, for `tokens.create`, the token's `id` and `pool` — never the plaintext. Proxied reads are not audited in the console (owner ruling above).
 - **Static files** (`SWARMSCRIBE_CONSOLE_STATIC_DIR`, a folder holding `index.html`): served at `/` under the C2a security headers; an extensionless path outside `/api/` and `/auth/` that is not a file gets `index.html` (the web app's own routes).
+- **Credential sealing context.** C2a seals a leader's credential bound to its name and normalised URL. Every `open_credential` call in this plan passes `leaders.sealing_context(row.name, row.base_url)`, read from the same row as the sealed bytes; the bare name raises `CredentialUnreadable`. A leader's URL change comes with the credential (C2a `credential_required`), so the sealed value always matches the row, and it resets `consecutive_failures`, `last_error` and `last_polled_at` and clears `credential_revoked_at`: the poller's health and revoked tests start from that state after an edit.
+- **Edit `create_app`, never replace it.** Task 2's `app.py` changes are edits to C2a's file (see Task 2, Step 6). `assert_guarded(app.routes)` stays the last statement, after every router and the static mount, and nothing that contains `/api` routes is mounted under `/`.
 
 ## File Structure
 
@@ -759,7 +761,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Test: `packages/console/tests/test_poller.py`
 
 **Interfaces:**
-- Consumes: `Leader`, `Snapshot` (C2a Task 2); `ConsoleKeys`, `CredentialUnreadable` (C2a Task 1); `audit.record` (C2a Task 2); `sessions.prune_expired` (C2a Task 4); `leaders.replace_credential` (C2a Task 6, tests only); `LeaderClient`, `LeaderTarget`, `LeaderUnreachable`, `LeaderBadAnswer`, `is_revoked`, `POLLER_ACTOR` (Task 1); `swarmscribe_leader.background.run_periodically`.
+- Consumes: `Leader`, `Snapshot` (C2a Task 2); `ConsoleKeys`, `CredentialUnreadable` (C2a Task 1); `leaders.sealing_context(name, base_url)` (C2a Task 6: the context every `open_credential` call passes, never the bare name); `audit.record` (C2a Task 2); `sessions.prune_expired` (C2a Task 4); `leaders.replace_credential` (C2a Task 6, tests only); `LeaderClient`, `LeaderTarget`, `LeaderUnreachable`, `LeaderBadAnswer`, `is_revoked`, `POLLER_ACTOR` (Task 1); `swarmscribe_leader.background.run_periodically`.
 - Produces:
   - `background.run_exclusive(engine, key: int, work: Callable[[], Awaitable[None]]) -> bool`.
   - `poller.POLL_LOCK_BASE = 0x53430001 << 32`, `poller.PRUNE_LOCK = 0x53430002 << 32`, `poller.STATUS_PATH = "/v1/admin/status"`.
@@ -805,7 +807,7 @@ from sqlalchemy import select, text
 from swarmscribe_console.app import create_app
 from swarmscribe_console.crypto import ConsoleKeys
 from swarmscribe_console.db.models import AuditEntry, ConsoleSession, Leader, Snapshot
-from swarmscribe_console.leaders import replace_credential
+from swarmscribe_console.leaders import replace_credential, sealing_context
 from swarmscribe_console.poller import POLL_LOCK_BASE, PollerConfig, poll_due_leaders, prune
 from swarmscribe_leader.auth.consoles import parse_delegation
 from swarmscribe_leader.clock import utcnow
@@ -1021,7 +1023,9 @@ async def test_a_credential_rotated_during_a_poll_is_not_marked_by_its_answer(
     leader = await _leader(sessionmaker)
     assert leader.credential_revoked_at is None
     assert leader.last_polled_at is None  # the rotation's reset stands
-    assert keys.open_credential("eu-1", leader.credential) == ROTATED
+    # Sealed bound to the name and URL: open with the row's own sealing context.
+    context = sealing_context(leader.name, leader.base_url)
+    assert keys.open_credential(context, leader.credential) == ROTATED
     assert len(await _snapshots(sessionmaker)) == 1
 
 
@@ -1209,6 +1213,7 @@ from .leader_client import (
     LeaderUnreachable,
     is_revoked,
 )
+from .leaders import sealing_context
 from .sessions import prune_expired
 
 logger = logging.getLogger(__name__)
@@ -1353,7 +1358,10 @@ async def poll_leader(
         name, base_url, sealed = leader.name, leader.base_url, leader.credential
     payload: dict[str, Any] | None = None
     try:
-        target = LeaderTarget(name, base_url, keys.open_credential(name, sealed))
+        # The credential is sealed bound to the name and URL (C2a `leaders.sealing_context`),
+        # both read from the same locked row as `sealed`. A bare name never opens it.
+        context = sealing_context(name, base_url)
+        target = LeaderTarget(name, base_url, keys.open_credential(context, sealed))
         reply = await client.call(
             target, "GET", STATUS_PATH, actor=POLLER_ACTOR, role="viewer", timeout=config.timeout
         )
@@ -1430,69 +1438,20 @@ async def prune(
 
 - [ ] **Step 6: Run the poller and the prune step from the app**
 
-Replace `packages/console/src/swarmscribe_console/app.py` with:
+Edit C2a's `packages/console/src/swarmscribe_console/app.py` **in place**. Do not replace the file or rebuild `create_app` from scratch: C2a's version carries four things that a rewrite would silently drop, and each has a test.
+
+- `ContainErrors` and `_ConsoleApp.build_middleware_stack`, which put `SecurityHeaders` and `ContainErrors` outside Starlette's error middleware (a 500 carries the security headers and is logged once, by type, route and traceback frames only). The app is built with `_ConsoleApp(...)`, not `FastAPI(...)`, and there is no `app.add_middleware(SecurityHeaders)`.
+- The engine is created with `hide_parameters=True`. Keep that argument on the line you edit.
+- The build-time CSRF guard: `assert_guarded(app.routes)` is the **last statement** before `return app`, after the fleet and proxy routers and after the `SpaFiles` mount (Task 5). Every router you include in Tasks 3 and 4 goes above it.
+- The comment on the `/auth` router (no `Person` guard before a session exists).
+
+Make exactly these changes:
+
+1. Imports: add `asyncio`, `timedelta`, `run_periodically`, `utcnow`, `LeaderClient`, `run_exclusive`, `PRUNE_LOCK`, `PollerConfig`, `poll_due_leaders`, `prune` (the imports of the previous version of this step), next to C2a's.
+2. `create_app` gains `background: bool = True` and `leader_transport: httpx.AsyncBaseTransport | None = None`, and the docstring names `leader_transport`.
+3. After the engine and sessionmaker lines, build the shared pieces and the two loop steps, and replace C2a's `lifespan` with the one below (C2a's only disposed the engine):
 
 ```python
-import asyncio
-from contextlib import asynccontextmanager
-from datetime import timedelta
-
-import httpx
-from fastapi import FastAPI
-from swarmscribe_leader.api.body_limit import BodyLimit
-from swarmscribe_leader.auth.oidc import Fetch, TokenVerifier, http_fetch
-from swarmscribe_leader.auth.roles import (
-    GoogleCloudIdentity,
-    GoogleGroupsClient,
-    GraphClient,
-    MicrosoftGraph,
-)
-from swarmscribe_leader.background import run_periodically
-from swarmscribe_leader.clock import utcnow
-from swarmscribe_leader.db.session import make_engine, make_sessionmaker
-
-from .api import admin as admin_api
-from .api import auth as auth_api
-from .api import errors as api_errors
-from .api import session as session_api
-from .api.security import SecurityHeaders
-from .background import run_exclusive
-from .config import Settings
-from .crypto import ConsoleKeys
-from .leader_client import LeaderClient
-from .oidc import web_providers
-from .poller import PRUNE_LOCK, PollerConfig, poll_due_leaders, prune
-
-SHUTDOWN_GRACE_SECONDS = 10
-
-
-def _graph(settings: Settings) -> GraphClient | None:
-    if settings.entra_client_id and settings.entra_tenant_id and settings.entra_client_secret:
-        return MicrosoftGraph(
-            settings.entra_tenant_id, settings.entra_client_id, settings.entra_client_secret
-        )
-    return None
-
-
-def _google_groups(settings: Settings) -> GoogleGroupsClient | None:
-    key = settings.google_service_account_key()
-    return GoogleCloudIdentity(key) if key is not None else None
-
-
-def create_app(
-    settings: Settings,
-    *,
-    background: bool = True,
-    fetch: Fetch | None = None,
-    idp_transport: httpx.AsyncBaseTransport | None = None,
-    graph: GraphClient | None = None,
-    google_groups: GoogleGroupsClient | None = None,
-    leader_transport: httpx.AsyncBaseTransport | None = None,
-) -> FastAPI:
-    """`fetch`, `idp_transport`, `graph`, `google_groups` and `leader_transport` replace the
-    identity providers, directories and leaders in tests."""
-    engine = make_engine(settings.database_url.get_secret_value())
-    sessionmaker = make_sessionmaker(engine)
     keys = ConsoleKeys(settings.key_bytes())
     leader_client = LeaderClient(transport=leader_transport)
     poller_config = PollerConfig.from_settings(settings)
@@ -1540,38 +1499,11 @@ def create_app(
             finally:
                 await leader_client.aclose()
                 await engine.dispose()
-
-    app = FastAPI(
-        title="SwarmScribe console",
-        lifespan=lifespan,
-        docs_url=None,
-        redoc_url=None,
-        openapi_url=None,
-    )
-    providers = web_providers(settings)
-    app.state.settings = settings
-    app.state.engine = engine
-    app.state.sessionmaker = sessionmaker
-    app.state.keys = keys
-    app.state.leader_client = leader_client
-    app.state.poller_config = poller_config
-    app.state.web_providers = providers
-    app.state.verifier = TokenVerifier(
-        [provider.verification for provider in providers.values()], fetch=fetch or http_fetch
-    )
-    app.state.idp_transport = idp_transport
-    app.state.graph = graph if graph is not None else _graph(settings)
-    app.state.google_groups = (
-        google_groups if google_groups is not None else _google_groups(settings)
-    )
-    api_errors.install(app)
-    app.add_middleware(BodyLimit)
-    app.add_middleware(SecurityHeaders)  # outermost: also covers BodyLimit's 413
-    app.include_router(auth_api.router)
-    app.include_router(session_api.router)
-    app.include_router(admin_api.router)
-    return app
 ```
+
+   with `SHUTDOWN_GRACE_SECONDS = 10` at module level.
+4. Reuse `keys` for `app.state.keys` (C2a built `ConsoleKeys(...)` inline: replace that line with `app.state.keys = keys`), and add `app.state.leader_client = leader_client` and `app.state.poller_config = poller_config` next to the other `app.state` lines.
+5. Leave `api_errors.install(app)`, `app.add_middleware(BodyLimit)`, the three `include_router` calls and the final `assert_guarded(app.routes)` exactly as they are.
 
 - [ ] **Step 7: Run the tests to verify they pass**
 
@@ -2129,7 +2061,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Test: `packages/console/tests/test_proxy.py`
 
 **Interfaces:**
-- Consumes: `api.fleet.leader_for` (Task 3); `leader_client.*` (Task 1); `poller.mark_revoked` (Task 2); `errors.*` (C2a Task 1, Task 1); `audit.record_apart` (C2a Task 2); `api.deps.Person`, `Session`, `keys_of`, `settings_of` (C2a Task 4); `swarmscribe_leader.auth.roles.at_least`.
+- Consumes: `api.fleet.leader_for` (Task 3); `leader_client.*` (Task 1); `poller.mark_revoked` (Task 2); `errors.*` (C2a Task 1, Task 1); `audit.record_apart` (C2a Task 2); `api.deps.Person`, `Session`, `keys_of`, `settings_of` (C2a Task 4); `leaders.sealing_context(name, base_url)` (C2a Task 6; `ConsoleKeys.open_credential(context, sealed)` takes that context, not the leader's name); `swarmscribe_leader.auth.roles.at_least`.
 - Produces:
   - `proxy.ProxyRoute(method, template, role, action, query=(), body=False)` with `pattern` and `leader_path(params) -> str`; `proxy.ROUTES`; `proxy.match_route(method, rest) -> tuple[ProxyRoute, dict[str, str]] | None`; `proxy.target_of(params) -> str | None`.
   - Route `GET|POST /api/leaders/{name}/{rest:path}`.
@@ -2708,6 +2640,7 @@ from ..leader_client import (
     is_revoked,
     person_actor,
 )
+from ..leaders import sealing_context
 from ..poller import mark_revoked
 from ..proxy import ProxyRoute, match_route, target_of
 from ..sessions import SignedIn
@@ -2832,7 +2765,9 @@ async def proxied(
         await refuse(exc)
     sealed = leader.credential
     try:
-        credential = keys_of(request).open_credential(leader.name, sealed)
+        # Bound to the name and URL, from the same row as `sealed` (C2a `sealing_context`).
+        context = sealing_context(leader.name, leader.base_url)
+        credential = keys_of(request).open_credential(context, sealed)
     except CredentialUnreadable:
         await refuse(
             CredentialUnreadableError(
@@ -3119,6 +3054,12 @@ def test_serve_runs_without_an_access_log_and_with_quiet_http_clients(
     assert loggers["httpx"]["level"] == loggers["httpcore"]["level"] == "WARNING"
 ```
 
+Extend the sweep with three cases C2a's final review found and left open (the secrets list above already covers the credentials, cookies, codes and tokens):
+
+- **Field-name echo.** A request that sends an unknown field (`{"SECRETKEY-xyz": 1}`) to a proxy or admin route is refused `422` with fixed text, and neither the key nor any value appears in the response, the logs or the audit rows. C2a's `invalid_summary` renders fixed text by error type and drops any field path that is not one of the console's own lowercase field names; the new Task 4 request models must stay `extra="forbid"` with no `dict[str, <typed>]` field whose errors would carry a client key.
+- **Error logging.** An unhandled exception is logged once by `ContainErrors`: type, route and traceback frames (`traceback.format_tb`), never the exception's text. Assert it for a failure raised inside the proxy and inside a poll step: a log line with the frames and none of the plaintext token, credential or leader reply body.
+- **Statement parameters.** The console's engine is created with `hide_parameters=True` (C2a does this in `create_app`, `_schema_problem` and the `admins` command). Add a test that enables `sqlalchemy.engine` at INFO plus a failing statement and checks the sign-in nonce and PKCE verifier (the `login_attempts` insert's parameters) are in no log record. Keep `hide_parameters=True` on any engine this plan creates.
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `python -m uv run pytest packages/console/tests/test_static_and_logs.py -v`
@@ -3175,17 +3116,19 @@ class SpaFiles(StaticFiles):
             return await super().get_response("index.html", scope)
 ```
 
-In `packages/console/src/swarmscribe_console/app.py`, add `from .static import SpaFiles` to the imports and, after the last `app.include_router(...)`, add:
+In `packages/console/src/swarmscribe_console/app.py`, add `from .static import SpaFiles` to the imports and, after the last `app.include_router(...)` and **before** the existing `assert_guarded(app.routes)` (which stays the last statement), add:
 
 ```python
     if settings.static_dir is not None:
-        # Last, so every API and sign-in route is matched first.
+        # Last of the routes, so every API and sign-in route is matched first.
         app.mount("/", SpaFiles(directory=settings.static_dir, html=True), name="web")
 ```
 
+Never mount anything under `/` that contains `/api` routes. `assert_guarded` cannot prove what a mounted sub-app guards, so it refuses a root `Mount("/")` holding an `/api` route and the app will not build. API routes go in routers included on the app itself.
+
 - [ ] **Step 4: Document leaders, rotation, the poller and the proxy**
 
-In `README.md`, at the end of the "Run the fleet console (development)" section, add:
+In `README.md`, add this as a `###` subsection of "Run the fleet console (development)", after C2a's "Console administrators and grants" subsection and **before** its "Deployment note: egress". Merge it with what C2a wrote; do not repeat C2a's egress rules or registry rules (`credential_required`, `use_rotate`):
 
 ````markdown
 ### Leaders in the console
@@ -3201,10 +3144,14 @@ so the cap is the only bound on what a leaked credential can do. Use `admin`
 only if people must create join tokens or locations from the console.
 
 A console administrator then registers the leader (`POST /api/admin/leaders`
-with its name, `https://` URL, labels and the credential). Leader URLs must be
-https; loopback, link-local (cloud metadata) and localhost addresses are
-refused; private addresses are allowed. The credential is sealed with
-`SWARMSCRIBE_CONSOLE_KEY` and never shown again.
+with its name, `https://` URL, labels and the credential). Which URLs are
+refused, and the egress policy to apply at the host, are in "Deployment note:
+egress" above and are not repeated here. The credential is sealed with
+`SWARMSCRIBE_CONSOLE_KEY`, bound to the leader's name and URL, and never shown
+again. Changing a leader's `base_url` needs the credential in the same request
+(the sealed one is bound to the old URL); the change resets the leader's poll
+health (failure count, last error, last poll time) and clears a revoked mark,
+exactly as a rotation does.
 
 **Rotation.** Console names are never reused on a leader. Create a new one
 (`console create --name fleet-2 …`), replace the credential in the console in

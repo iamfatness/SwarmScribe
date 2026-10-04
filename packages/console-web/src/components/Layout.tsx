@@ -51,9 +51,19 @@ function IdleNotice() {
   );
 }
 
-export function Layout({ nav, children }: { nav: NavItem[]; children: ReactNode }) {
+export function Layout({
+  nav,
+  pageOf = (pathname) => pathname,
+  children,
+}: {
+  nav: NavItem[];
+  /** Names the page a path belongs to; focus moves only when this changes (not on a tab switch). */
+  pageOf?: (pathname: string) => string;
+  children: ReactNode;
+}) {
   const { session, signOut } = useSession();
   const { pathname } = useLocation();
+  const page = pageOf(pathname);
   const main = useRef<HTMLElement>(null);
   const first = useRef(true);
 
@@ -73,7 +83,7 @@ export function Layout({ nav, children }: { nav: NavItem[]; children: ReactNode 
     } else {
       main.current?.focus();
     }
-  }, [pathname]);
+  }, [page]);
 
   return (
     <>

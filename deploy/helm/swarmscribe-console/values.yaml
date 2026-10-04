@@ -1,0 +1,219 @@
+# SwarmScribe fleet console. The three things you must set are `publicUrl`,
+# `secrets.existingSecret` and one of `oidc.entra` / `oidc.google`; with the
+# NetworkPolicy on (the default) also `networkPolicy.egress.postgres.peers`.
+
+# Names. fullnameOverride replaces <release>-swarmscribe-console as the base of every object
+# name; either way the base is cut to 55 characters, so that -migrate and -sign-in still fit
+# the 63 a Service name or a label value may have.
+nameOverride: ""
+fullnameOverride: ""
+
+# Console replicas (at least 1). Each replica runs its own poller (advisory locks keep one poll
+# per leader) and opens up to 2 * POLL_CONCURRENCY + 2 + 10 Postgres connections:
+# 28 at the default concurrency of 8. Size the database's max_connections for
+# replicaCount times that, plus one for the migration job.
+replicaCount: 2
+
+# The image is not published: there is no working default. Build it and load it into
+# the cluster (README, "The image"), then name it here. Both are required.
+image:
+  repository: ""
+  tag: ""
+  # "sha256:..." pins the image by digest and wins over the tag.
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# The console's https origin, exactly https://<lowercase DNS hostname>, e.g.
+# https://console.example.org: no port, path, query, fragment, user, uppercase or IP address.
+# It is SWARMSCRIBE_CONSOLE_PUBLIC_URL, the Ingress host, and the origin the
+# identity provider redirects back to (<publicUrl>/auth/callback).
+publicUrl: ""
+
+# The chart never creates a Secret: values files and Helm's release history are
+# not a place for the console key. Create one Secret yourself and name it here.
+secrets:
+  existingSecret: ""
+  keys:
+    # SWARMSCRIBE_CONSOLE_DATABASE_URL: the console's own Postgres (14 or later),
+    # e.g. postgresql://console:...@db.internal:5432/swarmscribe_console
+    databaseUrl: database-url
+    # SWARMSCRIBE_CONSOLE_KEY: 32 random bytes, URL-safe base64
+    # (python -c "import secrets; print(secrets.token_urlsafe(32))").
+    # It seals every leader credential; losing it means re-entering them all.
+    consoleKey: console-key
+    # Read only when oidc.entra.enabled.
+    entraClientSecret: entra-client-secret
+    # Read only when oidc.google.enabled.
+    googleClientSecret: google-client-secret
+    # Read only when oidc.google.serviceAccount: the service account's JSON key.
+    googleServiceAccount: google-service-account
+
+# Sign-in. Enable Entra ID, Google, or both.
+oidc:
+  entra:
+    enabled: false
+    # The tenant's GUID (not its domain name).
+    tenantId: ""
+    clientId: ""
+  google:
+    enabled: false
+    clientId: ""
+    # Optional: only this Google Workspace domain may sign in.
+    hostedDomain: ""
+    # true reads the Google Groups service-account key from the Secret.
+    serviceAccount: false
+
+# Other non-secret settings, without the SWARMSCRIBE_CONSOLE_ prefix, for example
+#   POLL_CONCURRENCY: "8"
+#   LOGIN_ATTEMPTS_MAX: "10000"
+#   SESSION_IDLE_SECONDS: "3600"
+# Names are upper case (^[A-Z][A-Z0-9_]*$). The render refuses a secret (DATABASE_URL, KEY,
+# *_SECRET, GOOGLE_SERVICE_ACCOUNT, in any letter case) and a name the chart sets itself
+# (PUBLIC_URL, PORT, LEADER_CA_FILE and the oidc ones).
+settings: {}
+
+# Leaders whose TLS certificates come from a private CA: a ConfigMap you created
+# that holds the CA certificates as PEM. They are trusted in addition to the
+# public roots, and only for calls to leaders (SWARMSCRIBE_CONSOLE_LEADER_CA_FILE).
+leaderCa:
+  existingConfigMap: ""
+  key: ca.pem
+
+# Extra environment for the console container, as a list of {name, value|valueFrom}.
+# HTTPS_PROXY here applies to identity-provider calls only: calls to leaders never
+# use a proxy. A SWARMSCRIBE_CONSOLE_ name that the chart owns or reads from the Secret
+# (DATABASE_URL, KEY, *_SECRET, PUBLIC_URL, ...) is refused, in any letter case.
+extraEnv: []
+
+# The port the console listens on in the pod: one value for the container port, the
+# --port argument and SWARMSCRIBE_CONSOLE_PORT (the NetworkPolicy and Service follow it).
+port: 8080
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  className: ""
+  annotations: {}
+  tls:
+    # Required when the Ingress is enabled: the console is served over TLS only.
+    # cert-manager can create it from an annotation above.
+    secretName: ""
+  # The paths sent to the console. Never a Prefix "/": it would also publish /healthz and
+  # /readyz (the probes; /readyz tells an anonymous caller whether the database is up).
+  # These are the web app's routes (packages/console-web/src/App.tsx), its asset folder and
+  # the backend's /api and /auth. A new web app route needs a new entry here.
+  paths:
+    - {path: /, pathType: Exact}
+    - {path: /leaders, pathType: Prefix}
+    - {path: /admin, pathType: Prefix}
+    - {path: /sign-in, pathType: Prefix}
+    - {path: /assets, pathType: Prefix}
+    - {path: /api, pathType: Prefix}
+    - {path: /auth, pathType: Prefix}
+  # A second Ingress for exactly /auth/login, so that a per-client rate limit can
+  # be put on starting a sign-in without limiting the rest of the console. The
+  # annotations are your ingress controller's own (see the README for examples).
+  # The limit only applies on a controller that serves a second Ingress for the same host
+  # as part of one site (ingress-nginx and Traefik do). On GKE Ingress, and on the AWS Load
+  # Balancer Controller without a shared group (alb.ingress.kubernetes.io/group.name), each
+  # Ingress gets its own load balancer: the host's DNS reaches only one of them and the rate
+  # limit silently never applies.
+  signIn:
+    enabled: false
+    annotations: {}
+
+# The schema migration: a Job run as a pre-install and pre-upgrade hook, before
+# any console pod of the new version starts.
+migrate:
+  enabled: true
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+
+podDisruptionBudget:
+  # Rendered only when replicaCount is above 1. Unready pods stay evictable
+  # (unhealthyPodEvictionPolicy: AlwaysAllow), so a database outage cannot stall a drain.
+  enabled: true
+  maxUnavailable: 1
+
+networkPolicy:
+  # What a NetworkPolicy cannot do:
+  #  - It cannot match names. It allows by address and port only, so leaders and identity
+  #    providers share one rule (TCP 443 to anywhere except the refused ranges). The host
+  #    names the console refuses (metadata.google.internal, ...) are blocked through the
+  #    addresses they resolve to, all in 169.254.0.0/16 or listed below.
+  #  - It needs a network plugin that enforces it (Calico, Cilium, ...). Without one this
+  #    object is accepted and does nothing.
+  #  - It cannot block loopback inside the pod, and on a first install the migration hook
+  #    runs before this policy exists.
+  # It selects every pod of the release (console and migration Job), allows ingress only on
+  # `port`, and egress to DNS, Postgres and HTTPS.
+  enabled: true
+  ingress:
+    # Peers allowed to reach the console's port (NetworkPolicyPeer objects), for
+    # example your ingress controller's namespace. Empty: any source.
+    from: []
+  egress:
+    dns:
+      # Where the pods resolve names. Add an ipBlock for NodeLocal DNSCache
+      # (169.254.20.10/32), which the link-local block below would otherwise cut off.
+      peers:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+    postgres:
+      port: 5432
+      # Required: where the console's Postgres is (NetworkPolicyPeer objects), e.g.
+      #   - ipBlock: {cidr: 10.20.30.40/32}
+      # Peers are matched AFTER Service address translation. For a Postgres inside the
+      # cluster use a podSelector (with a namespaceSelector for another namespace), or the
+      # pod CIDR, and the pod's own port: never the Service's ClusterIP, which no packet is
+      # addressed to by then. The migration hook runs under the PREVIOUS release's policy.
+      peers: []
+    https:
+      # Leaders and identity providers. NetworkPolicy cannot name a DNS host, so
+      # the default is "anywhere on these ports except the refused ranges".
+      # Narrow `cidrs` to your leaders' networks if identity-provider calls go
+      # through a proxy (extraEnv HTTPS_PROXY); list the proxy under `extra`.
+      ports: [443]
+      cidrs: ["0.0.0.0/0", "::/0"]
+      # More ranges to cut out of 0.0.0.0/0 and ::/0, for example the cluster's
+      # own pod and service ranges when every leader is outside the cluster.
+      extraExcept: []
+    # Extra raw egress rules (NetworkPolicyEgressRule objects).
+    extra: []
+
+serviceAccount:
+  create: true
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+# With two or more replicas and no topologySpreadConstraints of your own, the pods are
+# spread across nodes softly (ScheduleAnyway, so one node still schedules them all). Your own
+# topologySpreadConstraints replace this; false turns it off.
+spreadAcrossNodes: true
+topologySpreadConstraints: []
+terminationGracePeriodSeconds: 30

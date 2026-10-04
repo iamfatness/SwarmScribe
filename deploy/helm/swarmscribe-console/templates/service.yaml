@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "swarmscribe-console.fullname" . }}
+  labels:
+    {{- include "swarmscribe-console.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "swarmscribe-console.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP

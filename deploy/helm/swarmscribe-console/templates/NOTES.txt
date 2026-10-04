@@ -1,0 +1,20 @@
+The SwarmScribe fleet console is at {{ .Values.publicUrl }}
+
+1. Register {{ .Values.publicUrl }}/auth/callback as the redirect URI of the sign-in
+   application(s) at your identity provider.
+
+2. Add the first console administrator (once). Entra ID sign-in takes a group's object id;
+   Google sign-in takes an email or a Workspace domain (`admins add email you@example.org`);
+   an Entra-only console refuses `email`, so never use it there:
+
+   kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "swarmscribe-console.fullname" . }} -- \
+     swarmscribe-console admins add entra_group <group-object-id>
+
+3. On each leader, create a credential for this console, then register the leader here:
+
+   swarmscribe-admin console create --name fleet --max-role operator
+{{- if .Values.networkPolicy.enabled }}
+
+A NetworkPolicy limits what the console can reach. It needs a network plugin that enforces
+NetworkPolicy; check that yours does.
+{{- end }}

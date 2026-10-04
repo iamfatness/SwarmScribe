@@ -1,0 +1,37 @@
+# Values the chart is linted and rendered with, locally and in CI. Nothing here is a real secret.
+publicUrl: https://console.example.org
+secrets:
+  existingSecret: swarmscribe-console
+oidc:
+  entra:
+    enabled: true
+    tenantId: 0f0e0d0c-0b0a-4908-8706-050403020100
+    clientId: 6d3a6b52-1c2e-4a8f-9d61-2f6a4c0b7e11
+  google:
+    enabled: true
+    clientId: console.apps.googleusercontent.com
+    hostedDomain: example.org
+    serviceAccount: true
+image:
+  repository: swarmscribe-console
+  tag: local
+settings:
+  POLL_CONCURRENCY: "8"
+leaderCa:
+  existingConfigMap: leader-ca
+ingress:
+  className: traefik
+  tls:
+    secretName: console-tls
+  signIn:
+    enabled: true
+    annotations:
+      traefik.ingress.kubernetes.io/router.middlewares: fleet-sign-in-limit@kubernetescrd
+networkPolicy:
+  egress:
+    postgres:
+      peers:
+        - ipBlock:
+            cidr: 10.20.30.40/32
+    https:
+      extraExcept: ["10.96.0.0/12", "fd00:10:96::/112"]

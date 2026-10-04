@@ -139,3 +139,32 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose -f e2e/console-compose/docker-compose.yml --profile tools down -v
+
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install Helm and kubeconform, checked against pinned SHA-256 sums
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+          echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/bin" --strip-components=1 linux-amd64/helm
+          curl -fsSL -o "$RUNNER_TEMP/kubeconform.tgz" https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz
+          echo "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883  $RUNNER_TEMP/kubeconform.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/kubeconform.tgz" -C "$RUNNER_TEMP/bin" kubeconform
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Lint the console chart
+        run: >-
+          helm lint deploy/helm/swarmscribe-console
+          -f deploy/helm/swarmscribe-console/ci/test-values.yaml --strict
+      - name: Validate the rendered manifests against the Kubernetes schemas
+        run: |
+          helm template console deploy/helm/swarmscribe-console --namespace fleet \
+            -f deploy/helm/swarmscribe-console/ci/test-values.yaml > "$RUNNER_TEMP/rendered.yaml"
+          kubeconform -strict -summary -kubernetes-version 1.33.0 "$RUNNER_TEMP/rendered.yaml"
+      - name: Check what the chart renders
+        run: >-
+          uv run --no-project --with pyyaml
+          python deploy/helm/swarmscribe-console/ci/check_render.py

@@ -20,6 +20,7 @@ from .device_flow import ProviderConfig, SignInError, device_sign_in
 LEADER_ENV = "SWARMSCRIBE_LEADER_URL"
 JOB_STATES = ("queued", "leased", "completed", "failed", "cancelled")
 FOLLOWER_STATES = ("active", "draining", "revoked", "gone")
+ROLES = ("viewer", "operator", "admin")
 _DURATION = re.compile(r"(\d+)([smhd])")
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
@@ -119,6 +120,21 @@ def build_parser() -> argparse.ArgumentParser:
     tokens.add_parser("list")
     tokens.add_parser("revoke").add_argument("token_id")
 
+    consoles = commands.add_parser(
+        "console", help="fleet console credentials (administrators, signed in as a person)"
+    ).add_subparsers(dest="action", required=True)
+    console_create = consoles.add_parser(
+        "create", help="a new console credential with a role cap (shown once)"
+    )
+    console_create.add_argument("--name", required=True, help="e.g. fleet")
+    console_create.add_argument(
+        "--max-role", required=True, choices=ROLES, help="the most this console may do"
+    )
+    consoles.add_parser("list")
+    consoles.add_parser("revoke", help="refuse the console from its next request").add_argument(
+        "name"
+    )
+
     consent = commands.add_parser("consent", help="consent overview").add_subparsers(
         dest="action", required=True
     )
@@ -192,6 +208,15 @@ def print_status(data: dict[str, Any], out: TextIO) -> None:
 def print_token(data: dict[str, Any], out: TextIO) -> None:
     print(f"join token (shown once; keep it safe): {_cell(data['token'])}", file=out)
     print_fields({name: value for name, value in data.items() if name != "token"}, out)
+
+
+def print_console_credential(data: dict[str, Any], out: TextIO) -> None:
+    print(
+        f"console credential (store this now; it will not be shown again): "
+        f"{_cell(data['credential'])}",
+        file=out,
+    )
+    print_fields({name: value for name, value in data.items() if name != "credential"}, out)
 
 
 def print_consent(data: dict[str, Any], out: TextIO) -> None:
@@ -303,6 +328,14 @@ async def dispatch(args: argparse.Namespace, client: LeaderClient) -> tuple[Any,
             columns = ("id", "pool", "uses", "max_uses", "revoked", "expires_at", "created_by")
             return await get("/v1/admin/tokens"), table(columns)
         return await post(f"/v1/admin/tokens/{_seg(args.token_id)}/revoke"), print_fields
+    if command == "console":
+        if action == "create":
+            body = {"name": args.name, "max_role": args.max_role}
+            return await post("/v1/admin/consoles", body=body), print_console_credential
+        if action == "list":
+            columns = ("name", "max_role", "revoked", "revoked_at", "created_by", "created_at")
+            return await get("/v1/admin/consoles"), table(columns)
+        return await post(f"/v1/admin/consoles/{_seg(args.name)}/revoke"), print_fields
     if command == "consent":
         params = {"limit": args.limit}
         if args.location:

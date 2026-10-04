@@ -10,7 +10,13 @@ from swarmscribe_leader.admin_cli.client import REFRESH_MARGIN_SECONDS, CliError
 from swarmscribe_leader.admin_cli.credentials import CredentialStore, SignIn
 from swarmscribe_leader.admin_cli.main import amain, parse_duration
 from swarmscribe_leader.auth.secrets import hash_secret
-from swarmscribe_leader.db.models import Follower, Job, JoinToken, StorageLocation
+from swarmscribe_leader.db.models import (
+    ConsoleCredential,
+    Follower,
+    Job,
+    JoinToken,
+    StorageLocation,
+)
 
 LEADER = "http://localhost"
 ENTRA_SCOPE = "openid profile email offline_access"
@@ -727,3 +733,113 @@ async def test_locations_add_labels_must_be_two_names(cli, store, idp, tmp_path,
             labels,
         )
     assert excinfo.value.code == 2
+
+
+# --- console credentials ----------------------------------------------------------------
+
+
+async def test_console_create_shows_the_credential_once_and_list_never_does(
+    cli, store, idp, sessionmaker
+):
+    sign_in_as(store, idp, "admin")
+    code, out, err = await cli("console", "create", "--name", "fleet", "--max-role", "operator")
+    assert code == 0, err
+    credential = out.splitlines()[0].rsplit(" ", 1)[1]
+    assert out.count(credential) == 1
+    assert credential not in err
+    async with sessionmaker() as session:
+        row = (await session.scalars(select(ConsoleCredential))).one()
+    assert (row.name, row.max_role, row.credential_hash) == (
+        "fleet",
+        "operator",
+        hash_secret(credential),
+    )
+    code, listed, _err = await cli("console", "list")
+    assert code == 0
+    assert "fleet" in listed and "operator" in listed
+    assert credential not in listed
+    code, revoked, _err = await cli("console", "revoke", "fleet")
+    assert code == 0
+    assert "revoked: yes" in revoked
+    async with sessionmaker() as session:
+        assert (await session.get(ConsoleCredential, row.id)).revoked_at is not None
+
+
+async def test_console_create_of_a_taken_name_is_a_one_line_error(cli, store, idp):
+    sign_in_as(store, idp, "admin")
+    assert (await cli("console", "create", "--name", "fleet", "--max-role", "viewer"))[0] == 0
+    code, out, err = await cli("console", "create", "--name", "FLEET", "--max-role", "admin")
+    assert (code, out) == (1, "")
+    assert "already exists" in err and "(409 exists)" in err
+    assert err.count("\n") == 1
+
+
+async def test_console_commands_need_the_admin_role(cli, store, idp):
+    token = sign_in_as(store, idp, "operator")
+    for argv in (
+        ("console", "list"),
+        ("console", "create", "--name", "fleet", "--max-role", "viewer"),
+        ("console", "revoke", "fleet"),
+    ):
+        code, out, err = await cli(*argv)
+        assert (code, out) == (1, ""), argv
+        assert "this needs the admin role" in err
+        assert token not in err
+
+
+async def test_console_revoke_of_an_unknown_name_is_an_error(cli, store, idp):
+    sign_in_as(store, idp, "admin")
+    code, _out, err = await cli("console", "revoke", "nowhere")
+    assert code == 1
+    assert "(404 not_found)" in err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["console", "create", "--name", "fleet"],
+        ["console", "create", "--max-role", "viewer"],
+        ["console", "create", "--name", "fleet", "--max-role", "root"],
+        ["console", "create", "--name", "fleet", "--max-role", "Admin"],
+        ["console", "revoke"],
+        ["console"],
+    ],
+)
+async def test_console_usage_errors_exit_2(cli, store, idp, argv):
+    sign_in_as(store, idp, "admin")
+    with pytest.raises(SystemExit) as excinfo:
+        await cli(*argv)
+    assert excinfo.value.code == 2
+
+
+async def test_a_console_credential_answer_never_reaches_the_terminal_with_control_characters(
+    store, idp
+):
+    sign_in_as(store, idp, "admin")
+    answer = {"id": "c1", "name": f"fleet{CONTROL}", "max_role": CONTROL, "credential": CONTROL}
+    code, out, err = await run_cli(
+        store,
+        lambda request: httpx.Response(201, json=answer),
+        "console",
+        "create",
+        "--name",
+        "fleet",
+        "--max-role",
+        "viewer",
+    )
+    assert code == 0, err
+    assert not has_control_characters(out), repr(out)
+
+
+@pytest.mark.parametrize(
+    "argv, answer",
+    [
+        (["console", "create", "--name", "fleet", "--max-role", "viewer"], {"id": "c1"}),
+        (["console", "list"], {"not": "rows"}),
+    ],
+)
+async def test_a_console_answer_of_the_wrong_shape_is_a_one_line_error(store, idp, argv, answer):
+    sign_in_as(store, idp, "admin")
+    code, out, err = await run_cli(store, lambda request: httpx.Response(200, json=answer), *argv)
+    assert (code, out) == (1, "")
+    assert err.startswith("error: ") and err.count("\n") == 1, err

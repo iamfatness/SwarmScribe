@@ -434,6 +434,75 @@
     "title": "HeartbeatResponse",
     "type": "object"
   },
+  "JobLinks": {
+    "$defs": {
+      "Link": {
+        "description": "A short-lived, single-object URL. Identical for every storage backend.",
+        "properties": {
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Headers",
+            "type": "object"
+          },
+          "method": {
+            "enum": [
+              "GET",
+              "PUT"
+            ],
+            "title": "Method",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "method"
+        ],
+        "title": "Link",
+        "type": "object"
+      },
+      "UploadUrls": {
+        "properties": {
+          "segments_json": {
+            "$ref": "#/$defs/Link"
+          },
+          "srt": {
+            "$ref": "#/$defs/Link"
+          },
+          "txt": {
+            "$ref": "#/$defs/Link"
+          }
+        },
+        "required": [
+          "txt",
+          "srt",
+          "segments_json"
+        ],
+        "title": "UploadUrls",
+        "type": "object"
+      }
+    },
+    "description": "Fresh links for a job, given to the follower that holds its lease.",
+    "properties": {
+      "download_url": {
+        "$ref": "#/$defs/Link"
+      },
+      "upload_urls": {
+        "$ref": "#/$defs/UploadUrls"
+      }
+    },
+    "required": [
+      "download_url",
+      "upload_urls"
+    ],
+    "title": "JobLinks",
+    "type": "object"
+  },
   "JobSettings": {
     "description": "How a follower must transcribe. The Literal fields are fixed behaviour.",
     "properties": {
@@ -545,6 +614,19 @@
       "method"
     ],
     "title": "Link",
+    "type": "object"
+  },
+  "LinksRequest": {
+    "properties": {
+      "lease_id": {
+        "title": "Lease Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "lease_id"
+    ],
+    "title": "LinksRequest",
     "type": "object"
   },
   "OutputChecksums": {

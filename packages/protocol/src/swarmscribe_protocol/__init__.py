@@ -1,5 +1,6 @@
 from .base import Sha256
 from .messages import (
+    DIRECTIVE_HEADER,
     Capabilities,
     ClaimResponse,
     Directive,
@@ -8,7 +9,9 @@ from .messages import (
     FailureCode,
     HeartbeatRequest,
     HeartbeatResponse,
+    JobLinks,
     Link,
+    LinksRequest,
     OutputChecksums,
     RegisterRequest,
     RegisterResponse,
@@ -35,6 +38,7 @@ PROTOCOL_VERSION = 1
 
 __all__ = [
     "DEFAULT_CHANNEL_LABELS",
+    "DIRECTIVE_HEADER",
     "MAX_CHANNEL_LABEL_LENGTH",
     "MAX_TEMPERATURE",
     "PROTOCOL_VERSION",
@@ -51,8 +55,10 @@ __all__ = [
     "FailureCode",
     "HeartbeatRequest",
     "HeartbeatResponse",
+    "JobLinks",
     "JobSettings",
     "Link",
+    "LinksRequest",
     "OutputChecksums",
     "RegisterRequest",
     "RegisterResponse",

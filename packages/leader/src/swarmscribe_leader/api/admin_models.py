@@ -17,11 +17,12 @@ NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
 
 
 class WhoAmI(BaseModel):
-    provider: str
-    issuer: str
-    subject: str
+    provider: str  # "entra", "google", or "console" for a console's delegated request
+    issuer: str | None  # None only for a console's poller
+    subject: str | None
     email: str | None
     role: str
+    console: str | None = None
 
 
 class LoginProvider(BaseModel):
@@ -54,10 +55,20 @@ class LocationStatus(BaseModel):
     consented: int
 
 
+class PoolFollowers(BaseModel):
+    pool: str
+    active: int = 0
+    draining: int = 0
+    revoked: int = 0
+    gone: int = 0
+
+
 class Status(BaseModel):
     jobs: dict[str, int]
     pools: list[PoolQueue]
     followers: dict[str, int]
+    # Added for the fleet console's poller; additive, so older clients ignore it.
+    follower_pools: list[PoolFollowers] = Field(default_factory=list)
     completed_last_hour: int
     failed_attempts_last_day: int
     locations: list[LocationStatus]
@@ -214,3 +225,31 @@ class FollowerRevoked(BaseModel):
     id: str
     state: str
     released: int
+
+
+ConsoleRole = Literal["viewer", "operator", "admin"]
+
+
+class ConsoleIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=NAME_PATTERN)
+    max_role: ConsoleRole  # no default: the cap is the administrator's decision
+
+
+class ConsoleCreated(BaseModel):
+    id: str
+    name: str
+    max_role: str
+    credential: str
+
+
+class ConsoleOut(BaseModel):
+    id: str
+    name: str
+    max_role: str
+    revoked: bool
+    revoked_at: datetime | None
+    revoked_by: str | None
+    created_by: str
+    created_at: datetime

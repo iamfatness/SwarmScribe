@@ -21,7 +21,14 @@ from swarmscribe_leader.auth.secrets import hash_secret, new_secret
 from swarmscribe_leader.clock import utcnow
 from swarmscribe_leader.config import ROLES, Settings
 from swarmscribe_leader.db.migrate import upgrade
-from swarmscribe_leader.db.models import Base, Follower, Job, Recording, StorageLocation
+from swarmscribe_leader.db.models import (
+    Base,
+    ConsoleCredential,
+    Follower,
+    Job,
+    Recording,
+    StorageLocation,
+)
 from swarmscribe_leader.db.session import make_engine, make_sessionmaker
 
 TEST_DATABASE = "swarmscribe_test"
@@ -157,6 +164,22 @@ class Factory:
         )
         await self._save(follower)
         return follower, credential
+
+    async def console(
+        self, *, name=None, max_role="admin", revoked=False
+    ) -> tuple[ConsoleCredential, str]:
+        credential = new_secret()
+        console = ConsoleCredential(
+            id=uuid.uuid4(),
+            name=name or f"console-{uuid.uuid4().hex[:8]}",
+            credential_hash=hash_secret(credential),
+            max_role=max_role,
+            created_by="test",
+            revoked_at=utcnow() if revoked else None,
+            revoked_by="test" if revoked else None,
+        )
+        await self._save(console)
+        return console, credential
 
 
 @pytest.fixture

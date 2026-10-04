@@ -11,7 +11,7 @@ from alembic.migration import MigrationContext
 from sqlalchemy import CheckConstraint, delete, select, text
 from sqlalchemy.exc import IntegrityError
 from swarmscribe_leader.db.migrate import current_revision, head_revision
-from swarmscribe_leader.db.models import Base, SettingsProfile, StorageLocation
+from swarmscribe_leader.db.models import Base, ConsoleCredential, SettingsProfile, StorageLocation
 
 
 async def test_migrations_produce_exactly_the_models(engine):
@@ -23,8 +23,8 @@ async def test_migrations_produce_exactly_the_models(engine):
 
 
 async def test_database_is_at_the_head_revision(engine):
-    assert head_revision() == "0004"
-    assert await current_revision(engine) == "0004"
+    assert head_revision() == "0005"
+    assert await current_revision(engine) == "0005"
 
 
 async def test_the_claim_index_serves_priority_descending(engine):
@@ -253,3 +253,103 @@ def test_0004_downgrades_to_0003_and_upgrades_again(database_url):
         )
     finally:
         asyncio.run(_recreate(database_url, name, drop_only=True))
+
+
+async def test_a_console_credential_cannot_have_an_unknown_role_cap(sessionmaker):
+    async with sessionmaker() as session:
+        with pytest.raises(IntegrityError):
+            await session.execute(
+                text(
+                    "insert into console_credentials (id, name, credential_hash, max_role,"
+                    " created_by) values (gen_random_uuid(), 'fleet', repeat('a', 64),"
+                    " 'superuser', 'test')"
+                )
+            )
+        await session.rollback()
+
+
+async def test_the_console_role_cap_check_matches_the_model(engine):
+    (model,) = [
+        c for c in ConsoleCredential.__table__.constraints if isinstance(c, CheckConstraint)
+    ]
+    assert model.name == "ck_console_credentials_max_role"
+    definition = (
+        "select pg_get_constraintdef(oid) from pg_constraint"
+        " where conname = :name and conrelid = '{table}'::regclass"
+    )
+    async with engine.connect() as conn:
+        migrated = await conn.scalar(
+            text(definition.format(table="console_credentials")), {"name": model.name}
+        )
+        await conn.execute(
+            text(
+                "create temp table console_probe (max_role varchar(16),"
+                f" constraint {model.name} check ({model.sqltext.text}))"
+            )
+        )
+        probed = await conn.scalar(
+            text(definition.format(table="console_probe")), {"name": model.name}
+        )
+        await conn.rollback()
+    assert migrated is not None
+    assert probed == migrated
+
+
+MIGRATE_0005_SCRIPT = """
+import asyncio, sys
+import asyncpg
+from alembic import command
+from swarmscribe_leader.db.migrate import alembic_config, upgrade
+url = sys.argv[1]
+
+async def table():
+    conn = await asyncpg.connect(url)
+    try:
+        return await conn.fetchval("select to_regclass('public.console_credentials')::text")
+    finally:
+        await conn.close()
+
+upgrade(url)
+command.downgrade(alembic_config(url), "0004")
+assert asyncio.run(table()) is None, "0005 downgrade left the table"
+command.upgrade(alembic_config(url), "head")
+"""
+
+
+def test_0005_downgrades_to_0004_and_upgrades_again(database_url):
+    # A separate database and process: the shared test database must stay at head.
+    name = "swarmscribe_migrate_roundtrip_0005"
+    url = urlunsplit(urlsplit(database_url)._replace(path="/" + name))
+    asyncio.run(_recreate(database_url, name))
+    try:
+        run = subprocess.run(
+            [sys.executable, "-c", MIGRATE_0005_SCRIPT, url], capture_output=True, timeout=120
+        )
+        assert run.returncode == 0, run.stderr.decode()[-2000:]
+
+        async def state() -> tuple[str, str | None]:
+            conn = await asyncpg.connect(url)
+            try:
+                revision = await conn.fetchval("select version_num from alembic_version")
+                table = await conn.fetchval(
+                    "select to_regclass('public.console_credentials')::text"
+                )
+                return revision, table
+            finally:
+                await conn.close()
+
+        assert asyncio.run(state()) == (head_revision(), "console_credentials")
+    finally:
+        asyncio.run(_recreate(database_url, name, drop_only=True))
+
+
+async def test_console_names_are_unique_ignoring_case_in_the_database(sessionmaker):
+    insert = (
+        "insert into console_credentials (id, name, credential_hash, max_role, created_by)"
+        " values (gen_random_uuid(), '{name}', repeat('{fill}', 64), 'viewer', 'test')"
+    )
+    async with sessionmaker() as session:
+        await session.execute(text(insert.format(name="fleet", fill="a")))
+        with pytest.raises(IntegrityError):
+            await session.execute(text(insert.format(name="FLEET", fill="b")))
+        await session.rollback()

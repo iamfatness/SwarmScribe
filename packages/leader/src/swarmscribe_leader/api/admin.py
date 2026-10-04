@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import audit, reports
-from ..auth import followers
+from ..auth import consoles, followers
 from ..auth.followers import create_join_token
 from ..auth.oidc import login_providers
 from ..clock import utcnow
@@ -23,6 +23,9 @@ from ..jobs import admin as job_admin
 from .admin_auth import Admin, require
 from .admin_models import (
     ConsentReport,
+    ConsoleCreated,
+    ConsoleIn,
+    ConsoleOut,
     FollowerOut,
     FollowerRevoked,
     FollowerState,
@@ -46,12 +49,22 @@ router = APIRouter(prefix="/v1/admin")
 Viewer = Annotated[Admin, Depends(require("viewer"))]
 Operator = Annotated[Admin, Depends(require("operator"))]
 Administrator = Annotated[Admin, Depends(require("admin"))]
+# Console credentials are managed by people only: a console cannot mint or revoke them.
+PersonAdministrator = Annotated[Admin, Depends(require("admin", consoles_allowed=False))]
 Session = Annotated[AsyncSession, Depends(db_session)]
+
+
+# The reads the console's poller makes every 15 seconds. Owner ruling 2026-10-03: these, when
+# successful, write no audit row. Any other read by the poller is audited, so a console cannot
+# read the rest of the system unseen by claiming to be the poller.
+POLLER_UNAUDITED_READS = frozenset({"status.view", "followers.view", "whoami.view"})
 
 
 async def _viewed(
     session: AsyncSession, admin: Admin, action: str, detail: dict[str, Any] | None = None
 ) -> None:
+    if admin.is_poller and action in POLLER_UNAUDITED_READS:
+        return
     audit.record(session, actor=admin.actor, action=action, detail=detail)
     await session.commit()
 
@@ -65,13 +78,13 @@ async def login_config(request: Request) -> LoginConfig:
 @router.get("/whoami", response_model=WhoAmI)
 async def whoami(admin: Viewer, session: Session) -> WhoAmI:
     await _viewed(session, admin, "whoami.view")
-    identity = admin.identity
     return WhoAmI(
-        provider=identity.provider,
-        issuer=identity.issuer,
-        subject=identity.subject,
-        email=identity.email,
+        provider=admin.provider,
+        issuer=admin.issuer,
+        subject=admin.subject,
+        email=admin.email,
         role=admin.role,
+        console=admin.console,
     )
 
 
@@ -240,3 +253,41 @@ async def revoke_token(token_id: uuid.UUID, admin: Administrator, session: Sessi
     view = reports.token_view(token)
     await session.commit()
     return TokenOut.model_validate(view)
+
+
+@router.get("/consoles", response_model=list[ConsoleOut])
+async def list_console_credentials(
+    admin: PersonAdministrator, session: Session
+) -> list[ConsoleOut]:
+    rows = await reports.list_consoles(session)
+    await _viewed(session, admin, "consoles.view")
+    return [ConsoleOut.model_validate(row) for row in rows]
+
+
+@router.post("/consoles", response_model=ConsoleCreated, status_code=201)
+async def create_console_credential(
+    body: ConsoleIn, admin: PersonAdministrator, session: Session
+) -> ConsoleCreated:
+    """The only response that carries a console credential. Nothing logs response bodies."""
+    try:
+        console, credential = await consoles.create_console(
+            session, name=body.name, max_role=body.max_role, actor=admin.actor
+        )
+    except consoles.InvalidConsoleName as exc:
+        # The request model refuses bad names first; this keeps one code if it ever does not.
+        raise consoles.InvalidConsoleName(exc.message, code="invalid_request") from exc
+    await session.commit()
+    return ConsoleCreated(
+        id=str(console.id), name=console.name, max_role=console.max_role, credential=credential
+    )
+
+
+@router.post("/consoles/{name}/revoke", response_model=ConsoleOut)
+async def revoke_console_credential(
+    name: str, admin: PersonAdministrator, session: Session
+) -> ConsoleOut:
+    """A malformed name is answered 404 like any unknown one (the store decides)."""
+    console = await consoles.revoke_console(session, name, now=utcnow(), actor=admin.actor)
+    view = reports.console_view(console)
+    await session.commit()
+    return ConsoleOut.model_validate(view)

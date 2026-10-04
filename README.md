@@ -109,11 +109,12 @@ configured at once). Each person gets a role; roles are cumulative:
 |---|---|
 | viewer | `status`, `whoami`, `locations list`, `jobs list`, `followers list`, `consent report` |
 | operator | viewer + `ingest`, `jobs retry/cancel/priority`, `followers drain` |
-| admin | operator + `locations add/disable/enable`, `tokens create/list/revoke`, `followers revoke` |
+| admin | operator + `locations add/disable/enable`, `tokens create/list/revoke`, `followers revoke`, `console create/list/revoke` (a signed-in person only, never a console) |
 
 Every admin call is written to the audit log with the person's email, issuer and
-subject. Roles are cached for five minutes, so a change of group membership takes
-up to five minutes to apply.
+subject, except the console poller's successful reads of status, followers and
+whoami (see "Fleet console credentials" below). Roles are cached for five
+minutes, so a change of group membership takes up to five minutes to apply.
 
 **Entra ID.** Register an application with "Allow public client flows" enabled
 and the `groups` claim added to the ID token (security groups). Set
@@ -164,6 +165,9 @@ uv run swarmscribe-admin jobs list --state failed
 uv run swarmscribe-admin jobs retry <job-id>
 uv run swarmscribe-admin followers revoke <follower-id>
 uv run swarmscribe-admin consent report
+uv run swarmscribe-admin console create --name fleet --max-role operator
+uv run swarmscribe-admin console list
+uv run swarmscribe-admin console revoke fleet
 ```
 
 For recordings with one speaker per channel (such as call recordings), add
@@ -199,6 +203,45 @@ filesystems that invent inode numbers per client are not supported.
 `ingest` asks for a scan within a minute; `jobs cancel` is final for that
 version of the recording until `jobs retry`; `followers revoke` releases the
 follower's work at once.
+
+### Fleet console credentials
+
+A fleet console calls the admin API with its own credential, on behalf of the
+person signed in to the console. Only a person who is an admin, signed in with
+`login`, can manage console credentials: `console create`, `console list` and
+`console revoke` are refused for a console credential (`403`) and for any role
+below admin. `console create` takes a required `--max-role`
+(`viewer`, `operator` or `admin`), the most the console may do. The credential
+is printed once, to the terminal, with a "store this now; it will not be shown
+again" line; the leader keeps only its hash, and the CLI never writes it to
+`credentials.json` or any file.
+
+A console's request acts with the lower of the role it asserts for the person
+and that cap, and the same role checks apply as for a signed-in person. Every
+admin call is audited, naming the person
+"`<email> (<issuer> <subject>) via console <name>`", except the console's
+status poller: its successful reads of status, followers and whoami write no
+audit row. Any other poller read is still audited, and so is every refusal by a known
+console; an unknown credential's 401 names no one and is not.
+
+`console revoke` refuses the console (`401`) from its next request. Console
+names are never reused, even after a revocation, and a name already taken is
+refused with `409 exists`: to rotate a credential, create one under a new name,
+give it to the console, then revoke the old one. If the create succeeded but you
+did not capture the credential, revoke that name and create a new one; names are
+never reused. A console credential is
+accepted only on `/v1/admin/*`, never on follower routes.
+
+The console sends `Authorization: Console <credential>`,
+`X-SwarmScribe-Actor: <issuer> <subject> <email>` (email `-` when unknown; or
+`system:poller` for its status poller, which acts as viewer only) and
+`X-SwarmScribe-Actor-Role: viewer|operator|admin`. The actor's parts are
+printable ASCII separated by single spaces; the issuer is an `https://` URL of
+at most 255 characters, the subject at most 255 characters and the email at
+most 254. Malformed headers are refused with `400 invalid_actor` or
+`400 invalid_actor_role`. These headers are ignored on a person's requests. A request must carry exactly
+one `Authorization` header; two (two Bearer headers, or a Bearer and a Console)
+are refused with `401`.
 
 ### Multi-replica test
 

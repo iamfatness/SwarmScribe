@@ -1,14 +1,21 @@
-"""Who is calling /v1/admin, and may they? Refusals for a role are audited; tokens are never
-logged or stored."""
+"""Who is calling /v1/admin, and may they?
+
+A person signs in with an ID token (`Authorization: Bearer`). A fleet console calls with its
+own credential (`Authorization: Console`) on behalf of the person named in
+X-SwarmScribe-Actor, or of its poller; its role is the lower of the asserted role and the
+credential's cap, then the same role check applies. The actor headers are read on console
+requests only. Refusals are audited; tokens and credentials are never logged or stored."""
 
 import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 from fastapi import Request
 
 from .. import audit
+from ..auth import consoles
 from ..auth.oidc import (
     Fetch,
     Identity,
@@ -29,19 +36,47 @@ from ..auth.roles import (
     at_least,
 )
 from ..config import Settings
-from ..errors import Forbidden, ServiceUnavailable, Unauthorized
+from ..errors import Forbidden, LeaderError, ServiceUnavailable, Unauthorized
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class Admin:
-    identity: Identity
-    role: Role
+    """The caller of an admin route. `provider` is "entra" or "google" for a signed-in
+    person and "console" for a console's delegated request; `issuer` is None only for the
+    console's poller; `role` is None only before `require` admits the caller."""
+
+    provider: str
+    issuer: str | None
+    subject: str | None
+    email: str | None
+    role: Role | None
+    console: str | None = None
+
+    @classmethod
+    def person(cls, identity: Identity, role: Role | None) -> "Admin":
+        return cls(
+            provider=identity.provider,
+            issuer=identity.issuer,
+            subject=identity.subject,
+            email=identity.email,
+            role=role,
+        )
+
+    @property
+    def is_poller(self) -> bool:
+        """The console's own status poller (fleet console spec 5.3), not a person."""
+        return self.console is not None and self.issuer is None
 
     @property
     def actor(self) -> str:
-        return self.identity.actor
+        """How the audit log names the caller. Built by DelegatedActor and nowhere else, so
+        that a person is named the same way signed in or through a console
+        (`<email> (<issuer> <subject>)`), the poller is `system:poller`, and a console
+        request adds ` via console <name>`."""
+        who = consoles.DelegatedActor(self.issuer, self.subject, self.email)
+        return who.name if self.console is None else who.audit_name(self.console)
 
 
 class AdminAuth:
@@ -85,73 +120,143 @@ class AdminAuth:
             raise ServiceUnavailable("sign-in cannot be checked right now; retry shortly") from exc
 
 
-def _bearer(request: Request) -> str:
-    scheme, _, token = request.headers.get("authorization", "").partition(" ")
-    if scheme.lower() != "bearer" or not token.strip():
+_SCHEMES = ("bearer", "console")
+
+
+def _authorization(request: Request) -> tuple[str, str]:
+    """The one Authorization header's scheme (lowercase) and credential. Several headers (a
+    Bearer and a Console, say) are refused rather than one being picked."""
+    values = request.headers.getlist("authorization")
+    if len(values) > 1:
+        raise Unauthorized("send exactly one Authorization header")
+    scheme, _, credential = (values[0] if values else "").partition(" ")
+    scheme = scheme.lower()
+    if scheme == "console" and not credential.strip():
+        # A console with an empty credential is sent to the console wording, not Bearer's.
+        raise consoles.InvalidConsoleCredential("missing console credential")
+    if scheme not in _SCHEMES or not credential.strip():
         raise Unauthorized(
             "sign in with `swarmscribe-admin login` and send the ID token as a Bearer token"
         )
-    return token.strip()
+    return scheme, credential.strip()
 
 
-async def _audit_refusal(
-    request: Request, identity: Identity, granted: Role | None, required: Role
-) -> None:
+async def _audit(request: Request, *, actor: str, action: str, detail: dict[str, Any]) -> None:
+    """An entry about this request in its own session; only the route template is kept."""
     route = request.scope.get("route")
     async with request.app.state.sessionmaker() as session:
         audit.record(
             session,
-            actor=identity.actor,
-            action="admin.refused",
+            actor=actor,
+            action=action,
             subject_type="endpoint",
             subject_id=f"{request.method} {getattr(route, 'path', '?')}",
-            detail={"role": granted, "required": required},
+            detail=detail,
         )
         await session.commit()
+
+
+async def _console_caller(request: Request, credential: str) -> tuple[Admin, dict[str, Any]]:
+    """Authenticate the console first (401 for an unknown or revoked credential, whatever
+    the headers say), then read whom it acts for. Nothing is cached: a revocation applies
+    to the console's next request."""
+    try:
+        async with request.app.state.sessionmaker() as session:
+            console = await consoles.authenticate_console(session, credential)
+            name, cap = console.name, console.max_role
+    except consoles.RevokedConsoleCredential as exc:
+        # A revoked console that keeps calling is worth seeing; an unknown one names no one.
+        await _audit(
+            request,
+            actor=consoles.console_actor(exc.console),
+            action="console.refused",
+            detail={"code": "revoked"},
+        )
+        raise
+    try:
+        delegate, asserted = consoles.parse_delegation(
+            request.headers.getlist(consoles.ACTOR_HEADER),
+            request.headers.getlist(consoles.ROLE_HEADER),
+        )
+    except LeaderError as exc:
+        # A known console sent malformed headers: record that it did, never what it sent.
+        await _audit(
+            request,
+            actor=consoles.console_actor(name),
+            action="console.refused",
+            detail={"code": exc.code},
+        )
+        raise
+    caller = Admin(
+        provider="console",
+        issuer=delegate.issuer,
+        subject=delegate.subject,
+        email=delegate.email,
+        role=consoles.effective_role(asserted, cap),
+        console=name,
+    )
+    return caller, {"asserted": asserted, "cap": cap}
+
+
+def _refusal(caller: Admin, required: Role, console: dict[str, Any]) -> str:
+    if caller.role is None:
+        return "you have no SwarmScribe role; ask an administrator for one"
+    if console and not at_least(console["cap"], required):
+        cap = console["cap"]
+        return f"this needs the {required} role; console {caller.console} is limited to {cap}"
+    return f"this needs the {required} role; you have {caller.role}"
 
 
 _READS = ("GET", "HEAD", "OPTIONS")
 
 
 async def audit_refused_request(request: Request, code: str) -> None:
-    """Record that a signed-in administrator's request (past the role check) was refused:
-    a change for a business reason (admin.change_refused) or a read that failed
-    (admin.read_refused), so every admin call leaves an entry. Own session: the request's
-    transaction is rolled back. Only the route template and the error code are recorded,
-    never request values."""
+    """Record that an admitted caller's request (past the role check) was refused: a change
+    for a business reason (admin.change_refused) or a read that failed (admin.read_refused),
+    so every admin call leaves an entry. Own session: the request's transaction is rolled
+    back. Only the route template and the error code are recorded, never request values."""
     admin = getattr(request.state, "admin", None)
     if admin is None:
         return
     action = "admin.read_refused" if request.method in _READS else "admin.change_refused"
-    route = request.scope.get("route")
     try:
-        async with request.app.state.sessionmaker() as session:
-            audit.record(
-                session,
-                actor=admin.actor,
-                action=action,
-                subject_type="endpoint",
-                subject_id=f"{request.method} {getattr(route, 'path', '?')}",
-                detail={"code": code},
-            )
-            await session.commit()
+        await _audit(request, actor=admin.actor, action=action, detail={"code": code})
     except Exception:
         logger.exception("a refused admin request could not be audited")
 
 
-def require(role: Role) -> Callable[[Request], Awaitable[Admin]]:
-    """A dependency admitting people whose role is `role` or higher."""
+def require(
+    role: Role, *, consoles_allowed: bool = True
+) -> Callable[[Request], Awaitable[Admin]]:
+    """A dependency admitting callers whose role is `role` or higher: a signed-in person, or
+    (unless consoles_allowed is False) a console acting for one."""
 
     async def dependency(request: Request) -> Admin:
-        auth: AdminAuth = request.app.state.admin_auth
-        identity, granted = await auth.authenticate(_bearer(request))
-        if not at_least(granted, role):
-            await _audit_refusal(request, identity, granted, role)
-            if granted is None:
-                raise Forbidden("you have no SwarmScribe role; ask an administrator for one")
-            raise Forbidden(f"this needs the {role} role; you have {granted}")
-        admin = Admin(identity=identity, role=granted)
-        request.state.admin = admin
-        return admin
+        scheme, credential = _authorization(request)
+        console: dict[str, Any] = {}
+        if scheme == "console":
+            caller, console = await _console_caller(request, credential)
+            if not consoles_allowed:
+                detail = {
+                    "role": caller.role,
+                    "required": role,
+                    **console,
+                    "console_allowed": False,
+                }
+                await _audit(request, actor=caller.actor, action="admin.refused", detail=detail)
+                raise Forbidden(
+                    "a console credential cannot do this; "
+                    "sign in as a person with `swarmscribe-admin login`"
+                )
+        else:
+            auth: AdminAuth = request.app.state.admin_auth
+            identity, granted = await auth.authenticate(credential)
+            caller = Admin.person(identity, granted)
+        if not at_least(caller.role, role):
+            detail = {"role": caller.role, "required": role, **console}
+            await _audit(request, actor=caller.actor, action="admin.refused", detail=detail)
+            raise Forbidden(_refusal(caller, role, console))
+        request.state.admin = caller
+        return caller
 
     return dependency

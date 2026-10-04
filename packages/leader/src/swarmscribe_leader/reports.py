@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db.models import (
+    ConsoleCredential,
     Follower,
     Job,
     JobAttempt,
@@ -104,11 +105,19 @@ async def status_summary(session: AsyncSession) -> dict[str, Any]:
         )
     ).all():
         pools.setdefault(pool, {"pool": pool, "queued": 0, "leased": 0})[state] = count
+    # One aggregate over (pool, state) gives both the totals and the per-pool counts.
     followers = dict.fromkeys(FOLLOWER_STATES, 0)
-    for state, count in (
-        await session.execute(select(Follower.state, func.count()).group_by(Follower.state))
+    follower_pools: dict[str, dict[str, Any]] = {}
+    for pool, state, count in (
+        await session.execute(
+            select(Follower.pool, Follower.state, func.count()).group_by(
+                Follower.pool, Follower.state
+            )
+        )
     ).all():
-        followers[state] = count
+        followers[state] = followers.get(state, 0) + count
+        row = follower_pools.setdefault(pool, {"pool": pool, **dict.fromkeys(FOLLOWER_STATES, 0)})
+        row[state] = row.get(state, 0) + count
     completed_last_hour = await session.scalar(
         select(func.count())
         .select_from(Job)
@@ -141,6 +150,7 @@ async def status_summary(session: AsyncSession) -> dict[str, Any]:
         "jobs": jobs,
         "pools": [pools[name] for name in sorted(pools)],
         "followers": followers,
+        "follower_pools": [follower_pools[name] for name in sorted(follower_pools)],
         "completed_last_hour": completed_last_hour or 0,
         "failed_attempts_last_day": failed_attempts or 0,
         "locations": [
@@ -239,6 +249,29 @@ async def list_tokens(session: AsyncSession) -> list[dict[str, Any]]:
         await session.scalars(select(JoinToken).order_by(JoinToken.created_at, JoinToken.id))
     ).all()
     return [token_view(token) for token in tokens]
+
+
+def console_view(console: ConsoleCredential) -> dict[str, Any]:
+    """A console credential as administrators see it: never the credential or its hash."""
+    return {
+        "id": str(console.id),
+        "name": console.name,
+        "max_role": console.max_role,
+        "revoked": console.revoked_at is not None,
+        "revoked_at": console.revoked_at,
+        "revoked_by": console.revoked_by,
+        "created_by": console.created_by,
+        "created_at": console.created_at,
+    }
+
+
+async def list_consoles(session: AsyncSession) -> list[dict[str, Any]]:
+    consoles = (
+        await session.scalars(
+            select(ConsoleCredential).order_by(ConsoleCredential.created_at, ConsoleCredential.id)
+        )
+    ).all()
+    return [console_view(console) for console in consoles]
 
 
 async def consent_report(

@@ -45,8 +45,8 @@ def install(app: FastAPI) -> None:
         if exc.retry_after:
             headers["Retry-After"] = str(exc.retry_after)
         if isinstance(exc, Unauthorized):  # RFC 6750: say how to authenticate
-            error = exc.bearer_error
-            headers["WWW-Authenticate"] = f'Bearer error="{error}"' if error else "Bearer"
+            error, scheme = exc.bearer_error, exc.scheme
+            headers["WWW-Authenticate"] = f'{scheme} error="{error}"' if error else scheme
         return error_response(exc.code, exc.message, exc.status, headers=headers or None)
 
     @app.exception_handler(StorageError)

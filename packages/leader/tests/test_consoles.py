@@ -169,6 +169,7 @@ async def test_anything_but_the_exact_credential_is_unknown(sessionmaker, make):
     with pytest.raises(InvalidConsoleCredential) as raised:
         await authenticated(sessionmaker, make(credential))
     assert raised.value.message == "unknown console credential"
+    assert raised.value.code == "unauthorized"
     assert (raised.value.status, raised.value.scheme) == (401, "Console")
 
 
@@ -178,6 +179,7 @@ async def test_a_revoked_console_is_refused(sessionmaker):
     with pytest.raises(RevokedConsoleCredential) as raised:
         await authenticated(sessionmaker, credential)
     assert raised.value.message == "this console credential has been revoked"
+    assert raised.value.code == "credential_revoked"
     assert (raised.value.console, raised.value.status) == ("fleet", 401)
     assert isinstance(raised.value, InvalidConsoleCredential)
 

@@ -49,7 +49,11 @@ class InvalidConsoleCredential(InvalidToken):
 
 class RevokedConsoleCredential(InvalidConsoleCredential):
     """A revoked console's credential. Carries the console's name, so that the refusal can
-    be audited (an unknown credential names no one)."""
+    be audited (an unknown credential names no one). Its code, credential_revoked, tells
+    the console to stop calling until its administrator replaces the credential; only the
+    holder of the real credential can see it, so it reveals nothing to a guesser."""
+
+    code = "credential_revoked"
 
     def __init__(self, console: str):
         super().__init__("this console credential has been revoked")

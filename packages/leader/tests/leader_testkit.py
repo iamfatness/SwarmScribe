@@ -25,6 +25,22 @@ from swarmscribe_leader.storage.registry import backend_for
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LINK_KEY = "k" * 32
 KEEP_TABLES = {"alembic_version", "settings_profiles"}
+KIT_DATABASE_PREFIX = "swarmscribe_kit_"
+# The databases the leader's and the console's own test suites own: never the kit's to drop.
+OWNED_DATABASES = {"swarmscribe_test", "swarmscribe_console_test"}
+
+
+def check_database_name(name: str) -> None:
+    """The kit drops the database it is given. Refuse any name it could not have made
+    for itself: one without the kit's prefix, and the two other suites' databases."""
+    if name in OWNED_DATABASES:
+        raise ValueError(f"{name!r} belongs to another test suite; the kit will not drop it")
+    if not name.startswith(KIT_DATABASE_PREFIX) or not name[len(KIT_DATABASE_PREFIX) :]:
+        raise ValueError(
+            f"the kit only drops databases named {KIT_DATABASE_PREFIX}<something>, not {name!r}"
+        )
+    if not all(c.isalnum() or c == "_" for c in name):
+        raise ValueError(f"database name {name!r} may hold only letters, digits and underscores")
 
 
 def admin_url() -> str:
@@ -44,6 +60,7 @@ def with_database(url: str, name: str) -> str:
 
 
 async def recreate(url: str, name: str) -> None:
+    check_database_name(name)
     conn = await asyncpg.connect(url)
     try:
         await conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
@@ -53,7 +70,8 @@ async def recreate(url: str, name: str) -> None:
 
 
 async def migrated_database(name: str) -> str:
-    """Drop and recreate the database `name`, migrate it to the head, return its URL."""
+    """Drop and recreate the database `name` (it must start with `swarmscribe_kit_`),
+    migrate it to the head, return its URL."""
     import asyncio
 
     url = admin_url()

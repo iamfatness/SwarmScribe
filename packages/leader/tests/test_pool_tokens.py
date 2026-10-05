@@ -242,10 +242,44 @@ async def test_revoking_with_its_followers_revokes_them_and_releases_their_work(
             await authenticate(session, credential, now=utcnow())
         (entry,) = (
             await session.scalars(
+                select(AuditEntry).where(AuditEntry.action == "pool_token.revoke_followers")
+            )
+        ).all()
+        (first_entry,) = (
+            await session.scalars(
                 select(AuditEntry).where(AuditEntry.action == "pool_token.revoke")
             )
         ).all()
     assert entry.detail == {"name": "gpu-pods", "followers_revoked": 2}
+    assert first_entry.detail == {"name": "gpu-pods", "revoke_followers": True}
+
+
+async def test_a_failed_follower_pass_leaves_the_token_revoked_and_audited(
+    sessionmaker, monkeypatch
+):
+    from swarmscribe_leader.auth import pool_tokens
+
+    await pool_token(sessionmaker)
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("follower pass failed")
+
+    monkeypatch.setattr(pool_tokens, "_revoke_followers_of", broken)
+    async with sessionmaker() as session:
+        with pytest.raises(RuntimeError):
+            await revoke_pool_token(
+                session, "gpu-pods", now=utcnow(), actor="admin@example.org", revoke_followers=True
+            )
+        await session.rollback()
+    async with sessionmaker() as session:
+        token = (await session.scalars(select(PoolToken))).one()
+        entries = (
+            await session.scalars(
+                select(AuditEntry).where(AuditEntry.action == "pool_token.revoke")
+            )
+        ).all()
+    assert (token.revoked_at is not None, token.revoked_by) == (True, "admin@example.org")
+    assert [entry.actor for entry in entries] == ["admin@example.org"]
 
 
 async def test_revoking_twice_keeps_the_first_revocation(sessionmaker):

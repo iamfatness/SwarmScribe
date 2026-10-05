@@ -37,6 +37,7 @@ from ..jobs.claims import (
 )
 from ..storage.base import StorageError
 from .deps import db_session, settings_of
+from .errors import STORAGE_RETRY_AFTER
 
 logger = logging.getLogger(__name__)
 MAX_CLAIM_ATTEMPTS = 5
@@ -165,6 +166,12 @@ async def heartbeat(
     return HeartbeatResponse(directive=directive)
 
 
+class _LinksUnavailable(LeaderError):
+    status = 503
+    code = "unavailable"
+    retry_after = STORAGE_RETRY_AFTER
+
+
 @router.post("/jobs/{job_id}/links", response_model=JobLinks)
 async def fresh_links(
     job_id: uuid.UUID,
@@ -184,9 +191,16 @@ async def fresh_links(
         follower,
         min_interval_seconds=settings.links_refresh_min_seconds,
     )
-    links = await build_links(
-        session, job, settings=settings, backend_factory=request.app.state.backend_factory
-    )
+    try:
+        links = await build_links(
+            session, job, settings=settings, backend_factory=request.app.state.backend_factory
+        )
+    except StorageError as exc:
+        # Ids only: a storage key must never reach the log (the claim keeps the same rule).
+        logger.warning(
+            "links for job %s could not be built: %s", job_id, type(exc).__name__
+        )
+        raise _LinksUnavailable("storage location is not available") from None
     await session.commit()
     return links
 

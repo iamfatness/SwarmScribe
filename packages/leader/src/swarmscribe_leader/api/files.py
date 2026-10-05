@@ -91,6 +91,8 @@ async def _stream(handle) -> AsyncIterator[bytes]:
 @router.get("/{token}")
 async def download(token: str, request: Request) -> StreamingResponse:
     claims = _claims(request, token, "GET")
+    if claims.job_id or claims.lease_id:
+        await _require_current_lease(request, claims)
     backend = await _backend(request, claims)
     path = await _in_thread(backend.file_path, claims.key)
     handle, size = await _in_thread(_open_current, path, claims.version)
@@ -105,7 +107,7 @@ def _lease_ids(claims: LinkClaims) -> tuple[uuid.UUID, uuid.UUID]:
     try:
         return uuid.UUID(claims.job_id), uuid.UUID(claims.lease_id)
     except ValueError as exc:
-        raise StaleLease("this upload link's lease is no longer current") from exc
+        raise StaleLease("this link's lease is no longer current") from exc
 
 
 def _lease_is_current(job: Job | None, lease_id: uuid.UUID) -> bool:
@@ -113,14 +115,14 @@ def _lease_is_current(job: Job | None, lease_id: uuid.UUID) -> bool:
 
 
 async def _require_current_lease(request: Request, claims: LinkClaims) -> None:
-    """The upload belongs to a lease; once that lease has ended (expired and re-leased,
+    """A link issued to a job's lease; once that lease has ended (expired and re-leased,
     cancelled, completed), its links must not write anything. A cheap check, made before
     the body is read; `_replace_if_lease_current` makes the one that counts."""
     job_id, lease_id = _lease_ids(claims)
     async with request.app.state.sessionmaker() as session:
         job = await session.get(Job, job_id)
     if not _lease_is_current(job, lease_id):
-        raise StaleLease("this upload link's lease is no longer current")
+        raise StaleLease("this link's lease is no longer current")
 
 
 async def _replace_if_lease_current(
@@ -135,7 +137,7 @@ async def _replace_if_lease_current(
             Job, job_id, with_for_update={"read": True}, populate_existing=True
         )
         if not _lease_is_current(job, lease_id):
-            raise StaleLease("this upload link's lease is no longer current")
+            raise StaleLease("this link's lease is no longer current")
         await _in_thread(os.replace, temp, path)
 
 

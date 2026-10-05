@@ -106,7 +106,17 @@ async def revoke_pool_token(
     if revoke_followers:
         # The token's revocation must not depend on the follower pass: commit it first, so
         # that a pass that has to be retried (or fails) still leaves the token refused.
+        # So is its audit entry, in that same commit: no path revokes a token unrecorded.
+        # The follower pass writes its own entry, with the count.
         token_id = token.id
+        audit.record(
+            session,
+            actor=actor,
+            action="pool_token.revoke",
+            subject_type="pool_token",
+            subject_id=token_id,
+            detail={"name": token.name, "revoke_followers": True},
+        )
         await session.commit()
         for attempt in range(_ATTEMPTS):
             try:
@@ -117,14 +127,23 @@ async def revoke_pool_token(
                 if not _is_lock_conflict(exc) or attempt == _ATTEMPTS - 1:
                     raise
         await session.refresh(token)  # a rollback expired it
-    audit.record(
-        session,
-        actor=actor,
-        action="pool_token.revoke",
-        subject_type="pool_token",
-        subject_id=token.id,
-        detail={"name": token.name, "followers_revoked": revoked},
-    )
+        audit.record(
+            session,
+            actor=actor,
+            action="pool_token.revoke_followers",
+            subject_type="pool_token",
+            subject_id=token.id,
+            detail={"name": token.name, "followers_revoked": revoked},
+        )
+    else:
+        audit.record(
+            session,
+            actor=actor,
+            action="pool_token.revoke",
+            subject_type="pool_token",
+            subject_id=token.id,
+            detail={"name": token.name, "followers_revoked": 0},
+        )
     return token, revoked
 
 

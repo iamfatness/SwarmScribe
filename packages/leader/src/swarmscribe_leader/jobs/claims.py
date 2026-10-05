@@ -54,10 +54,14 @@ async def profile_for(session: AsyncSession, device: str) -> SettingsProfile | N
 async def build_links(
     session: AsyncSession, job: Job, *, settings: Settings, backend_factory: BackendFactory
 ) -> JobLinks:
-    """The job's download link and three upload links, bound to its current lease."""
+    """The job's download link and three upload links, all bound to its current lease."""
     recording, source, target = await _places(session, job)
     download = backend_factory(source).download_link(
-        recording.key, job.source_version, timedelta(seconds=settings.download_link_ttl_seconds)
+        recording.key,
+        job.source_version,
+        timedelta(seconds=settings.download_link_ttl_seconds),
+        job_id=str(job.id),
+        lease_id=str(job.lease_id),
     )
     uploader = backend_factory(target)
     upload_ttl = timedelta(seconds=settings.upload_link_ttl_seconds)

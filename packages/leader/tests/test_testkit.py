@@ -76,7 +76,7 @@ from swarmscribe_leader.db.session import make_engine, make_sessionmaker
 
 
 async def main():
-    url = await migrated_database("swarmscribe_testkit_other")
+    url = await migrated_database("swarmscribe_kit_other")
     engine = make_engine(url)
     sm = make_sessionmaker(engine)
     root = Path({str(tmp_path / "rec")!r})
@@ -109,3 +109,19 @@ asyncio.run(main())
     )
     assert result.returncode == 0, result.stderr[-2000:]
     assert result.stdout.strip() == "ok"
+
+
+async def test_the_kit_refuses_to_drop_a_database_that_is_not_its_own():
+    import pytest
+    from leader_testkit import migrated_database
+
+    for name in (
+        "swarmscribe_test",
+        "swarmscribe_console_test",
+        "postgres",
+        "production",
+        "swarmscribe_kit_",
+        'swarmscribe_kit_x"; DROP DATABASE y; --',
+    ):
+        with pytest.raises(ValueError):
+            await migrated_database(name)

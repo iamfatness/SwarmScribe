@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import io
 import json
+import math
 import os
 import re
 import sys
@@ -45,11 +46,14 @@ def parse_labels(text: str) -> tuple[str, ...]:
 
 def parse_temperatures(text: str) -> list[float]:
     try:
-        return [float(part) for part in text.split(",")]
+        values = [float(part) for part in text.split(",")]
     except ValueError:
+        values = []
+    if not values or not all(math.isfinite(value) for value in values):
         raise argparse.ArgumentTypeError(
-            "give numbers separated by commas, e.g. 0,0.2,0.4"
-        ) from None
+            "give finite numbers separated by commas, e.g. 0,0.2,0.4"
+        )
+    return values
 
 
 def build_parser() -> argparse.ArgumentParser:

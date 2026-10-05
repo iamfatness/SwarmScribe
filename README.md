@@ -108,7 +108,7 @@ configured at once). Each person gets a role; roles are cumulative:
 
 | Role | May |
 |---|---|
-| viewer | `status`, `whoami`, `locations list`, `jobs list`, `followers list`, `consent report` |
+| viewer | `status`, `whoami`, `locations list`, `jobs list`, `followers list`, `consent report`, and, signed in as a person only, `profiles list` |
 | operator | viewer + `ingest`, `jobs retry/cancel/priority`, `followers drain` |
 | admin | operator + `locations add/disable/enable`, `tokens create/list/revoke`, `followers revoke`; and, signed in as a person only (never through a console), `console create/list/revoke`, `pool-tokens create/list/revoke` and `profiles set` |
 
@@ -274,8 +274,9 @@ repository), never a path. `--temperatures` left out keeps the current ladder.
 
 ### Fleet console
 
-Pool tokens and settings profiles are not managed from the fleet console: their
-routes are for administrators signed in as a person, and a console is refused.
+Pool tokens and settings profiles are not managed from the fleet console. Person-only
+commands (a console credential is refused, whatever its role): `console create/list/revoke`,
+`pool-tokens create/list/revoke`, `profiles list` and `profiles set`.
 Use `swarmscribe-admin`.
 
 ### Fleet console credentials

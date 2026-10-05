@@ -1716,7 +1716,11 @@ async def test_a_changed_profile_is_what_the_next_claim_carries(
         "model": "tiny.en",
         "compute_type": "int8",
         "temperatures": [0.0, 0.2],
-        "before": {"model": "distil-large-v3", "compute_type": "int8"},
+        "before": {
+            "model": "distil-large-v3",
+            "compute_type": "int8",
+            "temperatures": [0.0, 0.2, 0.4],
+        },
     }
     location = await factory.location(name="here")
     await factory.job(await factory.recording(location, key="talks/a.mp3"))

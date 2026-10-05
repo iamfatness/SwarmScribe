@@ -1109,6 +1109,10 @@ async def test_the_old_holders_fresh_links_die_with_its_lease(
     await claim(quick, fast)
     late = await quick.put(links["upload_urls"]["txt"]["url"], content=b"old holder\n")
     assert (late.status_code, late.json()["code"]) == (409, "stale_lease")
+    # download links are bound to the lease too (follower spec 12.2)
+    for old in (first.download_url.url, links["download_url"]["url"]):
+        gone = await quick.get(old)
+        assert (gone.status_code, gone.json()["code"]) == (409, "stale_lease")
     assert (await fresh(quick, slow, first)).status_code == 409
 
 
@@ -1173,6 +1177,35 @@ async def test_links_when_storage_is_unavailable_are_503_and_not_counted(
     assert await audit_of(sessionmaker, "job.links") == []
     quick_links_app.state.backend_factory = real
     assert (await fresh(quick, headers, claimed)).status_code == 200
+
+
+async def test_a_storage_error_in_links_logs_ids_only_and_answers_503(
+    quick, quick_links_app, sessionmaker, factory, tmp_path, caplog
+):
+    from swarmscribe_leader.storage.base import StorageError
+
+    location = await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(quick, sessionmaker)
+    claimed = await claim(quick, headers)
+
+    class Bad:
+        def __init__(self, real):
+            self.real = real
+
+        def __call__(self, loc):
+            if loc.id == location.id:
+                raise StorageError("invalid storage key 'secret-key-material.mp3'")
+            return self.real(loc)
+
+    real = quick_links_app.state.backend_factory
+    quick_links_app.state.backend_factory = Bad(real)
+    with caplog.at_level("DEBUG"):
+        response = await fresh(quick, headers, claimed)
+    assert (response.status_code, response.json()["code"]) == (503, "unavailable")
+    assert response.headers["Retry-After"] == "30"
+    assert "secret-key-material" not in caplog.text + response.text
+    assert claimed.job_id in caplog.text
+    assert await audit_of(sessionmaker, "job.links") == []
 
 
 async def test_a_503_for_storage_does_not_use_up_the_bound(

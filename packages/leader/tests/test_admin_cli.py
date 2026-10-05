@@ -970,6 +970,22 @@ async def test_profiles_list_and_set(cli, store, idp, sessionmaker):
             await session.commit()
 
 
+@pytest.mark.parametrize("bad", ["nan", "inf", "0,-inf", "0,nan,0.4", "abc", "", "0,,0.2"])
+async def test_profiles_set_rejects_non_finite_or_unparseable_temperatures(
+    cli, store, idp, capsys, bad
+):
+    sign_in_as(store, idp, "admin")
+    with pytest.raises(SystemExit) as excinfo:
+        await cli(
+            "profiles", "set", "cpu", "--model", "tiny.en", "--compute-type", "int8",
+            "--temperatures", bad,
+        )
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err.strip().splitlines()
+    assert err[-1].startswith("swarmscribe-admin profiles set: error:")
+    assert "Traceback" not in "".join(err)
+
+
 async def test_profiles_set_is_refused_below_admin(cli, store, idp):
     sign_in_as(store, idp, "operator")
     code, out, err = await cli(

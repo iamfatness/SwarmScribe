@@ -54,7 +54,11 @@ async def set_profile(
             id=uuid.uuid4(), name=device, device=device, temperatures=[0.0, 0.2, 0.4]
         )
         session.add(profile)
-    before = {"model": profile.model, "compute_type": profile.compute_type}
+    before = {
+        "model": profile.model,
+        "compute_type": profile.compute_type,
+        "temperatures": [float(value) for value in profile.temperatures],
+    }
     profile.model = model
     profile.compute_type = compute_type
     if temperatures is not None:

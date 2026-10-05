@@ -1,0 +1,124 @@
+# The follower image against a real leader (follower spec, section 10): Postgres, two leader
+# replicas behind nginx, and two followers from the real image with tiny.en baked in. Both
+# images are built beforehand and run_e2e.py drives the test (see .github/workflows/ci.yml,
+# job follower-compose-e2e). Every value here is test-only.
+#
+# The followers sit on a network with no route out (`internal: true`): they reach the proxy
+# and nothing else, so a baked image that asked Hugging Face for anything would fail here.
+name: swarmscribe-follower-e2e
+
+x-leader: &leader
+  image: ${LEADER_IMAGE:-swarmscribe-leader:e2e}
+  pull_policy: never
+  networks: [inside]
+  environment:
+    SWARMSCRIBE_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/swarmscribe
+    # The leader builds its own file links from this, and the followers fetch them from
+    # inside the Compose network: it must be the proxy's name there (follower spec 12.6).
+    SWARMSCRIBE_PUBLIC_URL: http://proxy
+    SWARMSCRIBE_LINK_KEY: follower-compose-link-key-0123456789abcdef
+    # A lease far shorter than a long transcription: only heartbeats keep it (spec 5.5).
+    SWARMSCRIBE_LEASE_SECONDS: "8"
+    SWARMSCRIBE_HEARTBEAT_SECONDS: "2"
+    SWARMSCRIBE_REAPER_INTERVAL_SECONDS: "1"
+    SWARMSCRIBE_SCANNER_INTERVAL_SECONDS: "1"
+    SWARMSCRIBE_CLAIM_RETRY_AFTER: "1"
+    SWARMSCRIBE_FOLLOWER_GONE_AFTER_SECONDS: "60"
+  volumes:
+    - ./work/data:/data
+
+x-ready: &ready
+  test:
+    - CMD
+    - python
+    - -c
+    - "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/readyz', timeout=2).status == 200 else 1)"
+  interval: 2s
+  timeout: 3s
+  retries: 30
+
+x-follower: &follower
+  image: ${FOLLOWER_IMAGE:-swarmscribe-follower:e2e}
+  pull_policy: never
+  # Started by run_e2e.py, once the join token exists: `up -d` alone leaves them out.
+  profiles: ["followers"]
+  networks: [inside]
+  # As the chart will run it: a read-only root, no capabilities, the image's own user. The
+  # state and scratch folders are the image's declared volumes; they stay with the container,
+  # so a killed follower that is started again finds its credential and its old scratch.
+  read_only: true
+  cap_drop: ["ALL"]
+  security_opt: ["no-new-privileges:true"]
+  # Two cores each: a long recording then takes long enough, on any machine, to be killed
+  # in the middle and to outlast the lease several times.
+  cpus: 2
+  environment:
+    SWARMSCRIBE_LEADER_URL: http://proxy
+    # Plain http to the proxy and in the leader's links: the development switch (spec 4.1).
+    SWARMSCRIBE_FOLLOWER_ALLOW_HTTP: "1"
+    SWARMSCRIBE_JOIN_TOKEN_FILE: /run/secrets/join-token
+    # Unset in Compose and Kubernetes arrives as an empty string: it must mean "none".
+    SWARMSCRIBE_LEADER_CA_FILE: ""
+  volumes:
+    - ./work/secrets:/run/secrets:ro
+
+services:
+  postgres:
+    image: postgres:16
+    networks: [inside, outside]
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: swarmscribe
+    ports:
+      # For run_e2e.py, which reads and seeds the leader's database. Loopback only, and not
+      # 5432: the leader's own Compose test publishes that one.
+      - "127.0.0.1:15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d swarmscribe"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    <<: *leader
+    command: ["swarmscribe-leader", "migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  leader-1:
+    <<: *leader
+    healthcheck: *ready
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  leader-2:
+    <<: *leader
+    healthcheck: *ready
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  proxy:
+    image: nginx:1.27-alpine
+    networks: [inside]
+    volumes:
+      # The leader's own Compose test's proxy: two replicas named leader-1 and leader-2.
+      - ../compose/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      leader-1:
+        condition: service_healthy
+      leader-2:
+        condition: service_healthy
+
+  follower-1:
+    <<: *follower
+
+  follower-2:
+    <<: *follower
+
+networks:
+  inside:
+    internal: true
+  outside: {}

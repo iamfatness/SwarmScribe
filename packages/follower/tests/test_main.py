@@ -466,3 +466,36 @@ def test_leave_without_a_setting_or_a_credential_is_not_an_error(
     monkeypatch.delenv("SWARMSCRIBE_LEADER_URL")
     code, out, _err, _ = run_cli(tmp_path, leader, engine, "leave")
     assert code == 0 and "has not joined" in out
+
+
+def test_doctor_without_the_leader_asks_nothing_and_can_be_ready(engine, monkeypatch):
+    def asked(request):
+        raise AssertionError("doctor --no-leader asked the leader")
+
+    monkeypatch.setattr(cli, "probe", lambda preference: Probe(CPU))
+    out = io.StringIO()
+    code = cli.command_doctor(
+        Settings(),
+        out,
+        ask_leader=False,
+        host=lambda device, **kw: ModelHost(device, factory=engine, **kw),
+        client=lambda url, **kw: LeaderClient(url, transport=httpx.MockTransport(asked)),
+    )
+    lines = out.getvalue().splitlines()
+    assert code == 0 and lines[-1] == "result: ready"
+    assert "leader: not checked (--no-leader)" in lines
+    assert "model: distil-large-v3 (int8) loaded and ran" in lines
+
+
+def test_the_no_leader_and_no_model_flags_reach_doctor(monkeypatch):
+    seen = {}
+
+    def doctor(settings, out, **options):
+        seen.update(options)
+        return 0
+
+    monkeypatch.setattr(cli, "command_doctor", doctor)
+    assert cli.main(["doctor", "--no-leader"]) == 0
+    assert seen == {"load_model": True, "ask_leader": False}
+    assert cli.main(["doctor", "--no-model", "--no-leader"]) == 0
+    assert seen == {"load_model": False, "ask_leader": False}

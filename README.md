@@ -364,7 +364,9 @@ Commands:
   `ALLOW_HTTP=1` for one, are reported as `NOT READY`, in words. The start-up
   model is `SWARMSCRIBE_FOLLOWER_STARTUP_MODEL`, by default the device's
   default (`distil-large-v3` on CPU); the model a job uses is the leader's
-  profile for the device.
+  profile for the device. `--no-model` leaves the model out and `--no-leader`
+  leaves the leader out, for a machine or an image checked before it has a
+  network; what is left out is said (`not checked`), never counted as passed.
 - `run` does the same checks, joins if there is no stored credential, then
   claims and transcribes until it is stopped.
 - `join [--leader URL] [--token-stdin]` only registers and stores the
@@ -463,6 +465,102 @@ credentials.
   names another, and a drained or revoked follower pays that load before it
   learns it has nothing to do. The cheap checks (settings, folders, a credential
   or a token) come first, so a follower that cannot register fails at once.
+
+### Follower image
+
+`docker/follower.Dockerfile` builds `swarmscribe-follower:cpu`: the follower, the engine and
+the protocol package, installed with `uv` into an environment that is all the final image
+holds beside Python. It carries no leader, no console and no build tools. It runs as user
+10001 with the follower as its only process: `docker stop` reaches it directly, and it
+exits `0` with the job in hand released (see "Stopping" above).
+
+```
+docker build -t swarmscribe-follower:cpu --target cpu -f docker/follower.Dockerfile .
+docker run -d --restart on-failure --read-only --cap-drop ALL \
+  -e SWARMSCRIBE_LEADER_URL=https://leader.example.org \
+  -e SWARMSCRIBE_JOIN_TOKEN=<the token> \
+  -v swarmscribe-follower:/var/lib/swarmscribe-follower \
+  -v swarmscribe-models:/models \
+  swarmscribe-follower:cpu
+```
+
+It writes in three places and nowhere else, so the root filesystem can be read-only:
+
+| Path | Holds | In the image |
+|---|---|---|
+| `/var/lib/swarmscribe-follower` | the credential and the lock file (also `HOME`) | a declared volume; name it (`-v swarmscribe-follower:...`) so that the credential outlives `docker rm`, which a single-use join token needs |
+| `/scratch` | the recording being transcribed; emptied after every job and at every start | a declared volume |
+| `/models` | the model cache | a plain folder: mount a volume to keep downloads (with `--read-only` it is needed), or bake the models in |
+
+A state folder given as a `tmpfs` must be the follower's own: `--tmpfs
+/var/lib/swarmscribe-follower:uid=10001,gid=10001,mode=0700`. A plain tmpfs belongs to root
+and is writable by all, and the credential is refused there.
+
+**The model.** By default the follower downloads its start-up model from Hugging Face on
+first start into `/models` (1.5 GB for `distil-large-v3`). To put models into the image
+instead, name them at build time:
+
+```
+docker build --build-arg MODELS=distil-large-v3 -t swarmscribe-follower:cpu-distil-large-v3 \
+  --target cpu -f docker/follower.Dockerfile .
+```
+
+`MODELS` is a comma-separated list. Each model is downloaded during the build from one
+pinned commit and every file is checked against its SHA-256 in `docker/models.lock.json`;
+a file that differs fails the build. The first name becomes the start-up model
+(`SWARMSCRIBE_FOLLOWER_STARTUP_MODEL`), and the image is offline
+(`SWARMSCRIBE_FOLLOWER_OFFLINE=1`): it never asks Hugging Face for anything, and a job for
+a model it does not hold is handed back and the follower exits `3`. The leader's profile
+for the device must therefore name a model the image holds (`swarmscribe-admin profiles
+set`). To allow a model that is not in the lock file yet, add the entry that
+`uv run python docker/fetch_models.py --pin <name>` prints.
+
+`bash docker/check-follower-image.sh <image> cpu [<baked model>]` checks an image without a
+leader: the user and the folders, that the leader and build tools are absent, that it
+starts read-only without capabilities, and, for a baked image, that the model loads and
+runs with no network at all and that `docker stop` ends a follower that is still starting.
+The image also sets `HF_HUB_CACHE=/models` (and `HF_HUB_OFFLINE=1` when a model is baked),
+so the engine's own command in it, `swarmscribe-engine`, finds the baked model.
+
+Known limits: the image is built for the machine's own architecture and only `amd64` has
+been run; it has no `HEALTHCHECK` yet (the follower listens on no port); a model that is
+downloaded at run time, not baked, is whatever its repository's `main` is that day.
+**Memory:** a follower holds the whole decoded recording in memory while it transcribes,
+about 3.5 GiB per hour of audio (measured), and nothing yet stops a follower from taking a
+recording that does not fit: give the container a memory limit with headroom for the
+longest recording you expect. The guard that refuses such a recording arrives in F2b.
+
+### Follower Compose test
+
+`e2e/follower-compose/` runs that image, with `tiny.en` baked in, as two followers against
+Postgres and two leader replicas behind nginx. The followers are read-only, without
+capabilities, and on a network with no route out. It checks that both register with one
+join token and share six recordings, each transcribed once and saying what was said (on the
+right channel, where the location splits channels); that a follower killed in the middle of
+a recording loses nothing and comes back as the same follower with an empty scratch folder;
+that an 8-second lease survives a transcription several times as long; that a follower
+stopped with `SIGTERM` mid-job releases the job without a counted attempt; that a drained
+follower exits `0` and a revoked one `4`, again when started again; and that a recording
+without consent is never touched and no follower log holds a token, a link or transcript
+text. It runs in GitHub Actions (job `follower-compose-e2e`); locally, with Docker:
+
+```
+docker build -t swarmscribe-leader:e2e -f e2e/compose/Dockerfile .
+docker build --build-arg MODELS=tiny.en -t swarmscribe-follower:e2e --target cpu -f docker/follower.Dockerfile .
+bash docker/check-follower-image.sh swarmscribe-follower:e2e cpu tiny.en
+uv run python e2e/follower-compose/run_e2e.py prepare
+docker compose -f e2e/follower-compose/docker-compose.yml up -d
+uv run python e2e/follower-compose/run_e2e.py run
+docker compose -f e2e/follower-compose/docker-compose.yml --profile followers down -v
+```
+
+It takes about two minutes and runs once per stack (it drains and revokes its followers): a
+second run stops at once and says to `down -v` first. The leader is plain `http` behind the
+proxy, as it is behind an ingress, so the followers set the development switch
+`SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1`. The driver adds the join token, the profile and the
+locations, and drains and revokes, with the leader's own functions against its database
+(published on `127.0.0.1:15432`): this stack has no identity provider to sign an
+administrator in. `LEADER_IMAGE` and `FOLLOWER_IMAGE` replace the two images.
 
 ## Run the fleet console (development)
 

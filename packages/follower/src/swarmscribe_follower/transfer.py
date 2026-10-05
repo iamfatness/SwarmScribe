@@ -158,9 +158,11 @@ class Links:
             return Transient(response.status_code, retry_after_of(response), "download")
         return Refused(refusal.status, refusal.code, "")  # a storage's text is not repeated
 
-    def upload(self, link: Link, path: Path) -> None:
-        """Send one output file. Outputs are text and small (the leader's own storage takes
-        at most 512 MiB), so the file is read whole and sent with its length."""
+    def upload(self, link: Link, path: Path) -> str:
+        """Send one output file and return the SHA-256 of exactly the bytes sent, which is
+        what the leader is asked to verify at submit. Outputs are text and small (the
+        leader's own storage takes at most 512 MiB), so the file is read whole and sent with
+        its length."""
         self._expect(link, "PUT")
         size = path.stat().st_size
         if size > MAX_UPLOAD_BYTES:
@@ -169,6 +171,7 @@ class Links:
         # still changing, so no partial file is uploaded. A failed upload is retried by the
         # caller from the start.
         content = path.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
         try:
             response = self._client_for(link).put(link.url, headers=link.headers, content=content)
         except httpx.InvalidURL:
@@ -176,7 +179,7 @@ class Links:
         except httpx.HTTPError as exc:
             raise Transient(None, None, type(exc).__name__) from None
         if 200 <= response.status_code < 300:
-            return
+            return digest
         refusal = refusal_of(response)
         if response.status_code == 403:
             raise LinkExpired("the upload link was refused")

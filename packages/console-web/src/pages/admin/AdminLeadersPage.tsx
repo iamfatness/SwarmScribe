@@ -405,15 +405,15 @@ export function AdminLeadersSection() {
                       <td className="mono long">
                         <BreakPath text={leader.base_url} />
                       </td>
-                      <td className="mono long">{labelsText(leader.labels) || "–"}</td>
+                      <td className="mono long label-lines">{labelsText(leader.labels) || "–"}</td>
                       <td className="nowrap">{leader.enabled ? "On" : "Switched off"}</td>
                       <td>
                         {leader.credential_revoked ? (
                           <span className="badge badge-bad">Revoked by the leader</span>
                         ) : (
                           <span>
-                            Set {formatTime(leader.credential_updated_at)} by{" "}
-                            {leader.credential_updated_by}
+                            <span className="nowrap">Set {formatTime(leader.credential_updated_at)}</span>{" "}
+                            <span className="by-line">by {leader.credential_updated_by}</span>
                           </span>
                         )}
                       </td>

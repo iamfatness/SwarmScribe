@@ -102,6 +102,23 @@ th.long {
   vertical-align: top;
 }
 
+/* Labels, one to a line (they are stored that way), so the column is as wide as its longest
+   label and no wider: the room goes to the address beside it. */
+td.label-lines {
+  min-width: 6rem;
+  white-space: pre-line;
+}
+
+/* "by {who}" after a time: the two words stay together, on the next line if they must. */
+.by-line {
+  display: inline-block;
+}
+
+/* An address's scheme and host, of ordinary length: one piece, never broken. */
+.path-host {
+  white-space: nowrap;
+}
+
 table.medium {
   min-width: 44rem;
 }

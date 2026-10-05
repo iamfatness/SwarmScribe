@@ -91,6 +91,28 @@ test("the console refuses a leader address it may not call", async ({ page }) =>
   await expect(dialog.getByRole("alert")).toContainText("The console may not call that address.");
 });
 
+test("a leader's address is on one line at 1280, 900 and 768, never broken after https://", async ({ page }) => {
+  await signIn(page, "admin", "/admin/leaders");
+  for (const width of [1280, 900, 768]) {
+    await page.setViewportSize({ width, height: 900 });
+    const region = page.getByRole("region", { name: "Registered leaders" });
+    await expect(region.getByRole("row", { name: /^eu-1/ })).toBeVisible();
+    const lines = await region.evaluate(async (el) => {
+      await document.fonts.ready;
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      return Array.from(el.querySelectorAll("td .path-part"), (part) => {
+        const range = document.createRange();
+        range.selectNodeContents(part);
+        const tops = new Set(Array.from(range.getClientRects(), (rect) => Math.round(rect.top)));
+        return `${part.textContent}: ${tops.size}`;
+      });
+    });
+    expect(lines, `at ${width}`).toEqual(["https://eu-1.leaders.example: 1", "https://us-1.leaders.example: 1"]);
+    // And the table still fits its region: the room came from the columns beside it.
+    expect(await region.evaluate((el) => el.scrollWidth - el.clientWidth), `at ${width}`).toBeLessThanOrEqual(1);
+  }
+});
+
 test("the last console administrator cannot be removed", async ({ page }) => {
   await signIn(page, "admin", "/admin/admins");
   await page.getByRole("button", { name: /^Remove console administrator / }).click();

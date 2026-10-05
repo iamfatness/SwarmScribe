@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# What a swarmscribe-follower image must hold, checked without a leader and without a GPU:
+#
+#   bash docker/check-follower-image.sh swarmscribe-follower:e2e cpu tiny.en
+#   bash docker/check-follower-image.sh swarmscribe-follower:cuda cuda
+#
+# The second argument is the build target; the third is the first model baked in with
+# MODELS, when there is one. CHECK_GPU=1 also runs a baked `cuda` image on this machine's
+# GPU (never in CI). The Compose test (e2e/follower-compose) checks the rest by running it.
+set -euo pipefail
+# Git Bash on Windows would rewrite /scratch and friends into Windows paths.
+export MSYS_NO_PATHCONV=1
+
+image="${1:?usage: check-follower-image.sh <image> <cpu|cuda> [baked-model]}"
+target="${2:?usage: check-follower-image.sh <image> <cpu|cuda> [baked-model]}"
+baked="${3:-}"
+state=/var/lib/swarmscribe-follower
+# A leader that is never reached: every check here runs with --network none.
+leader=(-e SWARMSCRIBE_LEADER_URL=https://leader.invalid)
+locked=(--read-only --cap-drop ALL --security-opt no-new-privileges --network none)
+
+fail() {
+  echo "FAILED: $*" >&2
+  exit 1
+}
+
+case "$target" in cpu | cuda) ;; *) fail "the target is '$target', not cpu or cuda" ;; esac
+
+setting() {  # the value of one variable in the image's environment
+  docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image" \
+    | sed -n "s/^$1=//p"
+}
+
+# --- who it runs as, and where it may write --------------------------------------------
+user="$(docker inspect --format '{{.Config.User}}' "$image")"
+[ "$user" = "10001:10001" ] || fail "the image's user is '$user', not 10001:10001"
+[ "$(docker run --rm --entrypoint id "$image" -u)" = "10001" ] \
+  || fail "the container does not run as uid 10001"
+
+volumes="$(docker inspect --format '{{range $path, $_ := .Config.Volumes}}{{println $path}}{{end}}' "$image" | sort | xargs)"
+[ "$volumes" = "/scratch $state" ] \
+  || fail "the declared volumes are '$volumes', not /scratch and $state"
+
+[ "$(setting HOME)" = "$state" ] || fail "HOME is not the state folder"
+[ "$(setting SWARMSCRIBE_FOLLOWER_STATE_DIR)" = "$state" ] || fail "the state folder is not set"
+[ "$(setting SWARMSCRIBE_FOLLOWER_SCRATCH_DIR)" = "/scratch" ] || fail "the scratch folder is not set"
+[ "$(setting SWARMSCRIBE_FOLLOWER_MODEL_DIR)" = "/models" ] || fail "the model folder is not set"
+
+# The credential is refused in a folder that others can write to, or that is not its own.
+docker run --rm --entrypoint sh "$image" -c \
+  'test "$(stat -c "%u:%g %a" /var/lib/swarmscribe-follower)" = "10001:10001 700" \
+   && test "$(stat -c "%u:%g %a" /scratch)" = "10001:10001 700" \
+   && test -z "$(find /var/lib/swarmscribe-follower /scratch -mindepth 1)"' \
+  || fail "the state and scratch folders are not empty, 0700 and owned by 10001"
+
+# --- what is in it, and what is not ------------------------------------------------------
+docker run --rm --entrypoint python "$image" -c '
+import swarmscribe_engine, swarmscribe_follower, swarmscribe_protocol  # noqa: F401
+import av, ctranslate2, faster_whisper  # noqa: F401
+' || fail "the follower, the engine or a model library does not import"
+
+# The follower imports the engine and the protocol and nothing else internal (master spec,
+# section 4): no leader, no console, none of their web and database libraries.
+docker run --rm --entrypoint python "$image" -c '
+import importlib.util
+import sys
+
+banned = ("swarmscribe_leader", "swarmscribe_console", "fastapi", "starlette", "uvicorn",
+          "sqlalchemy", "asyncpg", "alembic", "jwt", "cryptography", "torch", "pytest")
+found = [name for name in banned if importlib.util.find_spec(name)]
+sys.exit(f"leader, console or test libraries in the image: {found}" if found else 0)
+' || fail "the image carries the leader, the console or their libraries"
+
+for tool in uv gcc cc make git curl; do
+  if docker run --rm --entrypoint sh "$image" -c "command -v $tool" >/dev/null; then
+    fail "a build tool ($tool) is in the final image"
+  fi
+done
+
+# No pip cache, no test files of ours, no source tree: only the installed wheels.
+if docker run --rm --entrypoint sh "$image" -c \
+  'find / -xdev \( -path "*/.cache/pip*" -o -path /root/.cache -o -path /app/packages \) 2>/dev/null | grep .'; then
+  fail "the image holds a pip cache or the source tree"
+fi
+if docker run --rm --entrypoint sh "$image" -c \
+  'find /app -xdev \( -name "test_*.py" -o -name "conftest.py" -o -name tests \) -path "*swarmscribe*" 2>/dev/null | grep .'; then
+  fail "the image holds test files of ours"
+fi
+# The installed SwarmScribe distributions: the follower and the two packages it imports.
+dists="$(docker run --rm --entrypoint python "$image" -c '
+from importlib.metadata import distributions
+print(" ".join(sorted(d.metadata["Name"] for d in distributions() if d.metadata["Name"].startswith("swarmscribe"))))')"
+[ "$dists" = "swarmscribe-engine swarmscribe-follower swarmscribe-protocol" ] \
+  || fail "the installed SwarmScribe distributions are '$dists'"
+
+# No secret is baked in: no token, credential or leader in the environment, and no file
+# that looks like one (the state folder was checked empty above).
+if docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image" \
+  | grep -E '^(SWARMSCRIBE_JOIN_TOKEN|SWARMSCRIBE_JOIN_TOKEN_FILE|SWARMSCRIBE_LEADER_URL|HF_TOKEN|HUGGING_FACE_HUB_TOKEN)='; then
+  fail "the image's environment holds a token or a leader"
+fi
+if docker history --no-trunc --format '{{.CreatedBy}}' "$image" \
+  | grep -E -i 'token|secret|password|credential\.json|SWARMSCRIBE_LEADER_URL'; then
+  fail "the image's history mentions a token, a secret or a leader"
+fi
+if docker run --rm --entrypoint sh "$image" -c \
+  'find / -xdev \( -name credential.json -o -name "*.env" -o -name token \) -not -path "/proc/*" 2>/dev/null | grep .'; then
+  fail "the image holds a file that looks like a secret"
+fi
+
+# --- how it starts -------------------------------------------------------------------------
+# Read-only root filesystem, no network, no configuration: it names what is missing and
+# exits 2, without a traceback.
+status=0
+output="$(docker run --rm "${locked[@]}" "$image" 2>&1)" || status=$?
+[ "$status" = "2" ] || fail "run without configuration exited $status, not 2"
+echo "$output" | grep -q 'invalid configuration' \
+  || fail "run without configuration did not say so: $output"
+if echo "$output" | grep -q 'Traceback'; then
+  fail "run without configuration ended in a traceback"
+fi
+
+# The three writable paths as tmpfs, as a chart would give them: the state folder needs its
+# owner and mode said (a plain tmpfs is root's and world-writable, and is refused).
+docker run --rm "${locked[@]}" "${leader[@]}" -e SWARMSCRIBE_FOLLOWER_DEVICE=cpu \
+  --tmpfs "$state:uid=10001,gid=10001,mode=0700" \
+  --tmpfs /scratch:uid=10001,gid=10001,mode=0700 \
+  --tmpfs /models:uid=10001,gid=10001,mode=0755 \
+  "$image" doctor --no-model --no-leader | grep -q '^result: ready$' \
+  || fail "doctor does not pass on a read-only root with tmpfs on the three writable paths"
+
+# --- the device ------------------------------------------------------------------------------
+if [ "$target" = "cuda" ]; then
+  [ "$(setting SWARMSCRIBE_FOLLOWER_DEVICE)" = "cuda" ] || fail "the cuda image does not ask for cuda"
+  # The library the locked CTranslate2 loads by name at the first inference. It needs no
+  # GPU to load, so this is checked everywhere; that it WORKS is checked on a GPU only.
+  docker run --rm --entrypoint python "$image" -c 'import ctypes; ctypes.CDLL("libcublas.so.12")' \
+    || fail "libcublas.so.12 does not load by name"
+  # Without a GPU the cuda image must say so, not fall back to the CPU.
+  status=0
+  output="$(docker run --rm "${locked[@]}" "${leader[@]}" "$image" doctor --no-leader 2>&1)" || status=$?
+  [ "$status" = "3" ] || fail "the cuda image without a GPU exited $status, not 3: $output"
+  echo "$output" | grep -q 'cuda was requested' || fail "the cuda image did not name the device"
+else
+  [ -z "$(setting SWARMSCRIBE_FOLLOWER_DEVICE)" ] || fail "the cpu image sets a device"
+  if docker run --rm --entrypoint python "$image" -c 'import ctypes; ctypes.CDLL("libcublas.so.12")' 2>/dev/null; then
+    fail "the cpu image carries cuBLAS"
+  fi
+fi
+
+# --- the model -------------------------------------------------------------------------------
+if [ -z "$baked" ]; then
+  [ -z "$(setting SWARMSCRIBE_FOLLOWER_STARTUP_MODEL)" ] || fail "a start-up model is set without a baked model"
+  [ "$(setting SWARMSCRIBE_FOLLOWER_OFFLINE)" = "0" ] || fail "offline mode is on without a baked model"
+  docker run --rm --entrypoint sh "$image" -c 'test -z "$(ls -A /models)"' \
+    || fail "/models is not empty in an image without a baked model"
+else
+  [ "$(setting SWARMSCRIBE_FOLLOWER_STARTUP_MODEL)" = "$baked" ] \
+    || fail "the start-up model is '$(setting SWARMSCRIBE_FOLLOWER_STARTUP_MODEL)', not $baked"
+  [ "$(setting SWARMSCRIBE_FOLLOWER_OFFLINE)" = "1" ] || fail "a baked image is not offline"
+  docker run --rm "${locked[@]}" "${leader[@]}" -e SWARMSCRIBE_FOLLOWER_DEVICE=cpu \
+    "$image" doctor --no-model --no-leader | grep -E -q "^cached models: (.*, )?$baked(,|\$)" \
+    || fail "the baked model $baked is not in /models"
+
+  # The files in the image are the files the lock file names, hashed again INSIDE the image
+  # (the build checked them once; this checks what was shipped), and no other file is there.
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  docker run --rm -i --entrypoint python "$image" -c '
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+entry = json.load(sys.stdin)[sys.argv[1]]
+cache = Path("/models") / ("models--" + entry["repo"].replace("/", "--"))
+snapshot = cache / "snapshots" / entry["revision"]
+found = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in snapshot.iterdir()}
+if found != entry["files"]:
+    sys.exit("baked files differ from the lock file: " + str(sorted(set(found.items()) ^ set(entry["files"].items()))))
+ref = (cache / "refs" / "main").read_text()
+if ref != entry["revision"]:
+    sys.exit("refs/main is " + ref + ", not " + entry["revision"])
+' "$baked" < "$here/models.lock.json" \
+    || fail "the baked $baked does not match docker/models.lock.json inside the image"
+
+  gpu=()
+  if [ "$target" = "cuda" ]; then
+    gpu=(--gpus all)
+  fi
+  if [ "$target" = "cpu" ] || [ "${CHECK_GPU:-0}" = "1" ]; then
+    # The model loads and runs a real inference with no network at all and nothing
+    # writable but the two declared volumes: nothing is fetched at run time.
+    output="$(docker run --rm "${locked[@]}" "${gpu[@]}" "${leader[@]}" "$image" doctor --no-leader 2>&1)" \
+      || fail "doctor failed offline: $output"
+    echo "$output" | grep -q "^model: $baked (.*) loaded and ran\$" \
+      || fail "the baked model did not load and run offline: $output"
+    echo "$output" | grep -q '^result: ready$' || fail "doctor is not ready: $output"
+    if [ "$target" = "cuda" ]; then
+      echo "$output" | grep -q '^device: cuda (' || fail "doctor did not run on the GPU: $output"
+    fi
+
+    # PID 1: `docker stop` during start-up ends it with exit 0, well inside Docker's 10 s.
+    # With no network the registration is retried for ever, which is where it is stopped.
+    name="follower-check-$$"
+    trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+    docker run -d --name "$name" "${locked[@]}" "${gpu[@]}" "${leader[@]}" \
+      -e SWARMSCRIBE_JOIN_TOKEN=not-a-token "$image" >/dev/null
+    for _ in $(seq 1 60); do
+      docker logs "$name" 2>&1 | grep -q 'loaded on' && break
+      sleep 1
+    done
+    docker logs "$name" 2>&1 | grep -q 'loaded on' || fail "the follower never loaded its model"
+    docker exec "$name" cat /proc/1/cmdline | xargs -0 echo | grep -q 'bin/swarmscribe-follower run' \
+      || fail "the follower is not PID 1"
+    begun="$(date +%s)"
+    docker stop --time 8 "$name" >/dev/null
+    took="$(($(date +%s) - begun))"
+    status="$(docker inspect --format '{{.State.ExitCode}}' "$name")"
+    [ "$status" = "0" ] || fail "docker stop during start-up exited $status, not 0 (137 is a kill)"
+    [ "$took" -lt 3 ] || fail "docker stop during start-up took $took s"
+    if docker logs "$name" 2>&1 | grep -q 'not-a-token'; then
+      fail "the join token is in the log"
+    fi
+  fi
+fi
+
+size="$(docker image inspect --format '{{.Size}}' "$image")"
+echo "ok: $image is a $target follower${baked:+ with $baked baked in} ($((size / 1000000)) MB)"

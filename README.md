@@ -418,11 +418,12 @@ How it ends:
 | `130` | Ctrl+C before `run` started supervising (any other command) | n/a |
 
 **Stopping.** Ctrl+C or `SIGTERM` (on Windows also Ctrl+Break) stops claiming.
-The handlers are installed before anything slow, so a stop also works during
-start-up (against a leader that is down, while registering, or while the model
-loads): the process exits `0` and registers nothing. A model load or download
-itself cannot be interrupted; the stop is seen the moment it ends. As PID 1 in a
-container this is what lets `docker stop` end the follower.
+The handlers are installed before anything else is even imported, so a stop also
+works during start-up (in the first moments of the process, against a leader that
+is down, while registering, or while the model loads): the process exits `0` and
+registers nothing. A model load or download itself cannot be interrupted; the stop
+is seen the moment it ends. In the image an init (`tini`) is PID 1 and covers the
+moment before Python itself is up; see "Follower image".
 The current job is finished only if its estimated time left fits the grace
 period, or if it is already uploading or submitting; otherwise it is released
 without counting an attempt and another follower redoes it. The stop takes
@@ -471,18 +472,28 @@ credentials.
 `docker/follower.Dockerfile` builds `swarmscribe-follower:cpu`: the follower, the engine and
 the protocol package, installed with `uv` into an environment that is all the final image
 holds beside Python. It carries no leader, no console and no build tools. It runs as user
-10001 with the follower as its only process: `docker stop` reaches it directly, and it
-exits `0` with the job in hand released (see "Stopping" above).
+10001. PID 1 is a minimal init (`tini`, Debian's package) and the follower is its only
+child: `docker stop` reaches the follower through it, and the follower exits `0` with the
+job in hand released (see "Stopping" above). A stop in the first tens of milliseconds,
+before Python has started, ends the container with `143`: nothing had been started. No
+`--init` flag is needed, and a stop is never lost (a lost stop would end in a kill, `137`,
+when the stop window closes).
 
 ```
 docker build -t swarmscribe-follower:cpu --target cpu -f docker/follower.Dockerfile .
 docker run -d --restart on-failure --read-only --cap-drop ALL \
+  --security-opt no-new-privileges \
   -e SWARMSCRIBE_LEADER_URL=https://leader.example.org \
   -e SWARMSCRIBE_JOIN_TOKEN=<the token> \
   -v swarmscribe-follower:/var/lib/swarmscribe-follower \
   -v swarmscribe-models:/models \
   swarmscribe-follower:cpu
 ```
+
+A token on the command line stays in the shell's history. To keep it out, put it in a file
+that user 10001 can read, mount it read-only and name it:
+`-v /path/to/join-token:/run/secrets/join-token:ro -e
+SWARMSCRIBE_JOIN_TOKEN_FILE=/run/secrets/join-token`.
 
 It writes in three places and nowhere else, so the root filesystem can be read-only:
 
@@ -492,9 +503,24 @@ It writes in three places and nowhere else, so the root filesystem can be read-o
 | `/scratch` | the recording being transcribed; emptied after every job and at every start | a declared volume |
 | `/models` | the model cache | a plain folder: mount a volume to keep downloads (with `--read-only` it is needed), or bake the models in |
 
-A state folder given as a `tmpfs` must be the follower's own: `--tmpfs
-/var/lib/swarmscribe-follower:uid=10001,gid=10001,mode=0700`. A plain tmpfs belongs to root
-and is writable by all, and the credential is refused there.
+**The state folder must be the follower's own.** The credential is kept only in a folder
+that belongs to the user the follower runs as (10001 in the image) and that nobody else can
+write to. The follower checks this before it registers: a folder that fails is refused at
+once with exit `2`, a message that names the folder, its owner and its mode, and no join
+token is used. `swarmscribe-follower doctor` reports the same on its `state folder` line.
+(Before this check a follower in such a folder registered, worked, and refused its own
+credential at every later start.) What each kind of mount needs:
+
+| The state folder is | What it needs |
+|---|---|
+| a named volume (`-v swarmscribe-follower:/var/lib/swarmscribe-follower`), or nothing at all | nothing: Docker gives a new volume the image's owner and mode (10001, `0700`) |
+| a folder of a Linux host (`-v /srv/follower:...`) | `sudo chown 10001:10001 /srv/follower && sudo chmod 700 /srv/follower` before the first start |
+| a `tmpfs` | its owner and mode said: `--tmpfs /var/lib/swarmscribe-follower:uid=10001,gid=10001,mode=0700`. A plain tmpfs belongs to root and is writable by all |
+| a folder of a Windows or macOS host under Docker Desktop (`-v C:\follower:...`) | not usable: inside the container it is seen as root's and writable by all (measured). Use a named volume |
+| a Kubernetes `emptyDir` | it is root's and mode `0777` by default, and `fsGroup` changes its group, not its owner: refused. Until the chart (F3) arrives, give the folder to the follower in an init container that runs as root with the same volume mounted (`chown 10001:10001 /state && chmod 700 /state`); this has not been run yet, the chart will do it and test it |
+
+The follower never changes a folder that is not its own; one of its own that is looser than
+`0700` it tightens itself.
 
 **The model.** By default the follower downloads its start-up model from Hugging Face on
 first start into `/models` (1.5 GB for `distil-large-v3`). To put models into the image
@@ -505,7 +531,8 @@ docker build --build-arg MODELS=distil-large-v3 -t swarmscribe-follower:cpu-dist
   --target cpu -f docker/follower.Dockerfile .
 ```
 
-`MODELS` is a comma-separated list. Each model is downloaded during the build from one
+`MODELS` is a list of names separated by commas, with no spaces (`tiny.en,large-v3`); a
+space or an empty item fails the build. Each model is downloaded during the build from one
 pinned commit and every file is checked against its SHA-256 in `docker/models.lock.json`;
 a file that differs fails the build. The first name becomes the start-up model
 (`SWARMSCRIBE_FOLLOWER_STARTUP_MODEL`), and the image is offline
@@ -516,15 +543,35 @@ set`). To allow a model that is not in the lock file yet, add the entry that
 `uv run python docker/fetch_models.py --pin <name>` prints.
 
 `bash docker/check-follower-image.sh <image> cpu [<baked model>]` checks an image without a
-leader: the user and the folders, that the leader and build tools are absent, that it
-starts read-only without capabilities, and, for a baked image, that the model loads and
-runs with no network at all and that `docker stop` ends a follower that is still starting.
+leader: its labels (title, source, description, and a version that is the installed
+follower's), the user and the folders, that the leader and build tools are absent, that an
+init is PID 1, that it starts read-only without capabilities, and, for a baked image, that
+the model loads and runs with no network at all, that a container stopped the moment it
+starts ends with `0` or `143` and never `137`, and that `docker stop` ends a follower that
+is still starting.
+
 The image also sets `HF_HUB_CACHE=/models` (and `HF_HUB_OFFLINE=1` when a model is baked),
-so the engine's own command in it, `swarmscribe-engine`, finds the baked model.
+so the engine's own command in it, `swarmscribe-engine`, reads the same cache and stays
+offline. It does not know which model was baked: it asks for its device's default
+(`distil-large-v3` on a CPU) unless told, so name the baked model and its compute type:
+
+```
+docker run --rm --network none --entrypoint swarmscribe-engine \
+  -v "$PWD/recordings:/in:ro" -v "$PWD/out:/out" \
+  swarmscribe-follower:cpu-tiny.en /in/call.wav --out /out --model tiny.en --compute-type int8
+```
+
+(`out` must be writable by user 10001. Without `--model` an image that holds only `tiny.en`
+fails with `LocalEntryNotFoundError`.)
 
 Known limits: the image is built for the machine's own architecture and only `amd64` has
-been run; it has no `HEALTHCHECK` yet (the follower listens on no port); a model that is
-downloaded at run time, not baked, is whatever its repository's `main` is that day.
+been run. **It has no `HEALTHCHECK` yet**: the follower listens on no port, so Docker shows
+no health state for the container, a Compose `depends_on: condition: service_healthy` on it
+never becomes true, and an orchestrator sees only "running". The health listener and the
+`HEALTHCHECK` arrive together in F2b. A model that is downloaded at run time, not baked, is
+whatever its repository's `main` is that day. With `--init`, or in a pod that shares its
+process namespace, `tini` is not PID 1 and says so in one warning line on stderr; it still
+forwards signals.
 **Memory:** a follower holds the whole decoded recording in memory while it transcribes,
 about 3.5 GiB per hour of audio (measured), and nothing yet stops a follower from taking a
 recording that does not fit: give the container a memory limit with headroom for the
@@ -555,7 +602,9 @@ docker compose -f e2e/follower-compose/docker-compose.yml --profile followers do
 ```
 
 It takes about two minutes and runs once per stack (it drains and revokes its followers): a
-second run stops at once and says to `down -v` first. The leader is plain `http` behind the
+second run stops at once and says to `down -v` first. A follower that exits before it has
+registered (an image built without `MODELS=tiny.en`, for one) stops the scenario at once,
+with the follower's exit code and what it said. The leader is plain `http` behind the
 proxy, as it is behind an ingress, so the followers set the development switch
 `SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1`. The driver adds the join token, the profile and the
 locations, and drains and revokes, with the leader's own functions against its database

@@ -30,7 +30,7 @@ from swarmscribe_leader.storage.base import StorageUnavailable
 from swarmscribe_leader.storage.links import LinkSigner
 from swarmscribe_leader.storage.local import LocalBackend
 from swarmscribe_leader.storage.registry import backend_for
-from swarmscribe_protocol import ClaimResponse
+from swarmscribe_protocol import DIRECTIVE_HEADER, ClaimResponse
 
 CAPABILITIES = {
     "device": "cpu",
@@ -1191,3 +1191,79 @@ async def test_a_503_for_storage_does_not_use_up_the_bound(
     app.state.backend_factory = real
     assert (await fresh(client, headers, claimed)).status_code == 200
 
+
+# --- the drain signal (follower spec 12.3) -----------------------------------------------
+
+
+async def test_an_idle_draining_follower_is_told_it_is_draining(
+    client, sessionmaker, factory, tmp_path
+):
+    await queue_one(sessionmaker, factory, tmp_path)
+    headers = await register(client, sessionmaker)
+    busy = await client.post("/v1/jobs/claim", headers=await register(client, sessionmaker))
+    assert busy.status_code == 200  # an active follower gets the job, and no directive
+    assert DIRECTIVE_HEADER not in busy.headers
+    empty = await client.post("/v1/jobs/claim", headers=headers)
+    assert (empty.status_code, empty.headers.get(DIRECTIVE_HEADER)) == (204, None)
+    async with sessionmaker() as session:
+        for follower in (await session.scalars(select(Follower))).all():
+            follower.state = "draining"
+        await session.commit()
+    told = await client.post("/v1/jobs/claim", headers=headers)
+    assert told.status_code == 204
+    assert told.headers[DIRECTIVE_HEADER] == "drain"
+    assert told.headers["x-swarmscribe-directive"] == "drain"
+    assert told.headers["retry-after"] == "10"
+    assert told.content == b""
+
+
+async def test_a_drain_survives_deregistering_and_coming_back(client, sessionmaker):
+    headers = await register(client, sessionmaker)
+    async with sessionmaker() as session:
+        (await session.scalars(select(Follower))).one().state = "draining"
+        await session.commit()
+    assert (await client.post("/v1/followers/deregister", headers=headers)).status_code == 204
+    back = await client.post("/v1/jobs/claim", headers=headers)
+    assert (back.status_code, back.headers[DIRECTIVE_HEADER]) == (204, "drain")
+
+
+async def test_the_other_empty_claims_never_carry_the_directive(client, sessionmaker):
+    """An active follower's empty claim, and the no-profile 204, carry no directive."""
+    headers = await register(client, sessionmaker)
+    empty = await client.post("/v1/jobs/claim", headers=headers)
+    assert (empty.status_code, DIRECTIVE_HEADER in empty.headers) == (204, False)
+    odd = await register(client, sessionmaker, device="cuda")
+
+    async def set_cuda_profiles_device(old: str, new: str) -> None:
+        async with sessionmaker() as session:
+            await session.execute(
+                update(SettingsProfile).where(SettingsProfile.device == old).values(device=new)
+            )
+            await session.commit()
+
+    await set_cuda_profiles_device("cuda", "retired")
+    try:
+        no_profile = await client.post("/v1/jobs/claim", headers=odd)
+    finally:
+        await set_cuda_profiles_device("retired", "cuda")
+    assert (no_profile.status_code, DIRECTIVE_HEADER in no_profile.headers) == (204, False)
+
+
+async def test_a_busy_draining_follower_hears_drain_from_the_heartbeat_and_a_claim(
+    client, sessionmaker, factory, tmp_path
+):
+    """Spec 12.3: the job's heartbeat says `drain`; a claim says it too (a `204`), whether or
+    not the follower still holds a lease. Nothing new is handed out."""
+    await queue_one(sessionmaker, factory, tmp_path)
+    await queue_one(sessionmaker, factory, tmp_path, key="talks/two.mp3")
+    headers = await register(client, sessionmaker)
+    claimed = await claim(client, headers)
+    await set_follower_state(sessionmaker, "draining")
+    beat = await client.post(
+        f"/v1/jobs/{claimed.job_id}/heartbeat",
+        headers=headers,
+        json={"lease_id": claimed.lease_id, "progress": 0.1},
+    )
+    assert beat.json() == {"directive": "drain"}
+    again = await client.post("/v1/jobs/claim", headers=headers)
+    assert (again.status_code, again.headers[DIRECTIVE_HEADER]) == (204, "drain")

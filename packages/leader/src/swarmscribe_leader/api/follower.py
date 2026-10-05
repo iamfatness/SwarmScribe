@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from swarmscribe_protocol import (
+    DIRECTIVE_HEADER,
     ClaimResponse,
     FailRequest,
     HeartbeatRequest,
@@ -53,10 +54,14 @@ async def current_follower(
     return await authenticate(session, credential.strip(), now=utcnow())
 
 
-def _no_work(request: Request) -> Response:
-    return Response(
-        status_code=204, headers={"Retry-After": str(settings_of(request).claim_retry_after)}
-    )
+def _no_work(request: Request, *, draining: bool = False) -> Response:
+    """Nothing to hand out. A draining follower is told so, here, because an idle follower
+    makes no other call: without it, "you are draining" and "the queue is empty" look the
+    same and an idle follower could never wind down."""
+    headers = {"Retry-After": str(settings_of(request).claim_retry_after)}
+    if draining:
+        headers[DIRECTIVE_HEADER] = "drain"
+    return Response(status_code=204, headers=headers)
 
 
 @router.post("/followers/register", response_model=RegisterResponse)
@@ -83,7 +88,7 @@ async def claim_job(
     settings = settings_of(request)
     if follower.state == "draining":
         await session.commit()
-        return _no_work(request)
+        return _no_work(request, draining=True)
     device = device_of(follower)
     profile = await profile_for(session, device)
     if profile is None:

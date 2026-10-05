@@ -176,6 +176,22 @@ test("a drill-down address survives a reload and a leader name without a tab red
   await expect(page.getByRole("heading", { level: 2, name: "Consent report" })).toBeVisible();
 });
 
+test("a leader's page says who the person is here and what its labels are", async ({ page }) => {
+  await signIn(page, "operator", "/leaders/eu-1/pools");
+  const main = page.getByRole("main");
+  await expect(main.getByText(/^You are an operator here\./)).toHaveText(
+    "You are an operator here. What needs an admin is shown, but switched off.",
+  );
+  await expect(main.getByRole("list", { name: "Labels" }).getByRole("listitem")).toHaveText([
+    "env=prod",
+    "region=eu",
+  ]);
+  await expect(main.getByText("Answering", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("navigation", { name: "Console" }).getByRole("link", { name: "eu-1", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+});
+
 test("switching tabs keeps focus on the tab link", async ({ page }) => {
   await signIn(page, "viewer", "/leaders/eu-1/pools");
   const jobs = page.getByRole("navigation", { name: "eu-1 sections" }).getByRole("link", { name: "Jobs" });

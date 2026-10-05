@@ -179,6 +179,15 @@ for (const theme of THEMES) {
       await settled(page);
       await shot("fleet-every-state");
 
+      // A leader's own page in each state it can be in (its tab's read fails: the header is
+      // what is photographed).
+      for (const state of ["rev-1", "off-1", "new-1", "lost-1"]) {
+        await page.goto(`/leaders/${state}/pools`);
+        await expect(page.getByRole("heading", { level: 1, name: state })).toBeVisible();
+        await expect(page.getByRole("main").locator(".notice").first()).toBeVisible();
+        await shot(`leader-state-${state}`);
+      }
+
       await fleetAs((leaders) => copies(leaders, 6, { health: "credential_revoked" }));
       await page.goto("/");
       await settled(page);

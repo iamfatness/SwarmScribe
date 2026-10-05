@@ -33,10 +33,11 @@ describe("leader drill-down", () => {
       await screen.findByRole("heading", { level: 1, name: "eu-1" }),
     ).toBeInTheDocument();
     expect(
-      await screen.findByText(
-        /Actions that need a higher role are shown disabled/,
-      ),
-    ).toHaveTextContent("Your role on eu-1: operator.");
+      await screen.findByText(/What needs an admin is shown, but switched off/),
+    ).toHaveTextContent("You are an operator here. What needs an admin is shown, but switched off.");
+    expect(
+      within(screen.getByRole("main")).getByRole("list", { name: "Labels" }),
+    ).toHaveTextContent("env=prodregion=eu");
     const tabs = screen.getByRole("navigation", { name: "eu-1 sections" });
     const pools = within(tabs).getByRole("link", {
       name: "Pools and followers",
@@ -48,7 +49,7 @@ describe("leader drill-down", () => {
   it("says a leader the person cannot see is not visible to them", async () => {
     renderApp("/leaders/secret-1/pools");
     expect(
-      await screen.findByText(/This leader is not visible to you/),
+      await screen.findByText(/You cannot see this leader/),
     ).toBeInTheDocument();
   });
 
@@ -63,6 +64,16 @@ describe("leader drill-down", () => {
       name: "eu-1",
     });
     await waitFor(() => expect(heading).toHaveFocus());
+  });
+
+  it("tells each role what is switched off for it", async () => {
+    renderApp("/leaders/eu-1/pools", { fleet: [leader({ role: "viewer" })] }).on(
+      "GET /api/leaders/eu-1/followers",
+      reply(200, []),
+    );
+    expect(await screen.findByText(/You are a/)).toHaveTextContent(
+      "You are a viewer here. What needs an operator or an admin is shown, but switched off.",
+    );
   });
 
   it("redirects a bare leader URL to its first tab", async () => {
@@ -86,8 +97,9 @@ describe("leader drill-down", () => {
       reply(503, { code: "leader_unreachable", message: "down" }),
     );
     expect(
-      await screen.findByText(/The console cannot reach eu-1/),
-    ).toHaveTextContent("The last successful poll was at");
+      await screen.findByText(/eu-1 is not answering, so nothing here can be read or changed/),
+    ).toHaveTextContent("It last answered at");
+    expect(within(screen.getByRole("main")).getByText("Not answering")).toBeInTheDocument();
     expect(
       screen.getByRole("heading", { level: 1, name: "eu-1" }),
     ).toBeInTheDocument();

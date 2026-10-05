@@ -181,7 +181,7 @@ describe("jobs tab", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "The leader is not answering right now.",
     );
-    expect(screen.getByText(/The console cannot reach eu-1/)).toBeInTheDocument();
+    expect(screen.getByText(/eu-1 is not answering, so nothing here can be read or changed/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Pools and followers" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "State" })).toBeEnabled();
   });

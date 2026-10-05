@@ -1236,3 +1236,47 @@ follower chart (F3) and the outside-machine install (F4).
 - **Registration refusals (4.1).** Exit 5 is for a protocol refusal only; any
   other refusal of the registration (a 404 from a wrong URL, a 403 from a proxy)
   exits 2.
+
+**Amendments after F2** (measured and built in plans F2a and F2b, 2026-10-05).
+- **GPU libraries (D15, 8.1).** The `cuda` extra and image carry cuBLAS only
+  (`nvidia-cublas-cu12`, and `nvidia-cuda-nvrtc-cu12` which it depends on). CTranslate2 4.8.2
+  does not load cuDNN. `LD_LIBRARY_PATH` names the one wheel's `lib` folder. The image check
+  loads `libcublas.so.12` by name.
+- **The `cuda` image's device (8.1, 5.9).** The `cuda` image sets
+  `SWARMSCRIBE_FOLLOWER_DEVICE=cuda`: without a usable GPU it exits 3 at start-up step 4
+  where `auto` would use the CPU.
+- **Image sizes (8.1).** Without a model: `cpu` 789 MB, `cuda` 2548 MB; with `tiny.en` baked, `cpu` 938 MB; with `large-v3` baked, `cuda` 8486 MB (as `docker image inspect` counts them).
+- **Declared volumes (8.1).** The state folder and `/scratch` are both declared; `/models`
+  is not (a volume there would copy a baked model on every start).
+- **The init (8.1).** `tini` is PID 1 and the follower its child (already in 8.1, from
+  F2a's fix wave); the `HEALTHCHECK`'s children are reaped by it.
+- **Baked models (5.10).** `MODELS` is names separated by commas, with no spaces; its first
+  name is the start-up model. Models come from Hugging Face at build time, each pinned to a commit and
+  to a SHA-256 per file in `docker/models.lock.json`.
+- **`doctor` (8.3).** `--no-leader` leaves the leader out; a `memory:` line says what the
+  follower may use.
+- **Health (9).** During a job the lease keeper must have run its loop within three
+  heartbeat intervals *plus the time one request to the leader may take* (30 seconds): the
+  keeper stamps its loop before it asks, and a leader that does not answer must not make
+  `/healthz` fail.
+- **Memory guard (5.7, D22, 8.2).** The measured figures replace the estimates:
+
+  ```
+  needed = what the process holds once the model is loaded (read from /proc on Linux;
+           where the platform will not say, Windows and macOS, nothing is added)
+         + 100 MiB
+         + duration in hours × 3600 MiB  (mono, or auto on anything but a stereo file)
+         + duration in hours × 3900 MiB  (split)
+  ```
+
+  The limit is `SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB`, or when unset the smaller of the
+  cgroup limit and the machine's physical memory (on Windows and macOS, the machine's total
+  memory). The chart's sizing guidance (8.2) becomes:
+  the model's host memory (1.7 GiB for `distil-large-v3` on a CPU; 3.1 GiB at the peak of
+  loading `large-v3` onto a GPU) plus 3.8 GiB per hour of the longest recording the pool will
+  see (3900 MiB; mono counts 3.5 GiB, 3600 MiB).
+- **Health listener (4.1, 9).** It binds IPv6 literals too (`[::1]:9108`). `/healthz` is 200
+  from the moment the follower starts supervising, so also while the model loads.
+- **Compose test (10).** The profile is set with the leader's `set_profile`, not in the
+  database by hand. The test also covers the health listener, `/metrics` and the memory
+  guard.

@@ -399,6 +399,8 @@ Commands:
 | `SWARMSCRIBE_FOLLOWER_SHUTDOWN_GRACE_SECONDS` | `8` | how long a stop may wait for the current job |
 | `SWARMSCRIBE_FOLLOWER_ON_DRAINED` | `exit` | `exit`, or `park` under a supervisor that restarts whatever exits |
 | `SWARMSCRIBE_FOLLOWER_LOG_FORMAT` | `json` | `json` or `text` |
+| `SWARMSCRIBE_FOLLOWER_HEALTH_ADDR` | none (the images: `127.0.0.1:9108`) | `host:port` to listen on for `/healthz` and `/metrics`; unset, the follower opens no port |
+| `SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB` | the container's limit or the machine's memory, the smaller | the memory the follower may use, at least 64; a recording that cannot fit is failed `out_of_resources` before it is transcribed |
 
 Only one follower may use a state folder at a time (a second one exits `2`).
 It refuses a scratch folder that holds files it did not put there. The
@@ -423,7 +425,7 @@ works during start-up (in the first moments of the process, against a leader tha
 is down, while registering, or while the model loads): the process exits `0` and
 registers nothing. A model load or download itself cannot be interrupted; the stop
 is seen the moment it ends. In the image an init (`tini`) is PID 1 and covers the
-moment before Python itself is up; see "Follower image".
+moment before Python itself is up; see "Follower images".
 The current job is finished only if its estimated time left fits the grace
 period, or if it is already uploading or submitting; otherwise it is released
 without counting an attempt and another follower redoes it. The stop takes
@@ -467,24 +469,42 @@ credentials.
   learns it has nothing to do. The cheap checks (settings, folders, a credential
   or a token) come first, so a follower that cannot register fails at once.
 
-### Follower image
+### Follower images
 
-`docker/follower.Dockerfile` builds `swarmscribe-follower:cpu`: the follower, the engine and
-the protocol package, installed with `uv` into an environment that is all the final image
-holds beside Python. It carries no leader, no console and no build tools. It runs as user
-10001. PID 1 is a minimal init (`tini`, Debian's package) and the follower is its only
-child: `docker stop` reaches the follower through it, and the follower exits `0` with the
-job in hand released (see "Stopping" above). A stop in the first tens of milliseconds,
-before Python has started, ends the container with `143`: nothing had been started. No
-`--init` flag is needed, and a stop is never lost (a lost stop would end in a kill, `137`,
-when the stop window closes).
+`docker/follower.Dockerfile` builds two images from the same code. Each holds the follower,
+the engine and the protocol package, installed with `uv` into an environment that is all
+the final image holds beside Python: no leader, no console, no build tools.
+
+| | `swarmscribe-follower:cpu` | `swarmscribe-follower:cuda` |
+|---|---|---|
+| Build | `--target cpu` (the default) | `--target cuda` |
+| Adds | nothing | cuBLAS, from the `nvidia-cublas-cu12` wheel (the follower's `cuda` extra) |
+| Device | CPU (`auto` finds no GPU) | `SWARMSCRIBE_FOLLOWER_DEVICE=cuda`: without a GPU it exits `3` and says so, before it registers |
+| Default model | `distil-large-v3`, `int8` | `large-v3`, `float16` |
+| Size without a model | 0.8 GB (789 MB) | 2.5 GB (2548 MB) |
+| Needs at run time | nothing | the NVIDIA container runtime, for the driver's own libraries |
 
 ```
-docker build -t swarmscribe-follower:cpu --target cpu -f docker/follower.Dockerfile .
-docker run -d --restart on-failure --read-only --cap-drop ALL \
+docker build -t swarmscribe-follower:cpu  --target cpu  -f docker/follower.Dockerfile .
+docker build -t swarmscribe-follower:cuda --target cuda -f docker/follower.Dockerfile .
+```
+
+**Run one.** The follower runs as user 10001. PID 1 is a minimal init (`tini`, Debian's
+package) and the follower is its only child: `docker stop` reaches the follower through it,
+and the follower exits `0` with the job in hand released (see "Stopping" above). A stop in
+the first tens of milliseconds, before Python has started, ends the container with `143`:
+nothing had been started. No `--init` flag is needed, and a stop is never lost (a lost stop
+would end in a kill, `137`, when the stop window closes). Restart it on failure, a few
+times: exit `0` (stopped, or drained) is final for Docker, but Docker cannot tell the other
+codes apart, and without a count a revoked follower (exit `4`) or a misconfigured one
+(exit `2`) would be started again for ever.
+
+```
+docker run -d --restart on-failure:5 --read-only --cap-drop ALL --stop-timeout 930 \
   --security-opt no-new-privileges \
   -e SWARMSCRIBE_LEADER_URL=https://leader.example.org \
   -e SWARMSCRIBE_JOIN_TOKEN=<the token> \
+  -e SWARMSCRIBE_FOLLOWER_SHUTDOWN_GRACE_SECONDS=900 \
   -v swarmscribe-follower:/var/lib/swarmscribe-follower \
   -v swarmscribe-models:/models \
   swarmscribe-follower:cpu
@@ -494,6 +514,11 @@ A token on the command line stays in the shell's history. To keep it out, put it
 that user 10001 can read, mount it read-only and name it:
 `-v /path/to/join-token:/run/secrets/join-token:ro -e
 SWARMSCRIBE_JOIN_TOKEN_FILE=/run/secrets/join-token`.
+
+For a GPU machine: the `cuda` tag and `--gpus all`. The shorter line of the design
+(`docker run -e SWARMSCRIBE_LEADER_URL=... -e SWARMSCRIBE_JOIN_TOKEN=... swarmscribe-follower:cpu`)
+works too, with Docker's 10-second stop, a credential that lasts as long as the container,
+and a model downloaded again for every new container.
 
 It writes in three places and nowhere else, so the root filesystem can be read-only:
 
@@ -508,8 +533,7 @@ that belongs to the user the follower runs as (10001 in the image) and that nobo
 write to. The follower checks this before it registers: a folder that fails is refused at
 once with exit `2`, a message that names the folder, its owner and its mode, and no join
 token is used. `swarmscribe-follower doctor` reports the same on its `state folder` line.
-(Before this check a follower in such a folder registered, worked, and refused its own
-credential at every later start.) What each kind of mount needs:
+What each kind of mount needs:
 
 | The state folder is | What it needs |
 |---|---|
@@ -522,13 +546,31 @@ credential at every later start.) What each kind of mount needs:
 The follower never changes a folder that is not its own; one of its own that is looser than
 `0700` it tightens itself.
 
-**The model.** By default the follower downloads its start-up model from Hugging Face on
-first start into `/models` (1.5 GB for `distil-large-v3`). To put models into the image
-instead, name them at build time:
+**GPU prerequisites.** An NVIDIA GPU with a driver new enough for CUDA 12, and a Docker that
+can hand it to a container: on Linux the NVIDIA Container Toolkit, on Windows Docker Desktop
+with WSL 2 (nothing to install). Check with `docker run --rm --gpus all
+nvidia/cuda:12.9.1-base-ubuntu24.04 nvidia-smi`, then with the image itself:
 
 ```
-docker build --build-arg MODELS=distil-large-v3 -t swarmscribe-follower:cpu-distil-large-v3 \
-  --target cpu -f docker/follower.Dockerfile .
+docker run --rm --gpus all -e SWARMSCRIBE_LEADER_URL=https://leader.example.org \
+  swarmscribe-follower:cuda doctor
+```
+
+`doctor` names the GPU (`device: cuda (NVIDIA GeForce RTX 4090, 24564 MiB)`), loads the
+model and runs it once: GPU libraries are loaded at the first inference, so a missing one
+shows here and not in the middle of a job. The image carries cuBLAS only; the CTranslate2
+it is locked to does not use cuDNN. One follower uses one GPU: on a machine with several,
+run one container per GPU (`--gpus device=0`, `--gpus device=1`), each with its own state
+volume.
+
+**Baked models.** By default a follower downloads its start-up model from Hugging Face on
+first start into `/models` (1.5 GB for `distil-large-v3`, 3.1 GB for `large-v3`). To put
+models into the image instead, which is what a Kubernetes pool should run, name them at
+build time:
+
+```
+docker build --build-arg MODELS=large-v3 -t swarmscribe-follower:cuda-large-v3 \
+  --target cuda -f docker/follower.Dockerfile .
 ```
 
 `MODELS` is a list of names separated by commas, with no spaces (`tiny.en,large-v3`); a
@@ -540,20 +582,15 @@ a file that differs fails the build. The first name becomes the start-up model
 a model it does not hold is handed back and the follower exits `3`. The leader's profile
 for the device must therefore name a model the image holds (`swarmscribe-admin profiles
 set`). To allow a model that is not in the lock file yet, add the entry that
-`uv run python docker/fetch_models.py --pin <name>` prints.
-
-`bash docker/check-follower-image.sh <image> cpu [<baked model>]` checks an image without a
-leader: its labels (title, source, description, and a version that is the installed
-follower's), the user and the folders, that the leader and build tools are absent, that an
-init is PID 1, that it starts read-only without capabilities, and, for a baked image, that
-the model loads and runs with no network at all, that a container stopped the moment it
-starts ends with `0` or `143` and never `137`, and that `docker stop` ends a follower that
-is still starting.
+`uv run python docker/fetch_models.py --pin <name>` prints. A baked image is its model
+larger than the model's download, by more than its size as `docker image inspect` counts
+it: `tiny.en` takes the `cpu` image from 789 to 938 MB, and `large-v3` (a 3.1 GB download)
+takes the `cuda` image from 2548 to 8486 MB (4.8 GB of layers, by the planner's count).
 
 The image also sets `HF_HUB_CACHE=/models` (and `HF_HUB_OFFLINE=1` when a model is baked),
 so the engine's own command in it, `swarmscribe-engine`, reads the same cache and stays
-offline. It does not know which model was baked: it asks for its device's default
-(`distil-large-v3` on a CPU) unless told, so name the baked model and its compute type:
+offline. It does not know which model was baked: it asks for its device's default unless
+told, so name the baked model and its compute type:
 
 ```
 docker run --rm --network none --entrypoint swarmscribe-engine \
@@ -564,32 +601,93 @@ docker run --rm --network none --entrypoint swarmscribe-engine \
 (`out` must be writable by user 10001. Without `--model` an image that holds only `tiny.en`
 fails with `LocalEntryNotFoundError`.)
 
-Known limits: the image is built for the machine's own architecture and only `amd64` has
-been run. **It has no `HEALTHCHECK` yet**: the follower listens on no port, so Docker shows
-no health state for the container, a Compose `depends_on: condition: service_healthy` on it
-never becomes true, and an orchestrator sees only "running". The health listener and the
-`HEALTHCHECK` arrive together in F2b. A model that is downloaded at run time, not baked, is
-whatever its repository's `main` is that day. With `--init`, or in a pod that shares its
-process namespace, `tini` is not PID 1 and says so in one warning line on stderr; it still
-forwards signals.
-**Memory:** a follower holds the whole decoded recording in memory while it transcribes,
-about 3.5 GiB per hour of audio (measured), and nothing yet stops a follower from taking a
-recording that does not fit: give the container a memory limit with headroom for the
-longest recording you expect. The guard that refuses such a recording arrives in F2b.
+**Health and metrics.** In the images the follower listens on `127.0.0.1:9108`, inside the
+container only, for the image's own `HEALTHCHECK`. `/healthz` answers 200 while the
+follower's threads are alive: from the moment it starts supervising, so also while the
+model loads, and also while the leader is away, so that nothing kills a follower that is
+transcribing through an outage. It answers 503 when the supervising thread has not gone
+round for 30 seconds, or, during a job, when the lease keeper has not gone round its loop
+for three heartbeat intervals plus 30 seconds (the time one request to the leader may take). `/metrics`
+is in the Prometheus format: `swarmscribe_follower_jobs_total{outcome}`,
+`_audio_seconds_total` and `_transcribe_seconds_total` (their ratio is the speed),
+`_job_progress`, `_model_load_seconds`, `_heartbeat_failures_total`,
+`_download_bytes_total`, `_upload_bytes_total` and `_state` (idle, working, draining,
+stopping). To scrape it from outside, listen on the container's address
+(`-e SWARMSCRIBE_FOLLOWER_HEALTH_ADDR=0.0.0.0:9108`; an IPv6 literal such as `[::]:9108`
+works too) and publish the port to the network
+your Prometheus is on, never to the internet: it has no authentication. Outside the images
+the listener is off unless the variable is set.
+
+**Memory.** The engine reads a whole recording into memory and computes its features in
+one piece, so what a job needs grows with the recording's length, on a GPU as on a CPU
+(measured, 2026-10-05; GiB are 1024 MiB):
+
+| | Host memory |
+|---|---|
+| `distil-large-v3`, `int8`, on a CPU | 1.7 GiB once loaded (1730 MiB) |
+| `large-v3`, `float16`, on a GPU | 0.7 GiB once loaded (741 MiB), 3.1 GiB at the peak of loading (3155 MiB): the model passes through host memory |
+| `large-v3`, `int8`, on a CPU | 3.5 GiB once loaded (3627 MiB) |
+| each hour of the longest recording, mono | 3.4 GiB (3493 MiB on a CPU, 3511 MiB on a GPU); the follower counts 3600 MiB |
+| each hour of the longest recording, split into channels | 2.6 GiB when the speakers alternate (2706 MiB); the follower counts 3900 MiB, for two who both talk throughout |
+
+So a CPU follower with `distil-large-v3` for recordings of up to one hour needs about
+5.3 GiB (what the follower counts: 1730 + 100 + 3600 MiB), and one for three hours about
+12 GiB; a GPU follower with `large-v3` needs 3.1 GiB to load its model at all. Before each
+job the follower adds its estimate for the recording to what the process already holds and
+compares that with what it may use: `SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB`, else the smaller
+of the container's memory limit and the machine's memory (`doctor` prints the figure and
+where it comes from). A recording that cannot fit is failed `out_of_resources` at once, with
+its length and the limit in the reason, instead of being killed half-way three times, hours
+apart. Give the container a memory limit (`--memory 8g`) and the guard follows it.
+
+On Windows and macOS the platform does not say what the process already holds, so the guard
+counts the recording alone, not the loaded model, and when no limit is set its limit is the
+machine's total physical memory, not what is free. There, set
+`SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB` to what the follower may really use.
+
+`bash docker/check-follower-image.sh <image> <cpu|cuda> [<baked model>]` checks an image
+without a leader: its labels (title, source, description, and a version that is the
+installed follower's), the user and the folders, that the leader and build tools are absent,
+that an init is PID 1, that it starts read-only without capabilities, the listener and the
+`HEALTHCHECK`, for `cuda` that cuBLAS loads and that the image refuses to start without a
+GPU, and, for a baked image, that the model loads and runs with no network at all, that a
+container stopped the moment it starts ends with `0` or `143` and never `137`, and that
+`docker stop` ends a follower that is still starting. `CHECK_GPU=1` also runs a baked `cuda`
+image on this machine's GPU.
+
+**Known limits.**
+
+- The `cuda` image is run on a GPU by hand, not in CI: GitHub's runners have none. It was
+  run on an RTX 4090 in Docker Desktop (WSL 2), with a real leader: two followers shared six
+  recordings, a stop mid-job took 1.8 s, drain exited 0 and revoke exited 4
+  (`docs/superpowers/plans/2026-10-05-follower-f2-outcomes.md`). A Linux host with the
+  NVIDIA Container Toolkit and Kubernetes with the device plugin have not been run.
+- Only `amd64` has been built and run.
+- A model downloaded at run time, not baked, is whatever its repository's `main` is that
+  day; only baked models are pinned and checked.
+- A long recording needs a great deal of memory (the table above); nothing splits it.
+- Where the platform does not say what a process holds (Windows, macOS), the memory guard
+  counts the recording alone and not the loaded model, and its default limit is the machine's
+  total memory.
+- The images are not published: build them, or push them to a registry of your own.
+- With `--init`, or in a pod that shares its process namespace, `tini` is not PID 1 and says
+  so in one warning line on stderr; it still forwards signals.
 
 ### Follower Compose test
 
-`e2e/follower-compose/` runs that image, with `tiny.en` baked in, as two followers against
-Postgres and two leader replicas behind nginx. The followers are read-only, without
+`e2e/follower-compose/` runs the `cpu` image, with `tiny.en` baked in, as two followers
+against Postgres and two leader replicas behind nginx. The followers are read-only, without
 capabilities, and on a network with no route out. It checks that both register with one
-join token and share six recordings, each transcribed once and saying what was said (on the
-right channel, where the location splits channels); that a follower killed in the middle of
-a recording loses nothing and comes back as the same follower with an empty scratch folder;
-that an 8-second lease survives a transcription several times as long; that a follower
-stopped with `SIGTERM` mid-job releases the job without a counted attempt; that a drained
-follower exits `0` and a revoked one `4`, again when started again; and that a recording
-without consent is never touched and no follower log holds a token, a link or transcript
-text. It runs in GitHub Actions (job `follower-compose-e2e`); locally, with Docker:
+join token, are reported healthy by Docker, and share six recordings, each transcribed once
+and saying what was said (on the right channel, where the location splits channels); that a
+follower killed in the middle of a recording loses nothing and comes back as the same
+follower with an empty scratch folder; that an 8-second lease survives a transcription
+several times as long; that a follower stopped with `SIGTERM` mid-job releases the job
+without a counted attempt; that an hour-long recording is refused by the memory guard and
+parked with its reason, and that `/metrics` counts it (the followers there are limited to 2500 MiB); that a drained follower exits `0`
+and a revoked one `4`, again when started again; and that a recording without consent is
+never touched and no follower log holds a token, a link or transcript text. It runs in
+GitHub Actions (job `follower-compose-e2e`); locally, with Docker:
 
 ```
 docker build -t swarmscribe-leader:e2e -f e2e/compose/Dockerfile .
@@ -610,6 +708,17 @@ proxy, as it is behind an ingress, so the followers set the development switch
 locations, and drains and revokes, with the leader's own functions against its database
 (published on `127.0.0.1:15432`): this stack has no identity provider to sign an
 administrator in. `LEADER_IMAGE` and `FOLLOWER_IMAGE` replace the two images.
+
+On a machine with an NVIDIA GPU the same scenario runs the `cuda` image, with `large-v3`:
+
+```
+docker build --build-arg MODELS=large-v3 -t swarmscribe-follower:cuda-large-v3 --target cuda -f docker/follower.Dockerfile .
+CHECK_GPU=1 bash docker/check-follower-image.sh swarmscribe-follower:cuda-large-v3 cuda large-v3
+uv run python e2e/follower-compose/run_e2e.py prepare
+docker compose -f e2e/follower-compose/docker-compose.yml up -d
+FOLLOWER_IMAGE=swarmscribe-follower:cuda-large-v3 uv run python e2e/follower-compose/run_e2e.py run --gpu
+docker compose -f e2e/follower-compose/docker-compose.yml -f e2e/follower-compose/docker-compose.gpu.yml --profile followers down -v
+```
 
 ## Run the fleet console (development)
 

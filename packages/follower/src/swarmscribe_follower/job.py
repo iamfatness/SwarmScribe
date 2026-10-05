@@ -47,6 +47,7 @@ from .lease import (
     JobStopped,
     LeaseKeeper,
 )
+from .memory import MemoryGuard
 from .metrics import Metrics
 from .models import ModelHost, ModelUnavailable, OutOfMemory, is_out_of_memory
 from .scratch import Scratch, ScratchDiskFull, ScratchError, ScratchWipeFailed
@@ -151,11 +152,13 @@ class JobRunner:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         metrics: Metrics | None = None,
+        guard: MemoryGuard | None = None,
     ) -> None:
         self._client, self._links, self._models, self._scratch = client, links, models, scratch
         self._device, self._interval = device, heartbeat_interval
         self._clock, self._sleep = clock, sleep
         self._metrics = metrics or Metrics()
+        self._guard = guard  # None: this follower has no memory limit to hold a job to
         self._keeper: LeaseKeeper | None = None
         self._control: JobControl | None = None
         self._phase = "idle"
@@ -333,6 +336,13 @@ class JobRunner:
         self._phase = "model"
         transcriber = self._models.get(settings.model, settings.compute_type)
         control.check()
+
+        # After the model is in memory (what it holds is counted) and before the engine
+        # reads the recording. Not the "model" phase: a recording too long for this machine
+        # fails the job `out_of_resources`; it does not make the machine unfit.
+        self._phase = "guard"
+        if self._guard is not None:
+            self._guard.check(source, settings.channel_mode)
 
         self._phase = "transcribe"
         self._transcribing_since = self._clock()

@@ -26,6 +26,7 @@ from .device import cached_models, probe
 from .errors import EXIT_CONFIGURATION, EXIT_OK, EXIT_UNFIT, FollowerExit
 from .health import HealthServer
 from .leader import LeaderClient, Refused, Transient
+from .memory import MemoryGuard, find_limit
 from .metrics import Metrics
 from .models import ModelHost, ModelUnavailable, OutOfMemory
 from .scratch import Scratch
@@ -140,6 +141,7 @@ def build(settings: Settings) -> Agent:
         raise FollowerExit(EXIT_UNFIT, str(error)) from None
     verify = tls(settings)
     metrics = Metrics()
+    limit = find_limit(settings.memory_limit_mb)
     return Agent(
         settings,
         client=LeaderClient(settings.leader_url, verify=verify),
@@ -153,6 +155,7 @@ def build(settings: Settings) -> Agent:
         store=CredentialStore(settings.credential_file),
         probe=found,
         metrics=metrics,
+        guard=MemoryGuard(limit) if limit is not None else None,
     )
 
 
@@ -327,6 +330,11 @@ def command_doctor(
     gpu = f" ({found.gpu_name}, {found.gpu_memory_mb} MiB)" if found.gpu_name else ""
     print(f"device: {choice.device}{gpu}", file=out)
     print(f"cached models: {', '.join(cached_models(settings.model_dir)) or '(none)'}", file=out)
+    limit = find_limit(settings.memory_limit_mb)
+    if limit is None:
+        print("memory: unknown (recordings are not checked against it)", file=out)
+    else:
+        print(f"memory: {limit.megabytes} MiB may be used ({limit.source})", file=out)
     if load_model:
         models = host(choice.device, allowed=frozenset(settings.allowed_models))
         try:

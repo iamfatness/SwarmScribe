@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     log_format: Literal["json", "text"] = "json"
     # `host:port` for /healthz and /metrics. Unset: no listener, and no port is opened.
     health_addr: str | None = None
+    # The memory this follower may use, in MiB. Unset: the container's limit, else the
+    # machine's memory (spec 5.7).
+    memory_limit_mb: int | None = Field(default=None, ge=64)
 
     @field_validator(
         "join_token",
@@ -71,6 +74,7 @@ class Settings(BaseSettings):
         "model_dir",
         "startup_model",
         "health_addr",
+        "memory_limit_mb",
         mode="before",
     )
     @classmethod

@@ -76,6 +76,7 @@ from .job import (
 )
 from .leader import Interrupted, LeaderClient, NoWork, Refused, Transient, retrying
 from .lease import SHUTDOWN, JobControl
+from .memory import MemoryGuard
 from .metrics import Metrics
 from .models import ModelHost, ModelUnavailable, OutOfMemory
 from .scratch import Scratch, ScratchError, ScratchNotOurs, ScratchOutside
@@ -126,7 +127,9 @@ class Agent:
         sleep: Callable[[float], None] = time.sleep,
         hold_lock: Callable[..., BinaryIO] = hold_state_lock,
         metrics: Metrics | None = None,
+        guard: MemoryGuard | None = None,
     ) -> None:
+        self._guard = guard
         self.metrics = metrics or Metrics()
         self.metrics.watch(state=self.state, progress=self.progress)
         self._ticked = time.monotonic()
@@ -334,6 +337,7 @@ class Agent:
             clock=self._clock,
             sleep=self._sleep,
             metrics=self.metrics,
+            guard=self._guard,
         )
 
     def register(self) -> None:

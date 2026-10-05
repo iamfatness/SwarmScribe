@@ -1,0 +1,203 @@
+/* Buttons, pills and form fields. A control is 44px tall; a button inside a table row is
+   36px. A switched-off control keeps its place and says why beside it (ActionButton). */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--h-control);
+  padding: 0 var(--s-5);
+  border: 1px solid var(--edge);
+  border-radius: var(--r);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.button:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.button-primary {
+  border-color: var(--primary-bg);
+  background: var(--primary-bg);
+  color: var(--primary-fg);
+  font-weight: 600;
+}
+
+/* As specific as the .button hover above, which would otherwise repaint a primary button
+   with the ghost hover colour under its own text. */
+.button-primary:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--primary-bg);
+  color: var(--primary-fg);
+  text-decoration: underline;
+}
+
+.button-danger {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+.button-danger:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--bad-wash);
+  color: var(--bad);
+}
+
+/* Switched off: dashed edge and muted text, never colour alone. */
+.button:disabled,
+.button[aria-disabled="true"] {
+  border-style: dashed;
+  border-color: var(--edge);
+  background: transparent;
+  color: var(--muted);
+  font-weight: 400;
+  cursor: not-allowed;
+}
+
+.button-wide {
+  width: 100%;
+}
+
+/* Filter pills: toggle buttons (aria-pressed) in a labelled group. */
+.pill-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-height: var(--h-control);
+  padding: 0 var(--s-4);
+  border: 1px solid var(--edge);
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  /* One line, unless a label is longer than the page is wide: then it breaks, not the page. */
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.pill:hover {
+  background: var(--panel-2);
+}
+
+.pill[aria-pressed="true"] {
+  border-color: var(--primary-bg);
+  background: var(--primary-bg);
+  color: var(--primary-fg);
+  font-weight: 600;
+}
+
+.pill-count {
+  font-family: var(--mono);
+  font-size: var(--fs-fine);
+}
+
+select,
+input,
+textarea {
+  min-height: var(--h-control);
+  padding: 0 var(--s-3);
+  border: 1px solid var(--edge);
+  border-radius: var(--r);
+  background: var(--field-bg);
+  color: var(--text);
+  font: inherit;
+}
+
+textarea {
+  padding: var(--s-2) var(--s-3);
+  line-height: 1.5;
+}
+
+input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  min-height: 0;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+input[aria-invalid="true"],
+textarea[aria-invalid="true"] {
+  border-color: var(--bad);
+  border-width: 2px;
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+  font-size: var(--fs-small);
+  font-weight: 600;
+}
+
+.field > input,
+.field > select,
+.field > textarea {
+  font-size: var(--fs-body);
+  font-weight: 400;
+}
+
+.field-inline,
+.theme-select {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--fs-small);
+  color: var(--muted);
+}
+
+.field-inline > select,
+.theme-select > select {
+  color: var(--text);
+}
+
+.field-check {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.field-help {
+  margin: 0;
+  font-size: var(--fs-fine);
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.error-text {
+  margin: 6px 0 0;
+  font-size: var(--fs-small);
+  color: var(--bad);
+}
+
+.form-grid {
+  display: grid;
+  gap: var(--s-4);
+}
+
+.form-panel {
+  max-width: 36rem;
+  margin-top: var(--s-8);
+  padding: var(--s-6) var(--s-7);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+}
+
+.form-panel h2 {
+  margin-top: 0;
+}

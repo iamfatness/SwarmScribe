@@ -1,0 +1,106 @@
+/* The sign-in page: the brand on ink beside the sign-in card.
+   Mockup: docs/superpowers/design/SignIn.dc.html */
+
+.signin {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.signin-brand {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 40px;
+  padding: var(--s-10) 64px;
+  background: var(--ground);
+}
+
+.signin-logo .wordmark {
+  font-size: 1.625rem;
+}
+
+.signin-pitch {
+  margin: 0 0 18px;
+  font-family: var(--serif);
+  font-size: var(--fs-display);
+  line-height: 1.08;
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+}
+
+.signin-lede {
+  max-width: 46ch;
+  margin: 0;
+  font-size: 1.0625rem;
+  color: var(--muted);
+}
+
+.signin-host {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  font-size: var(--fs-small);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.signin-side {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--s-10) 64px;
+  background: var(--panel);
+}
+
+.signin-card {
+  width: min(400px, 100%);
+  padding: 32px 32px var(--s-8);
+}
+
+.signin-title {
+  margin-bottom: 6px;
+  font-size: var(--fs-sheet-title);
+}
+
+.provider-list {
+  display: grid;
+  gap: 10px;
+  margin: 22px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.provider-list .button {
+  min-height: 48px;
+  font-weight: 600;
+}
+
+.signin-note {
+  margin: 22px 0 0;
+  padding-top: var(--s-5);
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-small);
+  color: var(--muted);
+}
+
+@media (max-width: 900px) {
+  .signin {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
+  }
+
+  .signin-brand,
+  .signin-side {
+    padding: var(--s-9) var(--s-7);
+  }
+
+  .signin-brand {
+    gap: var(--s-7);
+  }
+
+  .signin-side {
+    align-items: flex-start;
+  }
+}

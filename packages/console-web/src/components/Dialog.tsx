@@ -69,7 +69,7 @@ export function Dialog({
   return createPortal(
     <dialog
       ref={ref}
-      className="dialog"
+      className="dialog sheet sheet-lifted"
       role={role}
       aria-modal="true"
       aria-labelledby={titleId}

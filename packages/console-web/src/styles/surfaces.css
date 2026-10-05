@@ -1,0 +1,410 @@
+/* Panels and tables (on the page's own colour set), sheets (the opposite set: paper on ink,
+   ink on paper), status marks and the lines that report what happened. */
+
+/* ---- Panels and tables ---- */
+
+.panel {
+  padding: var(--s-6) 22px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+}
+
+.table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: var(--s-4) var(--s-3);
+  text-align: left;
+  vertical-align: top;
+  /* Cells wrap at word boundaries only, so a narrow screen scrolls the table sideways
+     instead of crushing its columns. A column of long unbroken text opts in with .long. */
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+th:first-child,
+td:first-child {
+  padding-left: var(--s-5);
+}
+
+th:last-child,
+td:last-child {
+  padding-right: var(--s-5);
+}
+
+thead th {
+  padding-top: 10px;
+  padding-bottom: 10px;
+  font-size: var(--fs-mono-fine);
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+tbody tr {
+  border-top: 1px solid var(--line);
+}
+
+tbody th {
+  font-weight: 400;
+}
+
+/* A row's name (a leader, a location, an id) stays on one line: a hyphen in "eu-1" is not
+   a place to wrap. A row header of long unbroken text opts out with .long. */
+tbody th:not(.long) {
+  white-space: nowrap;
+}
+
+td.num {
+  font-family: var(--mono);
+  font-size: var(--fs-fine);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+td.long,
+th.long,
+.cell-note {
+  overflow-wrap: anywhere;
+}
+
+td.long,
+th.long {
+  min-width: 12rem;
+}
+
+table.medium {
+  min-width: 44rem;
+}
+
+table.wide {
+  min-width: 54rem;
+}
+
+.cell-note,
+.cell-list {
+  max-width: 28rem;
+}
+
+.cell-note {
+  display: block;
+  font-size: var(--fs-fine);
+  color: var(--muted);
+}
+
+.cell-note.error-text {
+  margin: 0;
+  color: var(--bad);
+}
+
+.cell-list {
+  margin: 0;
+  padding-left: var(--s-5);
+  font-size: var(--fs-small);
+}
+
+/* The Actions column stays in reach while a wide table scrolls sideways: it is pinned to
+   the right edge of the scrolling region, over the columns that slide beneath it. */
+td.actions,
+table:has(td.actions) thead th:last-child {
+  position: sticky;
+  right: 0;
+  background: var(--panel);
+  box-shadow: -1px 0 0 var(--line);
+}
+
+td.actions {
+  padding-top: 10px;
+  padding-bottom: 10px;
+  white-space: nowrap;
+}
+
+td.actions .button {
+  min-height: var(--h-row);
+  padding: 0 var(--s-3);
+}
+
+td.actions > .button,
+td.actions > .action {
+  margin-right: 6px;
+}
+
+td.actions > :last-child {
+  margin-right: 0;
+}
+
+.action {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.needs-role {
+  font-size: var(--fs-mono-fine);
+  color: var(--muted);
+}
+
+/* ---- Sheets: dialogs, callouts, the sign-in card ---- */
+
+.sheet {
+  border-radius: var(--r);
+  background: var(--ground);
+}
+
+.sheet-lifted {
+  box-shadow: var(--shadow-drop), var(--shadow-offset);
+}
+
+.callout {
+  max-width: 720px;
+  margin-top: 26px;
+  padding: var(--s-6) var(--s-7);
+}
+
+.callout h2,
+.sheet-title {
+  margin: 0 0 var(--s-2);
+  font-family: var(--serif);
+  font-size: var(--fs-callout-title);
+  font-weight: 400;
+  line-height: 1.15;
+}
+
+.callout ol,
+.callout ul {
+  margin: 0;
+  padding-left: var(--s-6);
+}
+
+.callout li {
+  padding: var(--s-1) 0;
+}
+
+.dialog {
+  width: min(560px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  margin: auto;
+  padding: var(--s-8) 30px 26px;
+  overflow-y: auto;
+  border: 0;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+}
+
+/* The offset shadow is drawn outside the box: leave it room at the dialog's edge. */
+.dialog.sheet-lifted {
+  max-width: calc(100vw - 48px);
+}
+
+html:has(dialog[open]) {
+  overflow: hidden;
+}
+
+.dialog::backdrop {
+  background: rgb(10 8 6 / 0.65);
+}
+
+.dialog-title {
+  margin: 0 0 var(--s-3);
+  font-family: var(--serif);
+  font-size: var(--fs-sheet-title);
+  font-weight: 400;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+}
+
+.dialog-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--s-2);
+  margin-top: var(--s-7);
+}
+
+/* ---- Status marks: a hexagon for "fine", a ring for "not". Shape, then words. ---- */
+
+.mark {
+  display: inline-block;
+  flex: none;
+}
+
+.mark-hex {
+  width: 9px;
+  height: 10px;
+  background: var(--accent);
+  clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
+}
+
+.mark-hex.mark-quiet {
+  background: var(--mark-quiet);
+}
+
+.mark-ring {
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--muted);
+  border-radius: 50%;
+}
+
+.mark-ring.mark-bad {
+  border-color: var(--bad);
+}
+
+/* Windows high contrast drops backgrounds: give the hexagon an outline it keeps. */
+@media (forced-colors: active) {
+  .mark-hex {
+    clip-path: none;
+    border: 2px solid CanvasText;
+    background: CanvasText;
+  }
+}
+
+.status-pill,
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-1) 10px;
+  border: 1px solid var(--edge);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-fine);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.status-pill-ok,
+.badge-ok {
+  border-color: var(--accent);
+}
+
+.status-pill-warn,
+.badge-warn {
+  border-color: var(--accent);
+  border-style: dashed;
+}
+
+.status-pill-bad,
+.badge-bad {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+.status-pill-muted,
+.badge-muted {
+  color: var(--muted);
+}
+
+/* ---- Lines that report: notices, errors, the result of the last action ---- */
+
+.notice {
+  overflow-wrap: break-word;
+  margin: var(--s-3) 0;
+  padding: var(--s-3) var(--s-5);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--r-sm);
+  background: var(--accent-wash);
+  color: var(--text);
+}
+
+.error-panel {
+  margin: var(--s-3) 0;
+  padding: var(--s-3) var(--s-5);
+  border-left: 3px solid var(--bad);
+  border-radius: var(--r-sm);
+  background: var(--bad-wash);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.error-panel p {
+  margin: 0 0 var(--s-2);
+}
+
+.error-panel p:last-child {
+  margin-bottom: 0;
+}
+
+.error-title {
+  font-weight: 600;
+  color: var(--bad);
+}
+
+.action-notice {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-height: 1.5rem;
+  margin: var(--s-2) 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.action-notice:not(:empty)::before {
+  content: "";
+  flex: none;
+  width: 9px;
+  height: 10px;
+  background: var(--accent);
+  clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
+}
+
+/* ---- Narrow screens: a row's actions stack, so the pinned column stays narrow ---- */
+
+@media (max-width: 900px) {
+  td.actions > .button,
+  td.actions > .action {
+    display: flex;
+    width: 100%;
+    margin: 0 0 6px;
+  }
+
+  td.actions > .action {
+    align-items: stretch;
+  }
+
+  td.actions > :last-child {
+    margin-bottom: 0;
+  }
+}
+
+/* ---- Small lists of labels ---- */
+
+.labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--s-2);
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--mono);
+  font-size: var(--fs-mono-fine);
+  color: var(--muted);
+}
+
+.labels li {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.labels li + li::before {
+  content: "· ";
+}

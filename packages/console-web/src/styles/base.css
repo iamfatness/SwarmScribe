@@ -1,0 +1,145 @@
+/* Page defaults, type and the helpers every screen uses. No inline styles anywhere: the
+   console's CSP is style-src 'self'. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--ground);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 100%;
+  line-height: 1.5;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  font-size: var(--fs-body);
+}
+
+/* A surface that picks a colour set (tokens.css) also takes that set's text colour. */
+.on-ink,
+.sheet {
+  color: var(--text);
+}
+
+h1 {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: var(--fs-h1);
+  font-weight: 400;
+  line-height: 1.1;
+  letter-spacing: -0.015em;
+  overflow-wrap: anywhere;
+}
+
+h2 {
+  margin: var(--s-7) 0 var(--s-2);
+  font-size: var(--fs-h3);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+h3 {
+  margin: var(--s-7) 0 var(--s-2);
+  font-size: var(--fs-body);
+  font-weight: 600;
+}
+
+p {
+  margin: 0 0 var(--s-3);
+}
+
+a {
+  color: var(--accent-text);
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+
+a:hover {
+  color: var(--accent-hover);
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+main:focus,
+h1:focus {
+  outline: none;
+}
+
+/* A heading that took focus after a navigation shows it, without the full ring. */
+h1:focus-visible {
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 6px;
+}
+
+code,
+.mono {
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+
+code {
+  color: var(--accent-text);
+}
+
+strong {
+  font-weight: 600;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+/* Text that may break anywhere: a path, an address, an id, a leader's own error text. */
+.long {
+  overflow-wrap: anywhere;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.skip-link {
+  position: absolute;
+  left: var(--s-5);
+  top: -60px;
+  z-index: 20;
+  padding: var(--s-2) var(--s-4);
+  border-radius: var(--r);
+  background: var(--amber);
+  color: #14110d;
+  font-weight: 600;
+}
+
+.skip-link:hover {
+  color: #14110d;
+}
+
+.skip-link:focus {
+  top: var(--s-3);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    scroll-behavior: auto;
+    transition: none;
+  }
+}

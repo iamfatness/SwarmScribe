@@ -1,0 +1,212 @@
+/* The fleet overview: totals, the "Needs a look" sheet, one card per leader and its chart.
+   Mockup: docs/superpowers/design/InkConsole.dc.html */
+
+.fleet-head {
+  margin-bottom: 26px;
+}
+
+/* ---- Totals ---- */
+
+.stat-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--s-4);
+  margin: 0;
+}
+
+.stat-tile {
+  padding: var(--s-5) 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+}
+
+.stat-tile dt {
+  font-size: var(--fs-fine);
+  color: var(--muted);
+}
+
+.stat-tile dd {
+  margin: 2px 0 0;
+  font-family: var(--mono);
+  font-size: var(--fs-figure);
+  line-height: 1.2;
+}
+
+.stat-note {
+  overflow-wrap: break-word;
+  margin: var(--s-2) 0 0;
+  font-size: var(--fs-fine);
+  color: var(--muted);
+}
+
+/* ---- The grid of cards ---- */
+
+.fleet-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-4);
+  margin-top: 26px;
+}
+
+.needs-look {
+  align-self: start;
+  min-width: 0;
+  overflow-wrap: break-word;
+  padding: var(--s-6) 22px;
+  border-radius: var(--r-lg);
+}
+
+.needs-look .sheet-title {
+  margin-bottom: 10px;
+}
+
+.needs-look-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.needs-look-list li {
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+
+/* A name or a label longer than the card breaks inside it; ordinary words never do. */
+.leader-card {
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.leader-card-bad {
+  border-color: var(--bad);
+}
+
+.leader-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s-2) var(--s-3);
+}
+
+.leader-card-title {
+  min-width: 0;
+}
+
+.leader-card-name {
+  margin: 0;
+  font-size: var(--fs-h2);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.leader-card-name a {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.leader-card-name a:hover {
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+}
+
+.leader-card-chart {
+  min-height: 64px;
+  margin: var(--s-5) 0 var(--s-4);
+  color: var(--muted);
+}
+
+.figure-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.figure-row dt {
+  font-size: var(--fs-mono-fine);
+  color: var(--muted);
+}
+
+.figure-row dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: var(--fs-figure-small);
+}
+
+.leader-card-foot {
+  margin: var(--s-4) 0 0;
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-small);
+  color: var(--muted);
+}
+
+.leader-card-foot strong {
+  font-weight: 400;
+  color: var(--text);
+}
+
+.leader-card-what {
+  margin: var(--s-5) 0 0;
+}
+
+.leader-card-more {
+  margin: 6px 0 0;
+  font-size: var(--fs-small);
+  color: var(--muted);
+}
+
+.leader-card-link {
+  margin: var(--s-4) 0 0;
+  font-weight: 600;
+}
+
+/* ---- Throughput chart: one wide line, stretched to the card ---- */
+
+.sparkline {
+  display: block;
+  width: 100%;
+  height: 64px;
+}
+
+.sparkline-axis {
+  stroke: var(--edge);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.sparkline-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+/* A lone point: a zero-length stroke with round caps stays round however the chart is
+   stretched (a <circle> would become an ellipse). */
+.sparkline-dot {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 5;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.sparkline-down {
+  fill: var(--bad);
+}
+
+@media (max-width: 640px) {
+  .fleet-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .stat-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

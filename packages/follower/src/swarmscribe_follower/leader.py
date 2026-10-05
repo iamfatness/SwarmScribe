@@ -75,6 +75,7 @@ class NoWork:
 
 
 MAX_RETRY_AFTER_SECONDS = 3600.0
+MIN_WAIT_SECONDS = 0.2  # a floor: `Retry-After: 0` must not become a busy loop
 
 
 def retry_after_of(response: httpx.Response) -> float | None:
@@ -84,7 +85,7 @@ def retry_after_of(response: httpx.Response) -> float | None:
     value = response.headers.get("retry-after", "").strip()
     if not (value.isascii() and value.isdigit()):
         return None
-    return min(float(int(value)), MAX_RETRY_AFTER_SECONDS)
+    return max(MIN_WAIT_SECONDS, min(float(int(value)), MAX_RETRY_AFTER_SECONDS))
 
 
 def refusal_of(response: httpx.Response) -> Refused:
@@ -137,7 +138,7 @@ def retrying(
             if give_up is not None and give_up(exc, failures):
                 raise
             wait = exc.retry_after if exc.retry_after is not None else delay * rng()
-            wait = max(0.0, wait)
+            wait = max(MIN_WAIT_SECONDS, wait)
             delay = min(cap, delay * 2)
             if pause(wait):
                 raise Interrupted() from None
@@ -157,8 +158,11 @@ class LeaderClient:
         # `trust_env` stays on, so HTTPS_PROXY and the CA environment are honoured (follower
         # spec 5.1). The credential is only ever a header built in `_post`, on a path of
         # this client's own base URL; a proxy sees the same request the leader would.
+        # Plain http (the development switch) never goes through a proxy named in the
+        # environment: a proxy would see the credential and the join token in clear.
         self._http = httpx.Client(
             base_url=base_url.rstrip("/"),
+            trust_env=not base_url.strip().lower().startswith("http://"),
             transport=transport,
             verify=verify,
             timeout=timeout,

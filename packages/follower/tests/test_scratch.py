@@ -85,10 +85,11 @@ def test_remove_deletes_a_link_and_not_what_it_points_at(tmp_path):
     assert (outside / "keep.txt").read_text() == "keep"
 
 
-def test_remove_never_raises(tmp_path):
-    Scratch.remove(None)
-    Scratch.remove(tmp_path / "missing")
-    Scratch.remove(tmp_path / f"job-{uuid.uuid4()}")
+def test_removing_what_is_already_gone_is_not_an_error(tmp_path):
+    scratch = Scratch(tmp_path / "scratch")
+    scratch.prepare()
+    scratch.remove(tmp_path / "scratch" / "missing")
+    scratch.remove(tmp_path / "scratch" / f"job-{uuid.uuid4()}")
 
 
 def _link_or_skip(target, link):
@@ -178,15 +179,17 @@ def test_a_path_beyond_the_windows_limit_is_wiped(tmp_path):
 
 @pytest.mark.skipif(os.name != "nt", reason="only Windows refuses to delete an open file")
 def test_a_file_open_elsewhere_is_a_clear_error_and_is_wiped_at_the_next_start(tmp_path):
-    scratch = Scratch(tmp_path)
+    scratch = Scratch(tmp_path, delays=(0.0,) * 4)
     scratch.prepare()
     held = scratch.job_dir(JOB) / "source"
     held.write_bytes(b"recording")
     with open(held, "rb"):
-        scratch.wipe()  # a wipe at the end of a job never raises
+        scratch.wipe()  # a wipe at exit never raises
         assert held.exists()
         with pytest.raises(ScratchWipeFailed, match="next start"):
-            Scratch(tmp_path).prepare()
+            scratch.remove(held.parent)  # after a job: loud, and the next start wipes it
+        with pytest.raises(ScratchWipeFailed, match="next start"):
+            Scratch(tmp_path, delays=(0.0,) * 4).prepare()
         assert (tmp_path / MARKER).is_file()  # still ours: the next start may try again
     Scratch(tmp_path).prepare()
     assert [entry.name for entry in tmp_path.iterdir()] == [MARKER]
@@ -219,6 +222,6 @@ def test_a_full_disk_is_a_typed_error_not_a_bare_oserror(tmp_path, monkeypatch):
     monkeypatch.undo()
     scratch = Scratch(tmp_path / "scratch")
     scratch.prepare()
-    monkeypatch.setattr(Path, "mkdir", full)
+    monkeypatch.setattr(os, "mkdir", full)
     with pytest.raises(ScratchDiskFull):
         scratch.job_dir(JOB)

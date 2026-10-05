@@ -17,6 +17,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from .fsutil import private_folder
+
 REPLACE_ATTEMPTS = 20  # Windows refuses a replace while a scanner or indexer has the file open
 
 
@@ -110,10 +112,18 @@ class CredentialStore:
             raise CredentialFileError(
                 f"cannot read {self.path}: {exc.strerror or type(exc).__name__}"
             ) from None
-        except ValueError:
+        except (ValueError, RecursionError):
             raise self._not_a_credential() from None
         if not isinstance(data, dict) or any(
             type(data.get(name)) is not kind for name, kind in _TYPES.items()
+        ):
+            raise self._not_a_credential()
+        secret = data["credential"]
+        if (
+            data["heartbeat_interval"] <= 0
+            or data["lease_seconds"] <= 0
+            or not secret
+            or not (secret.isascii() and secret.isprintable() and " " not in secret)
         ):
             raise self._not_a_credential()
         return Stored(**{name: data[name] for name in _TYPES})
@@ -128,7 +138,7 @@ class CredentialStore:
         folder = self.path.parent
         temp = folder / f"{self.path.name}.{os.getpid()}.{secrets.token_hex(4)}.new"
         try:
-            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+            private_folder(folder)
             handle = os.open(
                 temp,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),

@@ -7,6 +7,8 @@ from urllib.parse import urlsplit
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from .scratch import ScratchError, check_folders
+
 NameList = Annotated[tuple[str, ...], NoDecode]
 """Comma-separated in the environment, e.g. `large-v3, distil-large-v3`."""
 
@@ -40,16 +42,16 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
-    leader_url: str = Field(validation_alias=AliasChoices("leader_url", "SWARMSCRIBE_LEADER_URL"))
+    leader_url: str = Field(validation_alias=AliasChoices("SWARMSCRIBE_LEADER_URL"))
     join_token: SecretStr | None = Field(
-        default=None, validation_alias=AliasChoices("join_token", "SWARMSCRIBE_JOIN_TOKEN")
+        default=None, validation_alias=AliasChoices("SWARMSCRIBE_JOIN_TOKEN")
     )
     join_token_file: Path | None = Field(
         default=None,
-        validation_alias=AliasChoices("join_token_file", "SWARMSCRIBE_JOIN_TOKEN_FILE"),
+        validation_alias=AliasChoices("SWARMSCRIBE_JOIN_TOKEN_FILE"),
     )
     leader_ca_file: Path | None = Field(
-        default=None, validation_alias=AliasChoices("leader_ca_file", "SWARMSCRIBE_LEADER_CA_FILE")
+        default=None, validation_alias=AliasChoices("SWARMSCRIBE_LEADER_CA_FILE")
     )
     allow_http: bool = False
 
@@ -101,6 +103,14 @@ class Settings(BaseSettings):
                 "leader_url must be https (plain http is accepted only for a loopback address,"
                 " or with SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1)"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _scratch_cannot_reach_state_or_models(self) -> "Settings":
+        try:
+            check_folders(self.state_dir, self.scratch, self.model_dir)
+        except ScratchError as exc:
+            raise ValueError(str(exc)) from None
         return self
 
     @property

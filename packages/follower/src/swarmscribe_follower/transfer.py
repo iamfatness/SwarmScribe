@@ -18,13 +18,12 @@ from swarmscribe_protocol import Link
 
 from .leader import TRANSIENT_STATUSES, Refused, Transient, refusal_of, retry_after_of
 
-CHUNK_BYTES = 1024 * 1024
+CHUNK_BYTES = 64 * 1024  # the stop check runs at least this often
 SPARE_BYTES = 64 * 1024 * 1024  # room for the outputs beside the recording
 IN_USE_RETRY_SECONDS = 5.0
 MAX_DOWNLOAD_BYTES = 64 * 1024**3  # a cap on one recording, whatever the server declares
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024  # the leader's own limit on one output
 DISK_FULL = (errno.ENOSPC, errno.EDQUOT)
-SCHEMES = ("http://", "https://")
 
 
 class SourceChanged(Exception):
@@ -54,20 +53,39 @@ class Links:
         transport: httpx.BaseTransport | None = None,
         verify: Any = True,
         timeout: float = 120.0,
+        allow_http: bool = False,
     ) -> None:
+        """`allow_http` is the same development switch that allows an http leader: without it
+        a link must be https, so audio and link tokens never travel in clear."""
+        self._allow_http = allow_http
+        # https links honour the proxy environment; plain http never does (a proxy would see
+        # the recording and the link's token in clear).
         self._http = httpx.Client(
             transport=transport, verify=verify, timeout=timeout, follow_redirects=False
+        )
+        self._plain = httpx.Client(
+            transport=transport,
+            verify=verify,
+            timeout=timeout,
+            follow_redirects=False,
+            trust_env=False,
         )
 
     def close(self) -> None:
         self._http.close()
+        self._plain.close()
 
-    @staticmethod
-    def _expect(link: Link, method: str) -> None:
+    def _client_for(self, link: Link) -> httpx.Client:
+        return self._plain if link.url.lower().startswith("http://") else self._http
+
+    def _expect(self, link: Link, method: str) -> None:
         if link.method != method:
             raise Refused(0, "invalid_link", f"expected a {method} link")
-        if not link.url.lower().startswith(SCHEMES):
-            raise Refused(0, "invalid_link", "a link must be an http or https URL")
+        url = link.url.lower()
+        if url.startswith("http://") and self._allow_http:
+            return
+        if not url.startswith("https://"):
+            raise Refused(0, "invalid_link", "a link must be an https URL")
 
     def download(self, link: Link, destination: Path, check: Callable[[], None]) -> str:
         """Stream the recording to `destination` and return its SHA-256. `check` is called
@@ -90,7 +108,7 @@ class Links:
         # No transfer encoding, so a declared length is the length of the file itself.
         headers = {"Accept-Encoding": "identity", **link.headers}
         try:
-            with self._http.stream("GET", link.url, headers=headers) as response:
+            with self._client_for(link).stream("GET", link.url, headers=headers) as response:
                 if response.status_code != 200:
                     response.read()
                     raise self._download_error(response)
@@ -152,7 +170,7 @@ class Links:
         # caller from the start.
         content = path.read_bytes()
         try:
-            response = self._http.put(link.url, headers=link.headers, content=content)
+            response = self._client_for(link).put(link.url, headers=link.headers, content=content)
         except httpx.InvalidURL:
             raise Refused(0, "invalid_link", "the link cannot be used") from None
         except httpx.HTTPError as exc:

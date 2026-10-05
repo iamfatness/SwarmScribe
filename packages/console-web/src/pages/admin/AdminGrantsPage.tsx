@@ -98,6 +98,19 @@ export function AdminGrantsSection() {
         removing a role takes effect at once. Group membership is read when a person signs in, so
         a change to a group shows the next time they do.
       </p>
+      <div className="explain">
+        <p>
+          A viewer can look. An operator can also try jobs again, cancel them, scan a location and
+          wind followers down. An admin can also add and switch locations, revoke followers and
+          make join tokens.
+        </p>
+        <p>
+          A role covers leaders in one of three ways: <code>all</code> for every leader,{" "}
+          <code>leader:eu-1</code> for one leader by name, or <code>label:region=eu</code> for every
+          leader with that label. It is given to an Entra ID group, a Google group, one person by
+          email, or everyone at a domain.
+        </p>
+      </div>
       <ActionNotice message={notice} />
       <ReadState read={read} what="the roles">
         {(grants) =>
@@ -118,11 +131,11 @@ export function AdminGrantsSection() {
                 <tbody>
                   {grants.map((grant) => (
                     <tr key={grant.id} data-row={grant.id}>
-                      <th scope="row" className="mono long">
+                      <th scope="row" className="mono long ident">
                         {grant.principal_kind}:{grant.principal}
                       </th>
                       <td className="nowrap">{grant.role}</td>
-                      <td className="mono long">{grant.scope}</td>
+                      <td className="mono long ident">{grant.scope}</td>
                       <td>
                         {formatTime(grant.created_at)} by {grant.created_by}
                       </td>

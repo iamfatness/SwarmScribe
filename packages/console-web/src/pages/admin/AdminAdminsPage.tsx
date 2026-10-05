@@ -85,7 +85,7 @@ export function AdminAdminsSection() {
               <tbody>
                 {admins.map((admin) => (
                   <tr key={admin.id} data-row={admin.id}>
-                    <th scope="row" className="mono long">
+                    <th scope="row" className="mono long ident">
                       {admin.principal_kind}:{admin.principal}
                     </th>
                     <td>

@@ -107,6 +107,12 @@ strong {
   overflow-wrap: anywhere;
 }
 
+/* An identifier (a group's object ID, a scope): mono, breaking wherever the line ends and
+   never preferring a hyphen, which would make one value read as two. */
+.ident {
+  word-break: break-all;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;

@@ -467,16 +467,28 @@ revalidated on every load. The overview refreshes every 10 seconds and stops
 refreshing after 55 minutes without input, so the one-hour idle timeout still
 applies to an open tab.
 
-Each leader row opens a leader page with Jobs, Pools and followers, Locations,
-Consent and Join tokens tabs. Those read the leader live through the console's
-proxy (on open and on Refresh, never on a timer) and carry the leader actions:
-retry, cancel or reprioritise a job, drain or revoke a follower, add, enable,
-disable or scan a location, create or revoke a join token. A button is disabled
-and names the role it needs when the person's role on the leader is lower. An
-Administration area, shown to console administrators only, registers, edits,
-rotates and removes leaders, adds and removes grants, and manages the console
-administrators. Adding or removing a grant applies at once; group membership is
-read at sign-in. `packages/console-web/README.md` has the app's own notes.
+The console looks like SwarmScribe: honey amber on warm ink by default, with a designed
+light theme that follows the system or the Theme switch. A rail on the left holds Fleet, a
+link per leader and (for console administrators) Administration; below 900 pixels it
+becomes a top bar with a Menu button. The fleet overview is four totals, a "Needs a look"
+band and a card per leader. Its words are the console's own ("answering", "waiting",
+"switched off", a role "given"), not the leader's protocol words.
+
+Each leader opens a leader page with Jobs, Pools and followers, Locations, Consent report
+and Join tokens tabs. Those read the leader live through the console's proxy (on open and
+on Refresh, never on a timer) and carry the leader actions: try a job again, cancel or
+reprioritise it, wind down or revoke a follower, add, switch on or off or scan a location,
+create or revoke a join token. A button is switched off and names the role it needs when
+the person's role on the leader is lower. Administration, shown to console administrators
+only, is one page with three sections: Leaders (add, edit, replace the credential, remove),
+Who can do what (give and remove roles) and Console administrators. Giving or removing a
+role applies at once; group membership is read at sign-in.
+
+Developing the web app: `npm run screens` in `packages/console-web` photographs every page and
+dialog in both themes at three widths for a person to look at. The brand's colours live only
+in `src/styles/tokens.css`; a small blocking script (`src/theme-boot.ts`) sets the theme
+before first paint; a new route needs its prefix in `src/app/routePrefixes.json`.
+`packages/console-web/README.md` has the app's own notes.
 
 ### Deployment note: egress
 

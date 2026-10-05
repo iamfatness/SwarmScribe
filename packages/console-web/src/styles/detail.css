@@ -102,3 +102,13 @@
     flex-direction: column;
   }
 }
+
+/* Plain-words explanation under a section heading (Who can do what). */
+.explain {
+  max-width: 72ch;
+  color: var(--muted);
+}
+
+.explain p {
+  margin: var(--s-2) 0;
+}

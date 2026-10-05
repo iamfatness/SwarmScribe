@@ -24,6 +24,9 @@ const LABELS_HELP =
 const CREDENTIAL_HELP =
   "The 43-character value that `swarmscribe-admin console create` printed on the leader. " +
   "It is never shown again.";
+// The help is written with `backticks` around the command; the field shows them as code, and
+// the message of a refusal (plain text) shows the same words without them.
+const CREDENTIAL_PLAIN = CREDENTIAL_HELP.replace(/`/g, "");
 const NAME_HELP = "Letters, digits, . _ - ; starts with a letter or digit; at most 100.";
 
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
@@ -54,7 +57,7 @@ function checkAddress(address: string): void {
 }
 
 function checkCredential(credential: string): void {
-  if (!CREDENTIAL.test(credential)) refuse("invalid_credential", CREDENTIAL_HELP);
+  if (!CREDENTIAL.test(credential)) refuse("invalid_credential", CREDENTIAL_PLAIN);
 }
 
 function checkLabels(text: string): Record<string, string> {
@@ -100,7 +103,9 @@ function CredentialField({
         />
       </label>
       <span id={helpId} className="field-help">
-        {CREDENTIAL_HELP}
+        {CREDENTIAL_HELP.split("`").map((part, i) =>
+          i % 2 === 1 ? <code key={i}>{part}</code> : part,
+        )}
       </span>
     </div>
   );

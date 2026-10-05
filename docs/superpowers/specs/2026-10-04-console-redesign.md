@@ -35,7 +35,7 @@ in that language and approved them.
    hashed assets only. `npm run build` passes `scripts/check-dist.mjs` unchanged.
 7. Every existing unit and end-to-end test still exists and passes, with selectors and
    expected text updated only where structure or wording changed.
-8. A person has looked at screenshots of every screen in both themes at 1280 and 768
+8. A person has looked at screenshots of every screen in both themes at 1280, 900 and 768
    pixels wide before each plan is called done.
 
 ## 2. Sources
@@ -96,6 +96,16 @@ Theme selection is unchanged in mechanism (`src/app/theme.ts` sets `data-theme` 
 set, and `prefers-color-scheme: light` gives the light theme unless `data-theme="dark"`.
 In practice a browser always reports light or dark, so with Theme on "System" the console
 is light on a light system and dark on a dark one, as before. See O6.
+
+**Theme boot script.** The chosen theme is set before the first paint, not after the app
+loads, or a person who chose Dark on a light system (or the reverse) would see the system's
+theme flash. `src/theme-boot.ts` calls `applyTheme(readTheme())` from `app/theme.ts`, so the
+storage key has one source. `vite.config.ts` builds it on its own, as a script with no imports
+left, to `assets/theme-<hash>.js`, and puts it in `<head>` as a plain blocking
+`<script src>` (no `type`, `defer` or `async`), so the CSP's `script-src 'self'` still holds.
+`scripts/check-dist.mjs` fails the build if it is missing, not in `<head>`, not classic, or
+has import or export left in it. `theme.spec.ts` holds the app script back and checks the
+painted background for both mismatches.
 
 ### 3.2 Colour
 
@@ -220,8 +230,9 @@ A leader that needs attention carries a small flag on the right of its link: "no
 (`--bad`) when unreachable, "revoked" (`--bad`) when its credential is revoked, "off"
 (muted) when switched off. The flag is part of the link's text.
 
-With many leaders the list of leaders scrolls inside the rail; the person block (email,
-Theme, Sign out) stays pinned at the bottom.
+With many leaders only the list of leaders scrolls inside the rail: Fleet above it, and
+Administration and the person block (email, Theme, Sign out) below it, stay pinned. The
+rail is as tall as the window (`100dvh`) and stays put while the page scrolls.
 
 ### 4.2 Top bar (narrow widths)
 
@@ -230,24 +241,30 @@ scrolls: the brand on the left and a **Menu** button on the right (`aria-expande
 `aria-controls`). Everything else in the rail (the nav, the person, Theme, Sign out) is
 inside the controlled panel, which is `display: none` until Menu is pressed. It is a
 disclosure, not a dialog: the page behind it stays in view but does not scroll while it is
-open. Opening it moves focus into the
-menu (to its first link). Escape closes it and returns focus to the Menu button. A click
-outside it closes it and returns focus to the Menu button. Following any link in it closes
-it.
+open (`html.menu-open`), and an open menu taller than a short window scrolls inside the bar.
+Opening it moves focus into the menu (to its first link). Escape closes it and returns focus
+to the Menu button; when a dialog is open, Escape belongs to the dialog and does nothing here.
+A press outside it closes it; focus goes to what was pressed if that is a control, and to the
+Menu button otherwise (so it is never lost with the menu). Following any link in it closes it.
 
 ### 4.3 Page header
 
 Serif `h1`. Beneath it an optional muted line (`.page-sub`, at most 64 characters wide).
 To its right, on the same row when there is room, the page's own controls or status.
 A leader's page has a breadcrumb line above ("Fleet / eu-1") and its labels in mono beside
-the title.
+the title. The role line (`.page-sub.role-line`) may be up to 96 characters wide so that it is
+one line at 1280. Paragraphs and list items wrap with `text-wrap: pretty`, headings with
+`balance`, and a figure is joined to its unit by a no-break space (`withUnit` in
+`lib/format.ts`; a test fails on a figure, a plain space and a unit in the source), so a unit
+is never left alone on a line.
 
 ### 4.4 Pills (`.pill`)
 
 Filter choices: toggle buttons with `aria-pressed`, in a `role="group"` with a label. 44px
 tall, fully rounded, `--edge` outline. Pressed: `--primary-bg` fill and `--primary-fg` text,
 weight 600. A count, when there is one, follows the label in mono. A label longer than the
-page is wide wraps inside its pill; the page never grows to fit it.
+page is wide wraps inside its pill; the page never grows to fit it. In forced-colours mode a
+pressed pill and the current nav item use `Highlight` and `HighlightText`.
 
 ### 4.5 Stat tile (`.stat-tile`)
 
@@ -282,13 +299,21 @@ Tables sit in `.table-scroll`: a `--panel` box, radius 8px, hairline border, tha
 sideways on its own (`role="region"`, a name, `tabindex="0"`). Column headers are 12.5px,
 muted, weight 600, never wrapped. Rows are separated by hairlines. A row header is weight
 400 and never wraps (a hyphen in "eu-1" is not a place to break). Cells wrap at word
-boundaries only; a cell of long unbroken text opts in to breaking anywhere with `.long`.
-A second line inside a cell is `.cell-note`: 13px, muted.
+boundaries only; a cell of long unbroken text opts in to breaking anywhere with `.long`. A
+cell holding an identifier (a group's object ID, a scope) is also `.ident`: mono, and it breaks
+wherever the line ends (`word-break: break-all`), so a hyphen is never a preferred place to
+break and a value never reads as two. A path or an address breaks after a "/" before it breaks
+inside a name (`BreakPath`, a `<wbr>` after each slash). A second line inside a cell is
+`.cell-note`: 13px, muted.
 
-**The Actions column is pinned.** `td.actions` and its header are `position: sticky;
-right: 0` inside the scrolling region, with the panel's background and a hairline on the
-left. However far the table is scrolled, a row's buttons are in reach. At 900px and below
-a row's buttons stack, so the pinned column is one button wide.
+**The Actions column is not pinned; every table fits.** Each of the seven action tables fits
+its region at 1280, 900 and 768 pixels with no sideways scroll, because the column budget
+(folded columns, notes under cells, stacked row buttons at 900px and below) was made to fit.
+The sticky rules, with a soft left shadow (`--shadow-edge`), exist behind an unused
+`.pin-actions` class on the `.table-scroll`, for a table that cannot fit: pinning always hides
+the text beneath the pinned column at rest, so it is not used while no table needs it. The
+end-to-end check (`overview.spec.ts`) fails if any of the seven tables scrolls sideways at the
+three widths, or if Actions is sticky; it is not to be loosened.
 
 ### 4.9 Buttons (`.button`)
 
@@ -348,8 +373,9 @@ falls back to a filled square with a border, since backgrounds are dropped.
   title in `--bad`, weight 600; the server's own text beneath in `--text`; a retry button
   when there is something to retry.
 - **Result of the last action** (`.action-notice`, `role="status"`): one line, weight 600,
-  led by a hexagon when it has text. It keeps its height when empty so the page does not
-  jump. There are no toasts: nothing appears and disappears on a timer.
+  led by a hexagon when it has text. The element stays in the page (so a screen reader
+  hears it) but takes no room while empty, so a heading is not followed by a blank gap; the
+  line appears with its words. There are no toasts: nothing appears and disappears on a timer.
 
 ## 5. Screens
 
@@ -371,20 +397,25 @@ Mockup: `docs/superpowers/design/InkConsole.dc.html`.
 2. Totals: four stat tiles for the leaders shown: Waiting now; Finished, last hour;
    Finished, last day; Followers at work. A dash when no shown leader has figures. If any
    shown leader is not answering, a line beneath says the totals include its last figures.
-3. A two-column grid. First, when there is anything to say, the **"Needs a look"** sheet;
-   then one card per leader shown. One column below 640px.
+3. When there is anything to say, the **"Needs a look"** band across the full width, above
+   the cards. Then a two-column grid with one card per leader shown (one column below 640px).
 
-"Needs a look" lists, for the leaders shown:
+"Needs a look" is a flat sheet that spans the grid at the height of what it lists, with its
+items in two flowing columns from 1100px and one below. It lists, for the leaders shown, in
+this order of severity:
 
-- each location a leader could not scan, with the leader's own error text, linking to that
-  leader's Locations tab;
 - a leader that revoked the console's credential;
-- how many tries failed in the last day, and on which leaders.
+- a leader that is not answering ("{leader} is not answering. The figures here are from the
+  last time it answered.");
+- how many tries failed in the last day, and on which leaders (five named, then "and N more
+  leaders");
+- each location a leader could not scan, with the leader's own error text, linking to that
+  leader's Locations tab.
 
-It lists at most five items; when there are more, a plain line beneath counts the rest
-("And 3 more things to look at."). A leader's name inside it never breaks at its hyphen. The
-sheet is as tall as the card beside it, so it never leaves a hole under itself. It is not shown when
-there is nothing to list.
+It shows the first six; when there are more, a "Show all N" button (`aria-expanded`,
+`aria-controls`, the same element keeps focus; "Show fewer" when open) reveals the rest, and
+one polite status line says what changed. A leader's name inside it never breaks at its
+hyphen. It is not shown when there is nothing to list.
 
 ### 5.3 Sign-in (`/sign-in`)
 
@@ -408,7 +439,8 @@ not answering; the five tabs as links with a 2px amber rule under the current on
 the tab's own section with its `h2`.
 
 - **Jobs.** A bar with state pills on the left ("All", "Waiting", "Being worked on",
-  "Failed", "Finished", "Cancelled", each with its count) and, on the right, the Location
+  "Failed", "Finished", "Cancelled", each with its count from the leader's last check; no
+  counts while a location filter is on) and, on the right, the Location
   select, "Loaded at" and Refresh. Then the table: Job, State, Recording, Pool, Priority,
   Tries, Queued, Actions. State is words, coloured by kind (amber while a follower has it,
   `--bad` when failed, muted when finished or cancelled). Recording is the file's key in
@@ -418,8 +450,9 @@ the tab's own section with its `h2`.
   at" and Refresh beside its heading.
 - **Locations.** "Add location" (primary) on the left, "Loaded at" and Refresh on the
   right. Table: Location, Folder, Pool, Scanning, Last scan, Actions. Folder carries where
-  it looks and the channel layout as notes; Pool carries the device; Scanning carries how
-  often.
+  it looks and the channel layout as notes; Pool carries the device ("Any device", "GPU (CUDA)
+  only", "CPU only"); Scanning carries how often. The Followers table's Device column reads
+  "GPU (CUDA)" or "CPU".
 - **Join tokens.** "Create join token" (primary), "Loaded at", Refresh, the table.
 - **Consent report.** A line of explanation with Refresh, then the two tables.
 
@@ -797,6 +830,7 @@ Rules:
 | "Add leader" (dialog submit) | "Add this leader" |
 | "Edit {leader}"; "Save"; "Cancel" | Same |
 | "Rotate the credential for {leader}" | "Replace the credential for {leader}" |
+| Help text of "Console credential": the command written between backticks in source | The command is shown as `<code>` and the backticks never appear. A refusal's message (plain text) has the same words without them |
 | "Create a new console credential on the leader first, replace it here, then revoke the old one on the leader." | "Make a new console credential on the leader first, paste it here, then revoke the old one on the leader." |
 | "Replace credential" (dialog submit) | Same |
 | "Letters, digits, . _ - ; starts with a letter or digit; at most 100." | Same |
@@ -813,6 +847,7 @@ Rules:
 | Columns "Principal", "Role", "Scope", "Added", "Actions" | "Who", "Role", "On which leaders", "Given", "Actions" |
 | "{kind}:{principal}"; "{time} by {who}"; "viewer", "operator", "admin" | Same |
 | "Remove"; named "Remove grant: {role} on {scope} for {kind}:{principal}" | "Remove"; named "Remove {role} on {scope} from {kind}:{principal}" |
+| (none) | Under that paragraph, in plain words: "A viewer can look. An operator can also try jobs again, cancel them, scan a location and wind followers down. An admin can also add and switch locations, revoke followers and make join tokens." and "A role covers leaders in one of three ways: `all` for every leader, `leader:eu-1` for one leader by name, or `label:region=eu` for every leader with that label. It is given to an Entra ID group, a Google group, one person by email, or everyone at a domain." (the three forms in `<code>`) |
 | Form "Add a grant" | "Give a role" |
 | "Role" | Same |
 | "Scope" | "On which leaders" |
@@ -925,9 +960,10 @@ Everything C3 established stays, and is tested where it was tested.
    (`.long`). Checked at 768px.
 7. **No sideways page scroll** at 768px on any page, nor at 390px on the fleet overview and
    sign-in. A wide table scrolls inside its own region.
-8. **Actions stay in reach.** The Actions column is pinned to the right edge of its
-   scrolling region at every width, and at 768px it never covers the whole table. This is
-   the C3 follow-up, done here.
+8. **Actions stay in reach.** Every action table fits its region at 1280, 900 and 768px, so
+   Actions is on screen with no scrolling and nothing is hidden under it. (Pinning was tried
+   and dropped: see 4.8. If a table ever cannot fit, `.pin-actions` pins the column with a
+   soft left shadow, and no text may be hidden beneath it at rest.)
 9. **Zero axe violations** (WCAG 2.1 A and AA) on every page and every dialog, in both
    themes, at desktop width; and at 768px for the fleet overview (menu closed and open) and
    sign-in.
@@ -950,7 +986,9 @@ Everything C3 established stays, and is tested where it was tested.
     Times ("Checked at", "Loaded at") are outside any live region.
 17. **Long values.** A leader's name can be 100 characters and a label's value 255, with
     nothing to break on. They wrap inside the card, the rail, the pill and the page header.
-    The page does not scroll sideways at 1280, 768 or 390 pixels because of one.
+    The page does not scroll sideways at 1280, 768 or 390 pixels because of one. A group's
+    object ID wraps inside its cell (`.ident`), never preferring a hyphen. The test measures
+    overflow after fonts are ready and two frames have passed.
 18. **The chosen theme wins.** Dark chosen on a light system, or Light on a dark one, is
     what is painted, and it survives a reload. The rail is ink either way.
 
@@ -983,14 +1021,14 @@ Everything C3 established stays, and is tested where it was tested.
 | C4 | The copy is rewritten in the brand voice; the fixed error titles keep their meaning. |
 | C5 | Fleet overview: a card per leader with a wide chart, totals above, a "Needs a look" paper card, label filter pills. A table only if accessibility requires one. |
 | C6 | No change to behaviour, routes, API calls, roles or security. No test deleted or weakened. |
-| C7 | Everything C3 established for accessibility stays, plus a pinned or always-reachable Actions column at tablet width. |
+| C7 | Everything C3 established for accessibility stays, plus an always-reachable Actions column at tablet width (met by fitting every table, not by pinning: M19). |
 
 ### Made while writing this spec
 
 | # | Ruling | Why |
 | --- | --- | --- |
 | M1 | **No table on the fleet overview.** Cards only. | A table's one advantage is moving down a column with a screen reader's table keys. The totals row gives the fleet-wide figures, and each card pairs every number with its label in a `<dl>`. The table was 72rem wide and scrolled sideways on every tablet; cards reflow. Section 7.11 lists what keeps the cards accessible. |
-| M2 | **"Needs a look" comes first in the grid**, not last as drawn. | Drawn with three leaders it sat at the bottom right. With twelve it would be below the fold, which defeats it. First in the grid keeps the drawing's composition. Moving it back is one line. |
+| M2 | **"Needs a look" comes first**, as a full-width band above the cards, not last as drawn. | Drawn with three leaders it sat at the bottom right. With twelve it would be below the fold, which defeats it. Built as a band at its own height (not a card in the grid) so it never leaves a hole beside it; it lists the first six and has "Show all N". |
 | M3 | **Sheets invert in the light theme**: ink sheets on a paper page. | Paper on paper has no edge. PaperDesk drew its callout this way. The amber offset shadow is the same in both. |
 | M4 | **A leader that is not answering has no chart**, so its history is not fetched. | As drawn. It is the one change to what is requested, and it is a reduction. |
 | M5 | **The sign-in page's `h1` is the card's "Sign in"**; the big serif line is a paragraph. | The drawing made the slogan the `h1` and "Sign in" an `h2`. A page's first heading should say what the page is. It looks the same. |
@@ -1007,7 +1045,7 @@ Everything C3 established stays, and is tested where it was tested.
 | M16 | **Grants are "roles given".** Scope is "On which leaders"; principal is "Who". The stored forms (`all`, `label:region=eu`, `domain:example.org`) are shown as they are. | The page is "Who can do what". The stored forms are what a person types and what the leader's tools print, so hiding them would mislead. |
 | M17 | **CSS is split into files under `src/styles/`** (seven in R1, an eighth in R2), imported in order by `src/styles.css`. Vite still emits one hashed stylesheet. | One 1,800-line file would be unworkable. |
 | M18 | **The favicon is the brand mark**, as a hashed SVG asset. | The page had an empty `data:` icon. |
-| M19 | **The Actions column is pinned at every width**, not only on tablets, in CSS alone. | Simpler, and a narrow desktop window has the same problem. |
+| M19 | **The Actions column is not pinned; every table is made to fit** at 1280, 900 and 768. (Superseded: it was first ruled pinned at every width.) | Pinning always hid the text beneath it at rest, and a pinned column was the symptom of too many columns. R2 folded columns (M10) until each table fits; the sticky rules stay behind `.pin-actions`, unused. |
 | M20 | **Main content is at most 1400px wide.** | On a very wide monitor two cards would stretch to 900px each. |
 
 ## 10. Mockup details not built as drawn
@@ -1058,7 +1096,7 @@ leader pages and Administration wear the brand but keep their old structure and 
 **R2, leader and admin** rebuilds the leader's page and tabs, the dialogs' wording, the
 one-time token dialog and Administration, and finishes the copy.
 
-Each plan's last task photographs every screen in both themes at 1280 and 768 pixels wide
+Each plan's last task photographs every screen in both themes at 1280, 900 and 768 pixels wide
 (`npm run screens`) for a person to look at. Unit tests and axe pass layouts that are
 plainly wrong to the eye.
 
@@ -1069,6 +1107,11 @@ New in R1: `src/styles/{tokens,base,controls,surfaces,shell,fleet,signin}.css`,
 `src/pages/SignInPage.test.tsx` (the sign-in tests, moved out of `src/shell.test.tsx`),
 `e2e/tests/theme.spec.ts`, `e2e/screens/capture.spec.ts`, `playwright.screens.config.ts`.
 
-New in R2: `src/styles/detail.css`, `src/pages/admin/AdminPage.tsx`.
+New in R2: `src/styles/detail.css`, `src/pages/admin/AdminPage.tsx`,
+`src/components/BreakPath.tsx`.
+
+Added to R1 by its fix wave: `src/theme-boot.ts` (and its build step in `vite.config.ts`, which
+the plan ruled may be edited, and its check in `scripts/check-dist.mjs`), `withUnit` in
+`src/lib/format.ts`, the `--ink`, `--backdrop` and `--shadow-edge` tokens.
 
 `src/styles.css` becomes the list of imports. Everything else is edited in place.

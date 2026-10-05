@@ -280,6 +280,22 @@ describe("administration pages", () => {
     expect(within(dialog).getByLabelText("Console credential for the new address")).toBeRequired();
   });
 
+  it("explains in plain words what a role is and how it is given", async () => {
+    renderApp("/admin/grants", { session: ADMIN_SESSION }).on("GET /api/admin/grants", reply(200, [GRANT]));
+    expect(await screen.findByText(/A viewer can look\. An operator can also/)).toBeInTheDocument();
+    expect(screen.getByText("leader:eu-1").tagName).toBe("CODE");
+    expect(screen.getByText(/or everyone at a domain\./)).toBeInTheDocument();
+  });
+
+  it("shows the command in the credential help as code, without the backticks", async () => {
+    renderApp("/admin/leaders", { session: ADMIN_SESSION }).on("GET /api/admin/leaders", reply(200, [LEADER]));
+    await userEvent.click(await screen.findByRole("button", { name: "Add a leader" }));
+    const dialog = screen.getByRole("dialog", { name: "Add a leader" });
+    const command = within(dialog).getByText("swarmscribe-admin console create");
+    expect(command.tagName).toBe("CODE");
+    expect(dialog.textContent).not.toContain("`");
+  });
+
   it("adds and removes a grant", async () => {
     const mock = renderApp("/admin/grants", { session: ADMIN_SESSION })
       .on("GET /api/admin/grants", reply(200, [GRANT]))

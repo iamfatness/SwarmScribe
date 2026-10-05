@@ -375,6 +375,13 @@ html:has(dialog[open]) {
   overflow-wrap: anywhere;
 }
 
+/* An empty notice takes no room: the live region stays in the page, and the space appears
+   with the words. */
+.action-notice:empty {
+  min-height: 0;
+  margin: 0;
+}
+
 .action-notice:not(:empty)::before {
   content: "";
   flex: none;

@@ -161,7 +161,8 @@ class Harness:
                     taken = now - timedelta(minutes=5 * i)
                     down = row.name == "us-1" and 100 <= i < 104
                     # A smooth day with a busy spell, so the chart is drawn as designed.
-                    busy = 6 + 5 * math.sin((288 - i) / 288 * math.tau * 1.4 + offset) + math.sin(i / 5)
+                    swell = math.sin((288 - i) / 288 * math.tau * 1.4 + offset)
+                    busy = 6 + 5 * swell + math.sin(i / 5)
                     point = dict(status, completed_last_hour=max(1, round(busy)))
                     session.add(
                         Snapshot(

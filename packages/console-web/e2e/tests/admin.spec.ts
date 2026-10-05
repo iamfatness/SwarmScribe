@@ -21,20 +21,20 @@ test("a console administrator adds and removes a grant, and each remove button n
   await form.getByRole("combobox", { name: "Who" }).selectOption("domain");
   await form.getByRole("textbox", { name: "Domain" }).fill("example.org");
   await form.getByRole("button", { name: "Give the role" }).click();
-  await expect(page.getByText("domain:example.org is now operator on label:region=eu.")).toBeVisible();
+  await expect(page.getByText("Everyone at example.org is now operator on label:region=eu.")).toBeVisible();
 
   // A second grant for the same principal: the two remove buttons still differ by name.
   await form.getByRole("combobox", { name: "Role" }).selectOption("viewer");
   await form.getByRole("textbox", { name: "On which leaders" }).fill("all");
   await form.getByRole("textbox", { name: "Domain" }).fill("example.org");
   await form.getByRole("button", { name: "Give the role" }).click();
-  await expect(page.getByText("domain:example.org is now viewer on all.")).toBeVisible();
-  const removers = page.getByRole("button", { name: /^Remove .* from domain:example\.org$/ });
+  await expect(page.getByText("Everyone at example.org is now viewer on all.")).toBeVisible();
+  const removers = page.getByRole("button", { name: /^Remove .* from everyone at example\.org$/ });
   await expect(removers).toHaveCount(2);
   const names = await removers.evaluateAll((els) => els.map((el) => el.getAttribute("aria-label")));
   expect(new Set(names).size).toBe(2);
 
-  const operatorGrant = "Remove operator on label:region=eu from domain:example.org";
+  const operatorGrant = "Remove operator on label:region=eu from everyone at example.org";
   await page.getByRole("button", { name: operatorGrant }).click();
   await page.getByRole("alertdialog").getByRole("button", { name: "Remove the role" }).click();
   await expect(page.getByText("The role is removed.")).toBeVisible();

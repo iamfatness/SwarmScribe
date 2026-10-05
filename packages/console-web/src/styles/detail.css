@@ -135,12 +135,36 @@
   }
 }
 
-/* Plain-words explanation under a section heading (Who can do what). */
-.explain {
-  max-width: 72ch;
-  color: var(--muted);
+/* The one line under a section's heading, with air before the table it introduces. */
+.page-sub.section-sub {
+  margin: var(--s-1) 0 var(--s-5);
 }
 
-.explain p {
-  margin: var(--s-2) 0;
+/* Who a role is given to: the words in the page's type, the name itself in mono. */
+.who-kind {
+  white-space: nowrap;
+}
+
+/* A form with what explains it: side by side where the page is wide, the form first where
+   it is not. */
+.form-and-aside {
+  display: grid;
+  grid-template-columns: minmax(0, 36rem);
+  align-items: start;
+  gap: 0 var(--s-7);
+}
+
+.form-and-aside > .callout {
+  max-width: 36rem;
+  margin-top: var(--s-8);
+}
+
+.callout p {
+  margin: var(--s-3) 0 0;
+}
+
+@media (min-width: 1200px) {
+  .form-and-aside {
+    grid-template-columns: minmax(0, 36rem) minmax(0, 1fr);
+  }
 }

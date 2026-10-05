@@ -33,6 +33,40 @@ export const PRINCIPAL_KINDS: { value: PrincipalKind; label: string; field: stri
   },
 ];
 
+/**
+ * The words that go before the name itself, for each kind. Nobody types or reads a kind's
+ * stored code ("entra_group:") here: the form asks for it in words, so the lists and the
+ * sentences about them say it in words too. An email address needs none.
+ */
+const KIND_WORDS: Record<string, string> = {
+  entra_group: "Entra ID group",
+  google_group: "Google group",
+  email: "",
+  domain: "everyone at",
+};
+
+/**
+ * Who an entry names, as a phrase: "Entra ID group a1a1…", "Google group ops@example.org",
+ * "sam@example.org", "everyone at example.org". `start` is for the beginning of a sentence or
+ * a cell ("Everyone at example.org is now viewer on all.").
+ */
+export function whoText(kind: string, principal: string, start = false): string {
+  const words = KIND_WORDS[kind] ?? "";
+  const phrase = words === "" ? principal : `${words} ${principal}`;
+  return start && kind === "domain" ? `E${phrase.slice(1)}` : phrase;
+}
+
+/** The same in a table cell: the words in the page's type, the name itself in mono, whole. */
+export function Who({ kind, principal }: { kind: string; principal: string }) {
+  const words = whoText(kind, "", true).trim();
+  return (
+    <>
+      {words !== "" && <span className="who-kind">{words} </span>}
+      <span className="mono ident">{principal}</span>
+    </>
+  );
+}
+
 /** Who a role or a console administrator entry names: a kind, then the name itself. */
 export function PrincipalFields({
   kind,

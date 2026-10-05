@@ -14,9 +14,9 @@ Design: [`docs/superpowers/specs/2026-10-02-swarmscribe-architecture-design.md`]
 | `swarmscribe-protocol` — leader–follower wire models | Built |
 | `swarmscribe-engine` — single-file transcriber | Built |
 | `swarmscribe-leader` — catalogue, consent, jobs, admin API and `swarmscribe-admin` | Built (local storage); cloud storage and vocabulary next |
-| `swarmscribe-follower` — the agent: join, claim, transcribe, upload | Agent built; images, Helm chart and service install next |
+| `swarmscribe-follower` — the agent, its two images and its Helm chart (`deploy/helm/swarmscribe-follower`, one release per pool) | Built; the service install for outside machines is next |
 | `swarmscribe-console` — fleet console: backend, web app, image and Helm chart (`deploy/helm/swarmscribe-console`) | Built |
-| Helm chart for the leader and followers | Not started |
+| Helm chart for the leader, and autoscaling | Not started |
 
 ## Transcribe one file
 
@@ -541,7 +541,7 @@ What each kind of mount needs:
 | a folder of a Linux host (`-v /srv/follower:...`) | `sudo chown 10001:10001 /srv/follower && sudo chmod 700 /srv/follower` before the first start |
 | a `tmpfs` | its owner and mode said: `--tmpfs /var/lib/swarmscribe-follower:uid=10001,gid=10001,mode=0700`. A plain tmpfs belongs to root and is writable by all |
 | a folder of a Windows or macOS host under Docker Desktop (`-v C:\follower:...`) | not usable: inside the container it is seen as root's and writable by all (measured). Use a named volume |
-| a Kubernetes `emptyDir` | it is root's and mode `0777` by default, and `fsGroup` changes its group, not its owner: refused as the state folder itself. Point `SWARMSCRIBE_FOLLOWER_STATE_DIR` at a folder inside the mount (`/var/lib/swarmscribe-follower/state`): the follower creates it as its own, `0700`. Not yet run on a cluster; the chart (F3) will do this |
+| a Kubernetes `emptyDir` | it is root's and mode `0777` by default, and `fsGroup` changes its group, not its owner: refused as the state folder itself. Point `SWARMSCRIBE_FOLLOWER_STATE_DIR` at a folder inside the mount (`/var/lib/swarmscribe-follower/state`): the follower creates it as its own, `0700`. The chart does exactly this ("Deploy a follower pool"); on a kind cluster the mount was `0:10001` mode `3777` and the folder `10001:10001` mode `2700` |
 
 The follower never changes a folder that is not its own; one of its own that is looser than
 `0700` it tightens itself.
@@ -617,7 +617,10 @@ stopping). To scrape it from outside, listen on the container's address
 (`-e SWARMSCRIBE_FOLLOWER_HEALTH_ADDR=0.0.0.0:9108`; an IPv6 literal such as `[::]:9108`
 works too) and publish the port to the network
 your Prometheus is on, never to the internet: it has no authentication. Outside the images
-the listener is off unless the variable is set.
+the listener is off unless the variable is set. Wherever it listens, it answers one request
+per connection (`Connection: close`), drops a connection after five seconds in all however
+slowly its bytes arrive, and holds at most eight connections at once (a ninth is closed
+unanswered): a slow or silent client cannot keep a thread, or keep a probe waiting for long.
 
 **Memory.** The engine reads a whole recording into memory and computes its features in
 one piece, so what a job needs grows with the recording's length, on a GPU as on a CPU
@@ -632,8 +635,9 @@ one piece, so what a job needs grows with the recording's length, on a GPU as on
 | each hour of the longest recording, split into channels | 2.6 GiB when the speakers alternate (2706 MiB); the follower counts 3900 MiB, for two who both talk throughout |
 
 So a CPU follower with `distil-large-v3` for recordings of up to one hour needs about
-5.3 GiB (what the follower counts: 1730 + 100 + 3600 MiB), and one for three hours about
-12 GiB; a GPU follower with `large-v3` needs 3.1 GiB to load its model at all. Before each
+5.6 GiB (what the follower counts for the first one, 1730 + 100 + 3600 MiB, and 300 MiB for
+what the process keeps after a long recording: see "Sizing a pool"), and one for three hours
+about 12.6 GiB; a GPU follower with `large-v3` needs 3.1 GiB to load its model at all. Before each
 job the follower adds its estimate for the recording to what the process already holds and
 compares that with what it may use: `SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB`, else the smaller
 of the container's memory limit and the machine's memory (`doctor` prints the figure and
@@ -1437,6 +1441,289 @@ command: after a migration, a rollback of the image alone leaves pods that refus
 so roll forward again. A Job that succeeds is removed; one that fails is kept, the upgrade
 fails, and `kubectl -n fleet logs job/console-swarmscribe-console-migrate` says why. A changed setting restarts the pods (the
 Deployment carries a checksum of the ConfigMap).
+
+## Deploy a follower pool
+
+A pool is a set of followers that are alike: one image, one model, one size, one kind of
+node. One release of the chart `deploy/helm/swarmscribe-follower` is one pool; install it
+again under another name for another pool (a CPU pool and a GPU pool, two sizes, two
+clusters). It needs:
+
+- **A leader the pods can reach**, by the address in `leader.url`. The leader's own file
+  links are built from its `SWARMSCRIBE_PUBLIC_URL`, so that address must be reachable from
+  the pods too. The leader has no chart yet; the follower chart needs only its URL.
+- **An image with its model baked in**, where the cluster can pull it ("The pool's image").
+- **A pool token in a Secret, created beforehand.** The chart never creates a Secret.
+- **For a GPU pool:** nodes with an NVIDIA GPU, the NVIDIA device plugin (it advertises
+  `nvidia.com/gpu`) and whatever your cluster needs to hand the driver to a container
+  (often a `RuntimeClass` named `nvidia`).
+
+### The pool's image
+
+No image is published, so `image.repository` and `image.tag` have no default: both are
+required, and the render fails saying so. Bake the model in ("Follower images" above): a pod
+then starts without Hugging Face, and every pod of the pool holds the same, checked model.
+
+```
+docker build --build-arg MODELS=distil-large-v3 -t swarmscribe-follower:cpu-distil-large-v3 \
+  --target cpu -f docker/follower.Dockerfile .
+docker build --build-arg MODELS=large-v3 -t swarmscribe-follower:cuda-large-v3 \
+  --target cuda -f docker/follower.Dockerfile .
+# a local cluster:        kind load docker-image swarmscribe-follower:cpu-distil-large-v3
+# a registry of your own: docker tag ... && docker push ...
+```
+
+The leader's profile for the device must name the baked model (`uv run swarmscribe-admin
+profiles set cpu --model distil-large-v3 --compute-type int8`): a baked image is offline, and a pod asked for a model it does not hold hands the
+recording back and exits `3`. If `kind load docker-image` stops with "content digest ... not
+found", load from an archive as "Deploy the fleet console" shows.
+
+### Kubernetes, with the Helm chart
+
+1. Create the pool token on the leader, and the Secret in the pool's namespace. A pool
+   token does not expire and registers any number of pods ("Pool tokens versus join
+   tokens").
+
+   ```
+   uv run swarmscribe-admin pool-tokens create --name cpu-pods --pool default   # shows the token, once
+   kubectl create namespace transcribe
+   kubectl -n transcribe create secret generic swarmscribe-pool-token \
+     --from-file=pool-token=pool-token.txt    # a file that holds the token and nothing else
+   ```
+
+   (`--from-file`, so that the token is not in your shell's history; delete the file
+   afterwards. A newline at its end does no harm.)
+
+2. Write the values. A CPU pool:
+
+   ```yaml
+   image:
+     repository: swarmscribe-follower   # or your registry's name for it
+     tag: cpu-distil-large-v3
+   leader:
+     url: https://leader.example.org
+   poolToken:
+     existingSecret: swarmscribe-pool-token
+   pool: default
+   replicaCount: 4
+   ```
+
+   A GPU pool, as a second release:
+
+   ```yaml
+   image:
+     repository: swarmscribe-follower
+     tag: cuda-large-v3
+   leader:
+     url: https://leader.example.org
+   poolToken:
+     existingSecret: swarmscribe-gpu-pool-token
+   pool: gpu
+   replicaCount: 2
+   gpu:
+     enabled: true              # one GPU per pod, SWARMSCRIBE_FOLLOWER_DEVICE=cuda, no surge
+   runtimeClassName: nvidia     # if your cluster hands out GPUs through a RuntimeClass
+   nodeSelector:
+     nvidia.com/gpu.present: "true"
+   tolerations:
+     - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+   ```
+
+3. Install, one release per pool:
+
+   ```
+   helm upgrade --install cpu-pool deploy/helm/swarmscribe-follower -n transcribe -f cpu-values.yaml
+   kubectl -n transcribe get pods -l app.kubernetes.io/instance=cpu-pool
+   ```
+
+   A pod is `Running` and ready within seconds: that says its threads are up, not that it
+   has joined. That it has loaded its model and registered is in its log (`registered`) and
+   in `swarmscribe-admin followers list`.
+
+What the chart installs:
+
+| Object | What it is |
+|---|---|
+| Deployment | `replicaCount` followers running `run` under the image's init: non-root (10001, `fsGroup` 10001), read-only root filesystem, no capabilities, no service-account token. Startup and liveness probes on `/healthz`; no readiness probe and no Service, because nothing connects to a follower. Rollouts replace a quarter of the pool at a time, with a surge pod on a CPU pool and none on a GPU pool |
+| NetworkPolicy | egress to DNS and to anywhere on port 443 and the port of `leader.url`, except loopback, link-local (cloud metadata) and reserved ranges; ingress to nobody but the peers in `networkPolicy.ingress.from` |
+| ServiceAccount | one with no token mounted; a follower never calls the Kubernetes API |
+| PodDisruptionBudget | only with `podDisruptionBudget.enabled` and more than one replica |
+
+Values:
+
+| Value | Setting or meaning |
+|---|---|
+| `image.repository`, `image.tag` | the image. Both required (`image.digest` wins over the tag) |
+| `leader.url` | `SWARMSCRIBE_LEADER_URL`. Required, `https`. `leader.allowHttp: true` accepts plain `http` (a test cluster only) |
+| `leader.ca.existingConfigMap`, `.key` | CA certificates (PEM) for a leader on a private CA (`SWARMSCRIBE_LEADER_CA_FILE`) |
+| `poolToken.existingSecret`, `.key` | the Secret that holds the pool token (key `pool-token`). Required. Mounted as a file, mode 0440, and read only when a pod registers |
+| `pool` | the pool name the followers report; the token decides the real pool |
+| `replicaCount` | followers; `0` parks the pool |
+| `resources` | CPU and memory; the memory limit is what the memory guard goes by ("Sizing a pool") |
+| `gpu.enabled`, `gpu.resource`, `runtimeClassName`, `nodeSelector`, `tolerations`, `affinity` | a GPU pool and where it runs |
+| `models.volume` | `none` (baked, the default), `emptyDir` (every new pod downloads its model) or `persistentVolumeClaim` with `models.existingClaim` |
+| `scratch.sizeLimit` | room for the recording being transcribed (20Gi) |
+| `terminationGracePeriodSeconds` | 900; the follower is told 30 s less |
+| `settings` | any other `SWARMSCRIBE_FOLLOWER_*` setting, without the prefix: `ALLOWED_MODELS`, `STARTUP_MODEL`, `LOG_FORMAT`, ... |
+| `extraEnv` | other environment, such as `HTTPS_PROXY` |
+| `healthPort`, `metrics.scrapeAnnotations`, `networkPolicy.*`, `podDisruptionBudget.*` | described in `values.yaml`. `podDisruptionBudget.maxUnavailable` is an integer of at least 1 or a percentage such as `25%`; `0` and `0%` are refused (a budget that allows no eviction would stop every node drain) |
+
+`helm template` fails, saying why, when the image, `leader.url` or the Secret's name is
+missing; when `leader.url` is not `http(s)://host[:port][/path]`, or is `http` without
+`leader.allowHttp`; when a value has the wrong type or a name the chart does not know
+(`replicas` for `replicaCount`: `values.schema.json` allows no unknown value); when
+`settings` or `extraEnv` names something the chart sets itself (the state folder, the
+listener, the memory limit, the device, the token ...); and when a claim is not named for a
+`persistentVolumeClaim` model volume.
+
+### Sizing a pool
+
+The memory limit decides the longest recording a pod takes. Before each job the follower
+adds its estimate for the recording to what the process holds at that moment and compares
+the sum with the limit, which the chart passes on (`SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB`);
+a recording that cannot fit is failed `out_of_resources` with its length and the limit in
+the reason, three times, and parked. Size the limit as:
+
+```
+what the model holds once loaded  +  0.4 GiB  +  3.6 GiB x hours of the longest recording
+```
+
+(3.9 GiB per hour where recordings are split into channels.) The 0.4 GiB is the 100 MiB a
+job of any length adds and 300 MiB for what the process keeps after long recordings (the
+planner's measurement, 2026-10-05, in a pod: a follower held 230 MiB with `tiny.en` loaded
+and 432 to 472 MiB after each of four hour-long recordings, so up to 242 MiB kept, rounded
+up to 300; it does not keep growing; with `distil-large-v3` and half-hour recordings it kept
+13 MiB). So a pod sized for exactly one long recording
+by the table in "Follower images" refuses the next one: one that was tried did.
+
+| Pool | Recordings up to | Memory limit (and request) |
+|---|---|---|
+| `distil-large-v3` on a CPU (1.7 GiB loaded) | 1 hour | 6Gi (the default) |
+| | 2 hours | 10Gi |
+| | 3 hours | 13Gi |
+| `large-v3` on a GPU (0.7 GiB loaded, 3.1 GiB while loading) | 1 hour | 5Gi |
+| | 2 hours | 9Gi |
+| | 3 hours | 12Gi |
+| `large-v3` on a CPU (3.5 GiB loaded) | 1 hour | 8Gi |
+
+Keep the memory request equal to the limit: a follower uses nearly all of it for a few
+seconds of every long recording, and a node that promised the same memory twice would kill
+it there. The model figures are for a baked model, or one read from a cache. A pod that had
+to download its model in the same start holds more until its container restarts
+(2257 MiB against 1766 MiB with `distil-large-v3`), which is one more reason to bake. On a CPU pool the CPU limit is also the number of threads the engine uses
+(`OMP_NUM_THREADS`); speed follows it. A GPU pod needs little CPU and exactly one GPU: one
+follower uses one GPU, whole, so a node with four GPUs runs four pods.
+
+### What the pods do
+
+- **A stop** (a rollout, a scale-down, a node drain, `kubectl delete pod`): the follower
+  finishes the recording in hand if its estimated time left fits in
+  `terminationGracePeriodSeconds` less 30 s, and otherwise hands it back at the end of the
+  segment it is on, without a counted attempt; another follower redoes it from the start.
+  On the kind cluster a pod deleted in the middle of a recording was gone in 2.7 s of its 60 s grace.
+  What is lost is the compute already spent, so there is no PodDisruptionBudget by default:
+  it would protect nothing else and make every node drain wait.
+- **A crash or a kill** (out of memory, a node that dies): the container restarts and is
+  the same follower, because its credential lives in a memory-backed `emptyDir` that
+  outlives the container. The recording it held is redone when its lease expires, and that
+  attempt is counted.
+- **A new pod** registers with the pool token and takes over the row of a pod of the same
+  token that has gone, so the leader's list stays the size of the pool at its largest.
+- **Drain** (`uv run swarmscribe-admin followers drain <id>`): the pod finishes its recording and
+  parks. It stays `Running`, is not restarted, and takes nothing more
+  (`swarmscribe_follower_state{state="draining"}` is 1). Delete the pod to replace it: its
+  replacement is a new, active follower, and the drained row stays `draining`.
+- **A pod that keeps restarting** says why in the last line of its log (`kubectl logs
+  --previous`), and its exit code is in `kubectl describe pod`: `2` a setting is wrong; `3`
+  this pod cannot do the work: a `cuda` image on a node without a GPU (`error: cuda was
+  requested but no CUDA GPU is available`), or a model the image does not hold; `4` the
+  pool token was refused or the follower was revoked. Each restart loads the model again
+  before it finds out, with Kubernetes' growing back-off in between.
+- **Shutting a pool out:** `swarmscribe-admin pool-tokens revoke <name> --revoke-followers`.
+  Every pod then exits `4`, again at every restart: a revoked follower keeps its credential
+  and never registers again by itself. **To bring the pool back,** create a new pool token,
+  put it in the Secret, and `kubectl rollout restart deployment/<release>-swarmscribe-follower`:
+  new pods have an empty state folder and register with the new token.
+- **A changed Secret** needs no restart otherwise. The token is a mounted file, read only at
+  a registration; the kubelet refreshes the file, and running followers keep their
+  credentials.
+
+### Probes, metrics and the network
+
+The follower listens on the pod's own address (never loopback, never a Service) on
+`healthPort` (9108). `/healthz` answers 200 while its threads are alive: also while the
+model loads and while the leader is away, so a leader outage never restarts a pod that is
+transcribing. `/metrics` is the Prometheus text of "Follower images". It has no
+authentication, so by default the NetworkPolicy lets nobody in, and there is no Service and
+no PodMonitor. On most network plugins the kubelet's probes are not affected: they come from
+the pod's own node, which the policy does not cut off. If the pods' probes fail with the
+policy on (the startup probe fails and every pod restarts), your plugin applies ingress
+policy to node traffic too: add the nodes' address range to `networkPolicy.ingress.from` (an
+`ipBlock`; the port is already limited to `healthPort`), or set `networkPolicy.enabled:
+false`. To scrape, name your Prometheus:
+
+```yaml
+networkPolicy:
+  ingress:
+    from:
+      - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}
+metrics:
+  scrapeAnnotations: true    # prometheus.io/scrape, /port and /path on the pods
+```
+
+Name only peers you trust. The kubelet's probe shares the listener's eight connections with
+every other client, so a named peer that opens eight slow connections every five seconds
+(each is held for five seconds) can make `/healthz` unanswerable, and the kubelet then
+restarts the pod. That is why nobody is allowed by default.
+
+The listener answers one request per connection and drops a connection after five seconds
+in all, however slowly its bytes arrive, and holds at most eight at once: a slow or silent
+client cannot keep the kubelet's probe waiting for long (but see above for a peer that
+keeps all eight places). To look at a pod by hand, ask from
+inside it (`kubectl port-forward` reaches loopback, where nothing listens):
+
+```
+kubectl -n transcribe exec <pod> -- python -c "import os, urllib.request; print(urllib.request.urlopen('http://' + os.environ['POD_IP'] + ':9108/metrics').read().decode())"
+```
+
+Egress is open to port 443 and the port of `leader.url` anywhere but loopback, link-local
+(the cloud metadata addresses) and reserved ranges: a NetworkPolicy cannot name a host, and
+the leader's file links may point at a storage service. Narrow
+`networkPolicy.egress.https.cidrs` to your leader and storage if you can. Peers are matched
+after Service address translation: for a leader inside the cluster the port that counts is
+its pod's, so add it to `networkPolicy.egress.https.ports` if it differs from the port in
+`leader.url`. Object storage that serves its signed links on a port other than 443 (MinIO
+on 9000, for example) is blocked until that port is added to the same list. A NetworkPolicy needs a network plugin that enforces it.
+
+### What has been run, and what has not
+
+CI lints the chart, validates what it renders against the Kubernetes schemas and checks
+what must hold (`deploy/helm/swarmscribe-follower/ci/check_render.py`), for a CPU pool and a
+GPU pool. On 2026-10-05 the chart was also installed on a local kind cluster (kind v0.30.0,
+Kubernetes 1.34.0) against a real leader with Postgres, with the `cpu` image and `tiny.en`
+(`e2e/follower-kind/`; the record is
+`docs/superpowers/plans/2026-10-05-follower-f3-outcomes.md`): two pods became ready and
+registered with a pool token from the Secret; recordings were transcribed; a killed
+follower came back as itself; a pod deleted mid-recording handed it back; a replacement
+pod took over a gone row; an hour-long recording was refused under a 2500Mi limit; a
+drained pod parked and took none of the eight recordings submitted after the drain; the NetworkPolicy kept another pod out of `/metrics` and let a named
+one in; and revoked pods exited `4` until a new token and a rollout restart. A second
+scenario shows a `cuda` image exiting `3` on a node without a GPU, and a GPU pool's pod
+staying `Pending` there. In the recorded run, `up` took 111 s on a new cluster, `run` passed
+once in 116 s and `no-gpu` took 79 s. That the listener drops a slow client after five
+seconds and turns away a ninth connection, and that a pod with `models.volume: emptyDir`
+downloads its model through the NetworkPolicy, were observed in the planner's run only
+(same document), not in the recorded one.
+
+Not run:
+
+- **A GPU pool on Kubernetes.** A kind cluster has no GPU. The `cuda` image was run on a
+  GPU in Docker only (F2); the chart's GPU values are rendered and schema-checked, not run.
+- A leader on a private CA (`leader.ca`), an IPv6 or dual-stack cluster, a persistent model
+  volume, scrape annotations with a real Prometheus, a PodDisruptionBudget, a real node
+  drain (a pod delete takes the same path), and any cluster but kind.
+- The kind test is run by hand, not in CI.
+- Autoscaling on queue depth belongs to the leader's chart (roadmap item 6).
 
 ## Develop
 

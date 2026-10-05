@@ -1282,3 +1282,40 @@ follower chart (F3) and the outside-machine install (F4).
 - **Compose test (10).** The profile is set with the leader's `set_profile`, not in the
   database by hand. The test also covers the health listener, `/metrics` and the memory
   guard.
+
+**Amendments after F3** (built in plan F3, 2026-10-05; the chart is `deploy/helm/swarmscribe-follower`).
+- **The pool token's value (8.2).** `poolToken.existingSecret` and `poolToken.key`, not
+  `secrets.existingSecret`: the chart reads one secret. The token file is mode 0440 for the
+  pod's `fsGroup` (10001). A changed Secret does not restart the pods and need not: the file
+  is read only at a registration.
+- **The state folder (5.3, 8.2).** `/var/lib/swarmscribe-follower/state`, a folder the
+  follower creates (0700) inside the memory-backed `emptyDir`, which is itself root's
+  (`0:10001`, mode `3777` with the `fsGroup`) and is refused as the state folder.
+- **Probes (8.2).** The startup probe allows two minutes, not thirty: `/healthz` is 200
+  while the model loads (amendment after F2), so a slow download cannot fail the start.
+- **Rollouts (8.2).** `maxUnavailable: 25%` for every pool; `maxSurge` is `25%` on a CPU
+  pool and 0 on a GPU pool.
+- **NetworkPolicy (8.2).** Ingress to the health port is for nobody unless
+  `networkPolicy.ingress.from` names peers (on most CNIs the kubelet's probes come from the
+  node and are not affected; where they are, the nodes' range goes into `ingress.from` or the
+  policy is turned off). A named peer shares the listener's eight connections with the
+  kubelet's probe, so only trusted peers should be named. Egress is DNS, and TCP 443 and the port of `leader.url` to anywhere but
+  loopback, link-local and reserved ranges; another port for the storage that serves the
+  leader's file links (MinIO on 9000) is added to `networkPolicy.egress.https.ports`.
+- **PodDisruptionBudget (8.2).** None by default; `podDisruptionBudget.enabled` renders one
+  for more than one replica. `maxUnavailable` is an integer of at least 1 or a percentage
+  from 1%: zero is refused.
+- **The listener (D18, 9).** In a pod it is bound to the pod's address
+  (`[$(POD_IP)]:9108`), not to loopback. Everywhere it answers one request per connection,
+  gives a connection five seconds in all and holds at most eight; what `/healthz` and
+  `/metrics` answer is unchanged.
+- **Sizing (5.7, 8.2).** A follower keeps up to 240 MiB after a long recording (measured),
+  and the guard counts what the process holds, so the guidance becomes: the model's host
+  memory plus 0.4 GiB plus 3.6 GiB per hour of the longest recording (3.9 GiB split). The
+  chart's default is 6Gi for requests and limits (one hour with `distil-large-v3` on a CPU).
+- **Revocation on Kubernetes (6.5, 8.2).** After `pool-tokens revoke --revoke-followers`
+  the pods exit 4 at every restart; a new token in the Secret brings the pool back only
+  with `kubectl rollout restart`, because a revoked pod keeps its credential.
+- **Chart test (10).** `e2e/follower-kind/` installs the chart on `kind` beside a leader
+  and Postgres in the cluster. It is run by hand and recorded in
+  `plans/2026-10-05-follower-f3-outcomes.md`; a GPU pool has not been run on Kubernetes.

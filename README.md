@@ -364,7 +364,9 @@ Commands:
   `ALLOW_HTTP=1` for one, are reported as `NOT READY`, in words. The start-up
   model is `SWARMSCRIBE_FOLLOWER_STARTUP_MODEL`, by default the device's
   default (`distil-large-v3` on CPU); the model a job uses is the leader's
-  profile for the device.
+  profile for the device. `--no-model` leaves the model out and `--no-leader`
+  leaves the leader out, for a machine or an image checked before it has a
+  network; what is left out is said (`not checked`), never counted as passed.
 - `run` does the same checks, joins if there is no stored credential, then
   claims and transcribes until it is stopped.
 - `join [--leader URL] [--token-stdin]` only registers and stores the

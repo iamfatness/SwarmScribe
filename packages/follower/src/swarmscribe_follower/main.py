@@ -257,10 +257,12 @@ def command_doctor(
     host: Callable[..., ModelHost] = ModelHost,
     client: Callable[..., LeaderClient] = LeaderClient,
     load_model: bool = True,
+    ask_leader: bool = True,
 ) -> int:
     """What start-up checks, said out loud, one line per check: settings, folders, device,
     the model with a real inference, the leader. Registers nothing and claims nothing, and
-    prints no secret (no token, credential or link)."""
+    prints no secret (no token, credential or link). `ask_leader=False` leaves the leader
+    out: a machine or an image can be checked where there is no network."""
     configure_environment(settings)
     print(f"swarmscribe-follower {FOLLOWER_VERSION}", file=out)
     print(f"settings: ok (leader {settings.leader_url}, pool {settings.pool})", file=out)
@@ -296,15 +298,18 @@ def command_doctor(
             models.close()
     else:
         print("model: not checked (--no-model)", file=out)
-    leader = client(settings.leader_url, verify=tls(settings))
-    try:
-        if leader.healthy():
-            print("leader: answers", file=out)
-        else:
-            print("leader: FAILED: no answer from its /healthz", file=out)
-            code = code or EXIT_UNEXPECTED
-    finally:
-        leader.close()
+    if ask_leader:
+        leader = client(settings.leader_url, verify=tls(settings))
+        try:
+            if leader.healthy():
+                print("leader: answers", file=out)
+            else:
+                print("leader: FAILED: no answer from its /healthz", file=out)
+                code = code or EXIT_UNEXPECTED
+        finally:
+            leader.close()
+    else:
+        print("leader: not checked (--no-leader)", file=out)
     joined = CredentialStore(settings.credential_file).path.is_file()
     print(f"joined: {'yes' if joined else 'no'}", file=out)
     print("result: ready" if code == EXIT_OK else f"result: NOT READY (exit {code})", file=out)
@@ -338,6 +343,9 @@ def parser() -> argparse.ArgumentParser:
     doctor = commands.add_parser("doctor", help="check settings, folders, device, model, leader")
     doctor.add_argument(
         "--no-model", action="store_true", help="do not load the model or run the warm-up"
+    )
+    doctor.add_argument(
+        "--no-leader", action="store_true", help="do not ask the leader's /healthz"
     )
     return top
 
@@ -373,7 +381,9 @@ def main(
             return command_join(settings, build, args.token_stdin, out, stdin)
         if args.command == "leave":
             return command_leave(settings, out)
-        return command_doctor(settings, out, load_model=not args.no_model)
+        return command_doctor(
+            settings, out, load_model=not args.no_model, ask_leader=not args.no_leader
+        )
     except FollowerExit as stop:
         if stop.code != EXIT_OK:
             print(f"error: {stop.reason}", file=err)

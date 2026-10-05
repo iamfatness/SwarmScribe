@@ -112,7 +112,7 @@ VOLUME ["/var/lib/swarmscribe-follower", "/scratch"]
 # while the leader is away. Loopback only: nothing outside the container can reach it. A
 # follower started with the listener turned off (the variable set to nothing) is not probed.
 # The probe's `python -c` child is reaped by the init every time.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3   CMD ["python", "-c", "import os, sys, urllib.request; a = os.environ.get('SWARMSCRIBE_FOLLOWER_HEALTH_ADDR', ''); sys.exit(0 if not a or urllib.request.urlopen('http://' + a + '/healthz', timeout=3).status == 200 else 1)"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD ["python", "-c", "import os, sys, urllib.request; a = os.environ.get('SWARMSCRIBE_FOLLOWER_HEALTH_ADDR', ''); sys.exit(0 if not a or urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://' + a + '/healthz', timeout=3).status == 200 else 1)"]
 # tini is PID 1 and the follower its only child; no shell in between. The kernel gives PID 1
 # no default action for a signal, so a SIGTERM that reached a follower running as PID 1
 # before Python had installed its handlers was dropped: `docker stop` just after `docker run`

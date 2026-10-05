@@ -10,6 +10,7 @@ outage must never make a supervisor kill a follower that is transcribing."""
 
 import ipaddress
 import logging
+import os
 import socket
 import threading
 from collections.abc import Callable
@@ -27,6 +28,9 @@ PLAIN = "text/plain; charset=utf-8"
 
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
+    # On Windows SO_REUSEADDR lets a second socket share a port that is being listened on, so a
+    # taken port would go unnoticed; there it is left off. Elsewhere it only skips TIME_WAIT.
+    allow_reuse_address = os.name != "nt"
 
     def __init__(
         self,

@@ -154,9 +154,9 @@ docker run --rm --entrypoint /usr/bin/tini "$image" --version >/dev/null \
 status=0
 output="$(docker run --rm "${locked[@]}" "$image" 2>&1)" || status=$?
 [ "$status" = "2" ] || fail "run without configuration exited $status, not 2"
-echo "$output" | grep -q 'invalid configuration' \
+grep -q 'invalid configuration' <<<"$output" \
   || fail "run without configuration did not say so: $output"
-if echo "$output" | grep -q 'Traceback'; then
+if grep -q 'Traceback' <<<"$output"; then
   fail "run without configuration ended in a traceback"
 fi
 
@@ -182,7 +182,7 @@ if [ "$target" = "cuda" ]; then
   status=0
   output="$(docker run --rm "${locked[@]}" "${leader[@]}" "$image" doctor --no-leader 2>&1)" || status=$?
   [ "$status" = "3" ] || fail "the cuda image without a GPU exited $status, not 3: $output"
-  echo "$output" | grep -q 'cuda was requested' || fail "the cuda image did not name the device"
+  grep -q 'cuda was requested' <<<"$output" || fail "the cuda image did not name the device"
 else
   [ -z "$(setting SWARMSCRIBE_FOLLOWER_DEVICE)" ] || fail "the cpu image sets a device"
   if docker run --rm --entrypoint python "$image" -c 'import ctypes; ctypes.CDLL("libcublas.so.12")' 2>/dev/null; then
@@ -236,15 +236,15 @@ if ref != entry["revision"]:
     # writable but the two declared volumes: nothing is fetched at run time.
     output="$(docker run --rm "${locked[@]}" "${gpu[@]}" "${leader[@]}" "$image" doctor --no-leader 2>&1)" \
       || fail "doctor failed offline: $output"
-    echo "$output" | grep -q "^model: $baked (.*) loaded and ran\$" \
+    grep -q "^model: $baked (.*) loaded and ran\$" <<<"$output" \
       || fail "the baked model did not load and run offline: $output"
-    echo "$output" | grep -q '^result: ready$' || fail "doctor is not ready: $output"
+    grep -q '^result: ready$' <<<"$output" || fail "doctor is not ready: $output"
     if [ "$target" = "cuda" ]; then
-      echo "$output" | grep -q '^device: cuda (' || fail "doctor did not run on the GPU: $output"
+      grep -q '^device: cuda (' <<<"$output" || fail "doctor did not run on the GPU: $output"
     fi
 
     name="follower-check-$$"
-    trap 'docker rm -f "$name" "$name-early" >/dev/null 2>&1 || true' EXIT
+    trap 'docker rm -f "$name" "$name-early" "$name-proxy" >/dev/null 2>&1 || true' EXIT
 
     # A stop at once, before start-up has got anywhere: it must END the container, never be
     # lost. Lost means Docker kills it when the stop window closes (137), and with the long
@@ -297,7 +297,7 @@ if ref != entry["revision"]:
       || fail "PID 1 is not tini running the follower"
     children="$(docker exec "$name" sh -c \
       'for s in /proc/[0-9]*/status; do grep -q "^PPid:[[:space:]]*1\$" "$s" && tr "\0" " " <"${s%status}cmdline" && echo; done; true')"
-    echo "$children" | grep -q 'bin/swarmscribe-follower run' \
+    grep -q 'bin/swarmscribe-follower run' <<<"$children" \
       || fail "the follower is not the child of PID 1: $children"
 
     # Healthy with no leader in reach: /healthz is about the follower's own threads.
@@ -309,12 +309,28 @@ if ref != entry["revision"]:
     done
     [ "$health" = "healthy" ] || fail "Docker reports the follower $health while it waits for a leader"
     metrics="$(docker exec "$name" python -c \
-      "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:9108/metrics', timeout=3).read().decode())")" \
+      "import urllib.request; print(urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://127.0.0.1:9108/metrics', timeout=3).read().decode())")" \
       || fail "/metrics does not answer"
-    echo "$metrics" | grep -q '^swarmscribe_follower_state{state="idle"} 1.0$' \
+    grep -q '^swarmscribe_follower_state{state="idle"} 1.0$' <<<"$metrics" \
       || fail "/metrics does not show an idle follower"
-    echo "$metrics" | grep -q '^swarmscribe_follower_model_load_seconds [0-9]' \
+    grep -q '^swarmscribe_follower_model_load_seconds [0-9]' <<<"$metrics" \
       || fail "/metrics does not show the model load"
+    # Behind a proxy (HTTP_PROXY set) the image's own probe must still reach 127.0.0.1: it
+    # asks for no proxy, so a follower that works is not reported unhealthy.
+    docker run -d --name "$name-proxy" "${locked[@]}" "${gpu[@]}" "${leader[@]}" \
+      --health-interval 2s --health-start-period 1s \
+      -e HTTP_PROXY=http://127.0.0.1:9 -e http_proxy=http://127.0.0.1:9 \
+      -e SWARMSCRIBE_JOIN_TOKEN=not-a-token "$image" >/dev/null \
+      || fail "the follower did not start with a proxy configured"
+    health=""
+    for _ in $(seq 1 90); do
+      health="$(docker inspect --format '{{.State.Health.Status}}' "$name-proxy")" \
+        || fail "cannot read the health of the follower run with a proxy"
+      [ "$health" = "healthy" ] && break
+      sleep 1
+    done
+    [ "$health" = "healthy" ] || fail "Docker reports the follower $health when HTTP_PROXY is set (the probe went through the proxy)"
+    docker rm -f "$name-proxy" >/dev/null
     begun="$(date +%s)"
     docker stop --time 8 "$name" >/dev/null
     took="$(($(date +%s) - begun))"

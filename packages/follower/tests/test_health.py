@@ -111,6 +111,20 @@ def test_a_port_that_is_taken_is_a_configuration_error_naming_the_setting():
     server.close()  # closing a listener that never started is harmless
 
 
+def test_a_port_another_listener_holds_is_refused_on_every_platform():
+    # Windows lets a second SO_REUSEADDR socket share a listening port; both would "start".
+    first = HealthServer(("127.0.0.1", 0), healthy=lambda: (True, "ok"), metrics=bytes)
+    first.start()
+    second = HealthServer(("127.0.0.1", first.port), healthy=lambda: (True, "ok"), metrics=bytes)
+    try:
+        with pytest.raises(FollowerExit) as stop:
+            second.start()
+    finally:
+        second.close()
+        first.close()
+    assert stop.value.code == 2 and "SWARMSCRIBE_FOLLOWER_HEALTH_ADDR" in stop.value.reason
+
+
 def test_closing_leaves_no_thread_and_frees_the_port():
     server = HealthServer(("127.0.0.1", 0), healthy=lambda: (True, "ok"), metrics=bytes)
     server.start()

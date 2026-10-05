@@ -1256,7 +1256,8 @@ follower chart (F3) and the outside-machine install (F4).
 - **`doctor` (8.3).** `--no-leader` leaves the leader out; a `memory:` line says what the
   follower may use.
 - **Health (9).** During a job the lease keeper must have run its loop within three
-  heartbeat intervals *plus the time one request to the leader may take* (30 seconds): the
+  heartbeat intervals *plus about 30 seconds, the time one request to the leader may take*
+  (the HTTP client's timeout is per phase, not a hard total): the
   keeper stamps its loop before it asks, and a leader that does not answer must not make
   `/healthz` fail.
 - **Memory guard (5.7, D22, 8.2).** The measured figures replace the estimates:
@@ -1266,6 +1267,7 @@ follower chart (F3) and the outside-machine install (F4).
            where the platform will not say, Windows and macOS, nothing is added)
          + 100 MiB
          + duration in hours × 3600 MiB  (mono, or auto on anything but a stereo file)
+           or
          + duration in hours × 3900 MiB  (split)
   ```
 

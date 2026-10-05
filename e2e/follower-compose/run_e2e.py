@@ -339,7 +339,8 @@ def metrics(service: str) -> dict[str, float]:
     loopback): {sample with its labels: value}."""
     fetch = (
         "import urllib.request;"
-        "print(urllib.request.urlopen('http://127.0.0.1:9108/metrics', timeout=5).read().decode())"
+        "print(urllib.request.build_opener(urllib.request.ProxyHandler({}))"
+        ".open('http://127.0.0.1:9108/metrics', timeout=5).read().decode())"
     )
     done = compose("exec", "-T", service, "python", "-c", fetch)
     text = must(done, f"reading {service}'s metrics")
@@ -645,12 +646,27 @@ async def scenario(sessions: Sessions) -> Report:
     expect(
         not transcript(TALKS, TOO_LONG, "txt").exists(), f"{TOO_LONG} was transcribed anyway"
     )
-    counted = [metrics(name) for name in FOLLOWERS]
-
-    def total(sample: str) -> float:
-        return sum(follower.get(sample, 0.0) for follower in counted)
-
     p = "swarmscribe_follower_"
+
+    def totals(counted: list[dict[str, float]]) -> Callable[[str], float]:
+        return lambda sample: sum(follower.get(sample, 0.0) for follower in counted)
+
+    async def counted_in_metrics() -> list[dict[str, float]] | None:
+        # The follower counts a failure a moment after its `fail` call returns, which is
+        # after the leader shows the job parked: ask until the counts are there.
+        counted = [metrics(name) for name in FOLLOWERS]
+        total = totals(counted)
+        done = (
+            total(p + 'jobs_total{outcome="failed"}') == 3
+            and total(p + 'jobs_total{outcome="completed"}') >= 1
+            and total(p + "audio_seconds_total") > 0
+            and total(p + "download_bytes_total") > 0
+            and all(follower.get(p + 'state{state="idle"}') == 1.0 for follower in counted)
+        )
+        return counted if done else None
+
+    counted = await until(counted_in_metrics, "the refusals to be counted in /metrics")
+    total = totals(counted)
     expect(total(p + 'jobs_total{outcome="failed"}') == 3, "the refusals are not in /metrics")
     expect(total(p + 'jobs_total{outcome="completed"}') >= 1, "no completion is in /metrics")
     expect(total(p + "audio_seconds_total") > 0, "no audio is counted in /metrics")

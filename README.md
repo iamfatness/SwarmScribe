@@ -553,10 +553,10 @@ nvidia/cuda:12.9.1-base-ubuntu24.04 nvidia-smi`, then with the image itself:
 
 ```
 docker run --rm --gpus all -e SWARMSCRIBE_LEADER_URL=https://leader.example.org \
-  swarmscribe-follower:cuda doctor
+  swarmscribe-follower:cuda doctor --no-leader
 ```
 
-`doctor` names the GPU (`device: cuda (NVIDIA GeForce RTX 4090, 24564 MiB)`), loads the
+`--no-leader` checks the machine without asking a leader. `doctor` names the GPU (`device: cuda (NVIDIA GeForce RTX 4090, 24564 MiB)`), loads the
 model and runs it once: GPU libraries are loaded at the first inference, so a missing one
 shows here and not in the middle of a job. The image carries cuBLAS only; the CTranslate2
 it is locked to does not use cuDNN. One follower uses one GPU: on a machine with several,
@@ -582,10 +582,10 @@ a file that differs fails the build. The first name becomes the start-up model
 a model it does not hold is handed back and the follower exits `3`. The leader's profile
 for the device must therefore name a model the image holds (`swarmscribe-admin profiles
 set`). To allow a model that is not in the lock file yet, add the entry that
-`uv run python docker/fetch_models.py --pin <name>` prints. A baked image is its model
-larger than the model's download, by more than its size as `docker image inspect` counts
-it: `tiny.en` takes the `cpu` image from 789 to 938 MB, and `large-v3` (a 3.1 GB download)
-takes the `cuda` image from 2548 to 8486 MB (4.8 GB of layers, by the planner's count).
+`uv run python docker/fetch_models.py --pin <name>` prints. A baked image grows by more
+than the model's download size: with `tiny.en` baked the `cpu` image grows from 789 MB to
+938 MB, and with `large-v3` baked (a 3.1 GB download) the `cuda` image grows from 2548 MB
+to 8486 MB (4.8 GB of layers, by the planner's count).
 
 The image also sets `HF_HUB_CACHE=/models` (and `HF_HUB_OFFLINE=1` when a model is baked),
 so the engine's own command in it, `swarmscribe-engine`, reads the same cache and stays
@@ -607,7 +607,8 @@ follower's threads are alive: from the moment it starts supervising, so also whi
 model loads, and also while the leader is away, so that nothing kills a follower that is
 transcribing through an outage. It answers 503 when the supervising thread has not gone
 round for 30 seconds, or, during a job, when the lease keeper has not gone round its loop
-for three heartbeat intervals plus 30 seconds (the time one request to the leader may take). `/metrics`
+for three heartbeat intervals plus about 30 seconds (the time one request to the leader may
+take). `/metrics`
 is in the Prometheus format: `swarmscribe_follower_jobs_total{outcome}`,
 `_audio_seconds_total` and `_transcribe_seconds_total` (their ratio is the speed),
 `_job_progress`, `_model_load_seconds`, `_heartbeat_failures_total`,
@@ -638,7 +639,10 @@ compares that with what it may use: `SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB`, else
 of the container's memory limit and the machine's memory (`doctor` prints the figure and
 where it comes from). A recording that cannot fit is failed `out_of_resources` at once, with
 its length and the limit in the reason, instead of being killed half-way three times, hours
-apart. Give the container a memory limit (`--memory 8g`) and the guard follows it.
+apart. Give the container a memory limit (`--memory 8g`) and the guard follows it. On a
+native Linux install run under systemd, a `MemoryMax=` on the unit is not seen (the guard
+reads the container's cgroup file, else the machine's memory), so set
+`SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB` there.
 
 On Windows and macOS the platform does not say what the process already holds, so the guard
 counts the recording alone, not the loaded model, and when no limit is set its limit is the

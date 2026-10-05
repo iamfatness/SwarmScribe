@@ -6,6 +6,7 @@ import time
 
 import pytest
 from follower_testkit import FakeEngine, FakeLeader, make_agent, make_runner
+from swarmscribe_follower import health
 from swarmscribe_follower import main as cli
 from swarmscribe_follower.agent import SUPERVISOR_SILENCE_SECONDS
 from swarmscribe_follower.config import Settings
@@ -303,3 +304,130 @@ def test_a_listener_that_cannot_start_ends_run_with_exit_2_and_names_the_setting
     assert code == 2
     assert "SWARMSCRIBE_FOLLOWER_HEALTH_ADDR" in err.getvalue()
     assert "Traceback" not in err.getvalue()
+
+
+# --- a listener that others can reach (the chart puts it on the pod's address) -----------
+
+
+def closed_within(connection, seconds):
+    """Whether the other side closes `connection` within `seconds`, while this side keeps
+    sending one byte every 50 ms (a request line that never ends)."""
+    connection.settimeout(0.05)
+    until = time.monotonic() + seconds
+    while time.monotonic() < until:
+        try:
+            connection.sendall(b"x")
+            if connection.recv(1024) == b"":
+                return True
+        except TimeoutError:
+            continue
+        except OSError:  # reset: closed as well
+            return True
+    return False
+
+
+def answers_within(port, seconds):
+    until = time.monotonic() + seconds
+    while time.monotonic() < until:
+        try:
+            if ask(port, "GET", "/healthz")[0] == 200:
+                return True
+        except (OSError, http.client.HTTPException):
+            time.sleep(0.05)
+    return False
+
+
+def test_every_answer_closes_its_connection(served):
+    port, _answer = served
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        connection.request("GET", "/healthz")
+        response = connection.getresponse()
+        assert (response.status, response.read()) == (200, b"ok\n")
+        assert response.getheader("Connection") == "close"
+        assert connection.sock is None  # http.client saw the close and let go
+    finally:
+        connection.close()
+    assert ask(port, "GET", "/nothing")[2]["connection"] == "close"
+    assert ask(port, "POST", "/healthz")[2]["connection"] == "close"
+
+
+def test_a_client_that_trickles_bytes_is_dropped_at_the_deadline(served, monkeypatch):
+    # The old timeout was per read: one byte every few seconds held a thread for ever.
+    monkeypatch.setattr(health, "REQUEST_SECONDS", 0.5)
+    port, _answer = served
+    slow = socket.create_connection(("127.0.0.1", port), timeout=5)
+    try:
+        started = time.monotonic()
+        slow.sendall(b"GET /healthz HTTP/1.1\r\nX-Slow: ")
+        assert closed_within(slow, 5.0), "a trickling client was still held after 5 s"
+        assert time.monotonic() - started < 3.0
+    finally:
+        slow.close()
+    assert ask(port, "GET", "/healthz")[0] == 200
+
+
+def test_a_request_inside_the_deadline_is_answered_however_it_arrives(served):
+    port, _answer = served
+    piecemeal = socket.create_connection(("127.0.0.1", port), timeout=5)
+    try:
+        for piece in (b"GET /hea", b"lthz HTTP/1.1\r\n", b"Host: x\r\n", b"\r\n"):
+            piecemeal.sendall(piece)
+            time.sleep(0.05)
+        assert piecemeal.recv(1024).startswith(b"HTTP/1.1 200 ")
+    finally:
+        piecemeal.close()
+
+
+def test_no_more_than_the_cap_are_held_and_the_next_is_turned_away_at_once(monkeypatch):
+    monkeypatch.setattr(health, "MAX_CONNECTIONS", 2)
+    server = HealthServer(("127.0.0.1", 0), healthy=lambda: (True, "ok"), metrics=bytes)
+    server.start()
+    held = []
+    try:
+        for _ in range(2):
+            silent = socket.create_connection(("127.0.0.1", server.port), timeout=5)
+            silent.sendall(b"G")  # accepted and being read: it holds one of the two places
+            held.append(silent)
+        time.sleep(0.2)
+        started = time.monotonic()
+        with pytest.raises((OSError, http.client.HTTPException)):
+            ask(server.port, "GET", "/healthz")
+        assert time.monotonic() - started < 2.0  # turned away, not queued behind the others
+        for silent in held:
+            silent.close()
+        assert answers_within(server.port, 5.0), "a freed place was not given to the next client"
+    finally:
+        for silent in held:
+            silent.close()
+        server.close()
+
+
+def test_held_places_free_themselves_at_the_deadline(monkeypatch):
+    monkeypatch.setattr(health, "MAX_CONNECTIONS", 2)
+    monkeypatch.setattr(health, "REQUEST_SECONDS", 0.5)
+    server = HealthServer(("127.0.0.1", 0), healthy=lambda: (True, "ok"), metrics=bytes)
+    server.start()
+    held = [socket.create_connection(("127.0.0.1", server.port), timeout=5) for _ in range(2)]
+    try:
+        # Nobody closes the two silent connections: the listener drops them itself.
+        assert answers_within(server.port, 5.0), "two silent clients shut everyone else out"
+    finally:
+        for silent in held:
+            silent.close()
+        server.close()
+
+
+def test_a_client_that_never_reads_its_answer_does_not_hold_a_place(monkeypatch):
+    monkeypatch.setattr(health, "MAX_CONNECTIONS", 1)
+    monkeypatch.setattr(health, "REQUEST_SECONDS", 0.5)
+    big = b"x" * (32 * 1024 * 1024)  # far more than the socket buffers hold
+    server = HealthServer(("127.0.0.1", 0), healthy=lambda: (True, "ok"), metrics=lambda: big)
+    server.start()
+    deaf = socket.create_connection(("127.0.0.1", server.port), timeout=5)
+    try:
+        deaf.sendall(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n")  # and never reads
+        assert answers_within(server.port, 5.0), "a client that does not read held the place"
+    finally:
+        deaf.close()
+        server.close()

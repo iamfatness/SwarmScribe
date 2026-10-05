@@ -43,19 +43,24 @@ the brand, Fleet, one link per leader you can see (flagged "no answer", "revoked
 Administration for console administrators, and your name, Theme and Sign out pinned at the
 bottom. Below 900px the rail becomes a sticky top bar with a Menu button.
 
-- **Fleet:** four totals, a full-width "Needs a look" band (the worst five things, with "Show
+- **Fleet:** four totals, a full-width "Needs a look" band (the worst six things, with "Show
   all N"), then a card per leader with its status, a 24-hour chart and four figures. Label
   filters are pills.
 - **A leader:** breadcrumb, name and labels, status pill, a line on what your role switches
   off, five tabs. Job states are pills with counts from the leader's last check. Every table
   fits its region at 1280, 900 and 768 pixels with no sideways scroll, so the Actions column is
-  not pinned.
+  not pinned. Narrower than that (a phone, or 200% zoom) a table scrolls inside its region,
+  which shows a soft edge on the side that has more.
 - **Dialogs** are paper sheets with an amber offset shadow (ink sheets on the light theme).
   The join token is shown once, in its own dialog, and cannot be closed by accident.
 - **Administration** is one page with three sections (Leaders, Who can do what, Console
   administrators), each with its own address.
 
-Wording is the console's own, not the leader's: see the copy tables in the spec.
+Wording is the console's own, not the leader's: see the copy tables in the spec. That
+includes errors. `src/api/errors.ts` has a title and, where it helps, a line of advice for
+every error code the console and its leaders send, and for a code it knows the server's own
+message is never shown (those are written for a log). A new code needs a row there; until it
+has one it is shown under a calm title by status, with its text marked "The answer said:".
 
 ## Look and wording
 
@@ -130,6 +135,13 @@ in-memory Entra ID and two in-memory leaders (`eu-1`, `us-1`), on
 `SWARMSCRIBE_TEST_DATABASE_URL` or the local pgserver, plus a control server on
 `http://127.0.0.1:8901` that only the tests use. `E2E_HARNESS_COMMAND` replaces the command
 Playwright starts. Nothing may be left listening on 8900 or 8901 afterwards.
+
+Every test begins by resetting the harness, which empties the console's tables while the
+console may still be answering the last test's page or recording a check. The reset never
+waits long for a lock: it gives up after 300 ms and tries again, ten times at most, so it
+cannot deadlock with them (it used to, about once in 400 tests). The fake leaders can be taken
+down (`mode: "down"`) or made to revoke the console's credential (`mode: "revoked"`), and
+`us-1` lets the console act only as an operator.
 
 ## Screenshots to look at
 

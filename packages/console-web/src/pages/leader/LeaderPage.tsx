@@ -93,7 +93,7 @@ export function LeaderPage({ name, tab }: { name: string; tab: string }) {
         </div>
         <HealthBadge leader={leader} />
       </div>
-      <p className="page-sub">
+      <p className="page-sub role-line">
         You are {leader.role === "viewer" ? "a" : "an"} <strong>{leader.role}</strong> here.{" "}
         {ROLE_NOTE[leader.role]}
       </p>

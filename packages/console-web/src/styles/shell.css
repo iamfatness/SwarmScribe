@@ -225,6 +225,12 @@ main {
   overflow-wrap: break-word;
 }
 
+/* The role line is one sentence of about 90 characters: on one line where the page is wide
+   enough, wrapping (balanced by the global rule) where it is not. */
+.page-sub.role-line {
+  max-width: 96ch;
+}
+
 .page-sub strong {
   color: var(--text);
 }

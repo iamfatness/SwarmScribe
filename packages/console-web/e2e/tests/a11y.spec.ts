@@ -52,6 +52,20 @@ for (const theme of THEMES) {
       await expectAccessible(page, `fleet, one leader not answering (${theme})`);
     });
 
+    test("a viewer's pages, with their switched-off actions, have no accessibility violations", async ({
+      page,
+    }) => {
+      await signIn(page, "viewer", "/leaders/eu-1/jobs");
+      await expect(page.getByRole("button", { name: /^Try again: job / }).first()).toBeDisabled();
+      await expectAccessible(page, `jobs as a viewer (${theme})`);
+      await page.getByRole("button", { name: /^Failed/ }).click();
+      await expect(page.getByRole("region", { name: "Job list" }).getByRole("row")).toHaveCount(2);
+      await expectAccessible(page, `jobs as a viewer, filtered (${theme})`);
+      await page.goto("/leaders/eu-1/tokens");
+      await expect(page.getByText(/Join tokens need the admin role/)).toBeVisible();
+      await expectAccessible(page, `join tokens as a viewer (${theme})`);
+    });
+
     test("the fleet overview has no violations with no leaders, with every kind of leader, and with a label nobody has", async ({
       page,
     }) => {

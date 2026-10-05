@@ -1,9 +1,17 @@
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { expect, setLeaderMode, signIn, test } from "./support";
 
-/** How far the page is wider than the window: more than 0 means it scrolls sideways. */
+/**
+ * How far the page is wider than the window: more than 0 means it scrolls sideways. It is read
+ * once the fonts are in and two frames have been drawn, so a page that is still laying out
+ * (a long name, a list that has just arrived) is not measured halfway; the limit is the same.
+ */
 function sidewaysOverflow(page: Page): Promise<number> {
-  return page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  return page.evaluate(async () => {
+    await document.fonts.ready;
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    return document.documentElement.scrollWidth - window.innerWidth;
+  });
 }
 
 /**
@@ -310,6 +318,76 @@ test("every table fits at 1280 and 900, and scrolls at 768 with Actions reachabl
       });
       expect(onTop, where).toBe(true);
     }
+  }
+});
+
+/** How far a table's region scrolls sideways: more than 1 means a column does not fit. */
+async function settledOverflow(region: Locator): Promise<number> {
+  // Layout can still be moving just after a page opens (fonts, the first list arriving), so
+  // the width is read twice, a frame apart, until it stops changing. The limit is not eased.
+  let last = Number.NaN;
+  for (let tries = 0; tries < 20; tries += 1) {
+    const now = await region.evaluate(
+      (el) =>
+        new Promise<number>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve(el.scrollWidth - el.clientWidth)));
+        }),
+    );
+    if (now === last) return now;
+    last = now;
+  }
+  return last;
+}
+
+/** Names in a path that wrap across lines although the whole name would fit in its table cell. */
+function splitPieces(page: Page, region: string): Promise<string[]> {
+  return page.evaluate((label) => {
+    const root = document.querySelector(`[role='region'][aria-label='${label}']`);
+    const split: string[] = [];
+    if (root === null) return ["no such region"];
+    for (const mono of root.querySelectorAll("td .mono")) {
+      const walker = document.createTreeWalker(mono, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+        const text = node.textContent ?? "";
+        for (const piece of text.matchAll(/[^/\\]+/g)) {
+          const range = document.createRange();
+          range.setStart(node, piece.index);
+          range.setEnd(node, piece.index + piece[0].length);
+          const tops = new Set(Array.from(range.getClientRects()).map((r) => Math.round(r.top)));
+          if (tops.size < 2) continue;
+          // A name wider than its whole cell has to break somewhere; any other one must not.
+          const cell = mono.closest("td");
+          const style = getComputedStyle(mono);
+          const context = document.createElement("canvas").getContext("2d");
+          if (cell === null || context === null) continue;
+          context.font = style.font;
+          const room = cell.clientWidth - parseFloat(getComputedStyle(cell).paddingLeft) - parseFloat(getComputedStyle(cell).paddingRight);
+          if (context.measureText(piece[0]).width <= room) split.push(piece[0]);
+        }
+      }
+    }
+    return split;
+  }, region);
+}
+
+test("a long recording path breaks after a slash, not in the middle of a folder or file name", async ({
+  page,
+}) => {
+  const key = "incoming/2026-10/east-hall-recordings/morning-service/meeting-2026-10-04-final.wav";
+  await page.route("**/api/leaders/eu-1/jobs**", async (route) => {
+    const answer = await route.fetch();
+    const jobs = (await answer.json()) as Record<string, unknown>[];
+    await route.fulfill({ response: answer, json: jobs.map((job) => ({ ...job, key })) });
+  });
+  await signIn(page, "admin");
+  for (const width of [1280, 900, 768]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.goto("/leaders/eu-1/jobs");
+    const region = page.getByRole("region", { name: "Job list", exact: true });
+    await expect(region.getByText(key).first()).toBeVisible();
+    expect(await settledOverflow(region), `jobs with a long path at ${width}`).toBeLessThanOrEqual(1);
+    expect(await splitPieces(page, "Job list"), `pieces split at ${width}`).toEqual([]);
+    expect(await sidewaysOverflow(page), `page at ${width}`).toBeLessThanOrEqual(0);
   }
 });
 

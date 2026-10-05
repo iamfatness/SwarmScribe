@@ -1,0 +1,449 @@
+"""The follower's life: prepare, register, claim and work until told to stop (follower
+spec 5.2, 5.3, 5.5, 5.6).
+
+`serve()` is the worker loop and runs on a thread of its own. `stop()` may be called from any
+thread, including a signal handler on the main thread: it never waits and never talks to the
+leader. Its lock is re-entrant, because a second signal can interrupt the handler of the
+first on the same thread.
+
+Signals are installed by the command line, not here. POSIX has SIGTERM and SIGINT; Windows has
+SIGINT (Ctrl+C) and SIGBREAK (Ctrl+Break, and what a console close or a wrapper such as
+winsw can send), and no SIGTERM. A Windows service does not receive a signal at all: its stop
+arrives as the service control handler's `SERVICE_CONTROL_STOP`. The F4 service wrapper must
+call `agent.stop()` from that handler (any thread is fine: `stop` never blocks), report
+`SERVICE_STOP_PENDING` with a wait hint longer than `shutdown_grace_seconds`, and report
+`SERVICE_STOPPED` only when `serve()` has returned.
+
+The credential: a join or pool token is read (from its file, if that is how it is
+configured) only inside `register()`, held in a local variable for the one request and
+dropped; it is never logged, put in an exception or kept on the agent."""
+
+import logging
+import random
+import threading
+import time
+import traceback
+from collections.abc import Callable
+from typing import BinaryIO
+
+from swarmscribe_engine import DeviceUnavailableError
+from swarmscribe_protocol import Capabilities, ClaimResponse
+
+from .config import Settings
+from .credentials import CredentialFileError, CredentialStore, Stored
+from .device import Probe, cached_models, capabilities
+from .errors import (
+    EXIT_CONFIGURATION,
+    EXIT_OK,
+    EXIT_PROTOCOL,
+    EXIT_UNAUTHORISED,
+    EXIT_UNFIT,
+    FollowerExit,
+)
+from .job import (
+    ABANDONED,
+    INVALID_JOB_ID,
+    REVOKED_FOLLOWER,
+    SCRATCH_BROKEN,
+    UNFIT,
+    UNKNOWN_CREDENTIAL,
+    JobResult,
+    JobRunner,
+)
+from .leader import Interrupted, LeaderClient, NoWork, Refused, Transient, retrying
+from .lease import SHUTDOWN, JobControl
+from .models import ModelHost, ModelUnavailable, OutOfMemory
+from .scratch import Scratch, ScratchError, ScratchNotOurs, ScratchOutside
+from .statelock import hold_state_lock
+from .transfer import Links
+
+logger = logging.getLogger(__name__)
+
+EXIT_UNEXPECTED = 1  # a bug: the follower stopped on an error nobody planned for
+IDLE_JITTER = 0.2  # an idle follower waits Retry-After plus up to this fraction of it
+PARKED_POLL_SECONDS = 60.0  # how often a drained, parked follower asks again
+REFUSED_CLAIM_WAIT_SECONDS = 60.0
+SCRATCH_RETRY_WAITS = (5.0, 15.0, 45.0)  # after the 1st, 2nd failure to use the scratch folder
+SCRATCH_FAILURE_LIMIT = len(SCRATCH_RETRY_WAITS)  # the 3rd in a row ends the follower (exit 2)
+SCRATCH_FATAL = frozenset({ScratchNotOurs.__name__, ScratchOutside.__name__})
+
+
+class Agent:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        client: LeaderClient,
+        links: Links,
+        models: ModelHost,
+        scratch: Scratch,
+        store: CredentialStore,
+        probe: Probe,
+        heartbeat_interval: float | None = None,
+        parked_poll_seconds: float = PARKED_POLL_SECONDS,
+        rng: Callable[[], float] = random.random,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+        hold_lock: Callable[..., BinaryIO] = hold_state_lock,
+    ) -> None:
+        self._settings, self._client, self._links = settings, client, links
+        self._models, self._scratch, self._store, self._probe = models, scratch, store, probe
+        self._interval_override, self._parked_poll = heartbeat_interval, parked_poll_seconds
+        self._rng, self._clock, self._sleep, self._hold_lock = rng, clock, sleep, hold_lock
+        self._stopping = threading.Event()
+        self._lock = threading.RLock()  # re-entrant: see the module docstring
+        self._control: JobControl | None = None
+        self._timer: threading.Timer | None = None
+        self._runner: JobRunner | None = None
+        self._state_lock: BinaryIO | None = None
+        self._registered_again = False
+        self._skip_deregister = False  # revoked, or the leader does not know us: it would 401
+        self._scratch_failures = 0
+        self.follower_id: str | None = None
+        self.drained = False
+        self.exit_reason = ""
+
+    # --- before the loop -----------------------------------------------------------------
+
+    def prepare(self) -> None:
+        """Everything that can fail before the leader hears of this follower: the state
+        folder's lock, the scratch folder, the device's default model and a real inference
+        with it. Then the credential. Raises FollowerExit; whatever it had taken (the lock,
+        the model) is let go again."""
+        try:
+            if self._state_lock is None:
+                self._state_lock = self._hold_lock(self._settings.state_dir)
+            self._store.clean_stale_temp()
+            if not self._prepare_scratch():
+                raise FollowerExit(EXIT_OK, "stopped before it started")
+            self._scratch_failures = 0
+            choice = self._probe.choice
+            try:
+                self._models.get(choice.model, choice.compute_type)
+            except (ModelUnavailable, OutOfMemory, DeviceUnavailableError) as error:
+                raise FollowerExit(
+                    EXIT_UNFIT,
+                    f"this machine cannot transcribe: {error}. Run `swarmscribe-follower doctor`.",
+                ) from None
+            self.obtain_credential()
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        """Let go of what `prepare` took: the model and the state folder's lock. `serve`
+        does this itself; this is for an agent that was prepared and never served."""
+        self._quietly(self._models.close, "closing the model")
+        lock, self._state_lock = self._state_lock, None
+        if lock is not None:
+            self._quietly(lock.close, "releasing the state folder lock")
+
+    def _prepare_scratch(self) -> bool:
+        """Prepare the scratch folder. A folder that is not the follower's ends the follower
+        at once (exit 2). One that could not be cleaned (a file another program holds) is
+        tried again after 5 s and 15 s; the third failure in a row ends it too. False: a stop
+        was asked while waiting."""
+        while True:
+            try:
+                self._scratch.prepare()
+                return True
+            except (ScratchNotOurs, ScratchOutside) as error:
+                raise FollowerExit(EXIT_CONFIGURATION, str(error)) from None
+            except ScratchError as error:
+                if not self._scratch_failed(error):
+                    return False
+
+    def _scratch_failed(self, error: ScratchError | str) -> bool:
+        """Count a failure to use the scratch folder: exit 2 on the third in a row, else
+        wait (interruptibly). False: a stop was asked while waiting."""
+        what = error if isinstance(error, str) else type(error).__name__
+        self._scratch_failures += 1
+        if self._scratch_failures >= SCRATCH_FAILURE_LIMIT:
+            raise FollowerExit(
+                EXIT_CONFIGURATION,
+                f"the scratch folder cannot be used ({what}); close whatever holds files in it",
+            )
+        logger.warning(
+            "the scratch folder cannot be used (%s); trying again", what,
+            extra={"follower_id": self.follower_id},
+        )
+        return not self._stopping.wait(SCRATCH_RETRY_WAITS[self._scratch_failures - 1])
+
+    def obtain_credential(self) -> None:
+        """Use the stored credential if it is for this leader and device; otherwise register."""
+        try:
+            stored = self._store.load()
+        except CredentialFileError as error:
+            raise FollowerExit(EXIT_CONFIGURATION, str(error)) from None
+        mine = (
+            stored is not None
+            and stored.leader_url == self._settings.leader_url
+            and stored.device == self._probe.choice.device
+        )
+        if mine:
+            self._use(stored)
+        else:
+            self.register()
+
+    def _use(self, stored: Stored) -> None:
+        self._client.credential = stored.credential
+        self.follower_id = stored.follower_id
+        interval = self._interval_override or float(stored.heartbeat_interval)
+        # No `lease_seconds` for the keeper: during a leader outage the worker carries on,
+        # and the first answer from the leader settles the lease (spec 5.5).
+        self._runner = JobRunner(
+            self._client,
+            self._links,
+            self._models,
+            self._scratch,
+            device=self._probe.choice.device,
+            heartbeat_interval=interval,
+            clock=self._clock,
+            sleep=self._sleep,
+        )
+
+    def register(self) -> None:
+        """Exchange the join token (or pool token) for a credential and store it."""
+        try:
+            token = self._settings.token()
+        except ValueError as error:
+            raise FollowerExit(EXIT_CONFIGURATION, str(error)) from None
+        if token is None:
+            raise FollowerExit(
+                EXIT_UNAUTHORISED,
+                "this follower has no credential for this leader and no join token; set"
+                " SWARMSCRIBE_JOIN_TOKEN or run `swarmscribe-follower join`",
+            )
+        models = cached_models(self._settings.model_dir)
+        if self._models.loaded is not None:
+            models.append(self._models.loaded[0])
+        reported = capabilities(self._probe, self._settings.pool, models)
+        try:
+            answer = self._exchange(token, reported)
+        except Interrupted:
+            raise FollowerExit(EXIT_OK, "stopped before registering") from None
+        except Refused as refused:
+            if refused.code == "protocol_version":
+                raise FollowerExit(
+                    EXIT_PROTOCOL, f"the leader speaks another protocol: {refused.message}"
+                ) from None
+            if refused.status == 401:
+                raise FollowerExit(
+                    EXIT_UNAUTHORISED,
+                    "the join token is not valid (unknown, expired, revoked or used up);"
+                    " ask an administrator for a new one",
+                ) from None
+            raise FollowerExit(
+                EXIT_PROTOCOL,
+                f"the leader refused the registration ({refused.status} {refused.code})",
+            ) from None
+        finally:
+            del token  # the secret lives for the one request and no longer
+        stored = Stored(
+            leader_url=self._settings.leader_url,
+            follower_id=answer.follower_id,
+            credential=answer.credential,
+            device=self._probe.choice.device,
+            heartbeat_interval=answer.heartbeat_interval,
+            lease_seconds=answer.lease_seconds,
+        )
+        try:
+            self._store.save(stored)
+        except CredentialFileError as error:
+            raise FollowerExit(EXIT_CONFIGURATION, str(error)) from None
+        self._use(stored)
+        logger.info("registered", extra={"event": "registered", "follower_id": self.follower_id})
+
+    def _exchange(self, token: str, reported: Capabilities):
+        return retrying(
+            lambda: self._client.register(token, reported), pause=self._stopping.wait
+        )
+
+    # --- the loop ------------------------------------------------------------------------
+
+    def serve(self) -> int:
+        """Claim and work until stopped, drained (and set to exit), revoked or unfit.
+        Returns the process's exit code. However it ends, the model is closed, scratch is
+        wiped, the state folder's lock is released and the follower has no thread left."""
+        code = EXIT_OK
+        try:
+            self._loop()
+        except FollowerExit as stop:
+            code, self.exit_reason = stop.code, stop.reason
+            log = logger.info if code == EXIT_OK else logger.error
+            log("stopping: %s", stop.reason, extra={"follower_id": self.follower_id})
+        except Exception as error:
+            # A bug. Frames only: an exception's text can hold a path or a URL.
+            frames = " <- ".join(
+                f"{frame.name}:{frame.lineno}"
+                for frame in reversed(traceback.extract_tb(error.__traceback__))
+            )
+            code, self.exit_reason = EXIT_UNEXPECTED, f"unexpected {type(error).__name__}"
+            logger.error("the follower stopped on %s at %s", type(error).__name__, frames)
+        finally:
+            self._stopping.set()
+            self._cancel_timer()
+            if not self._skip_deregister:
+                self._quietly(self._deregister, "deregistering")
+            self._quietly(self._scratch.wipe, "wiping scratch")
+            self.close()
+        return code
+
+    @staticmethod
+    def _quietly(step: Callable[[], object], what: str) -> None:
+        """One step of cleaning up. A failure is logged (its class) and never stops the
+        steps after it."""
+        try:
+            step()
+        except Exception as error:
+            logger.warning("%s failed (%s)", what, type(error).__name__)
+
+    def _loop(self) -> None:
+        while not self._stopping.is_set():
+            try:
+                answer = retrying(self._client.claim, pause=self._stopping.wait)
+            except Interrupted:
+                return
+            except Refused as refused:
+                self._claim_refused(refused)
+                continue
+            if isinstance(answer, NoWork):
+                if self._idle(answer):
+                    return
+                continue
+            self.drained = False
+            result = self._run(answer)
+            if result.outcome != SCRATCH_BROKEN:
+                self._scratch_failures = 0
+            self._after(result)
+
+    def _after(self, result: JobResult) -> None:
+        if result.outcome == REVOKED_FOLLOWER:
+            self._exit_revoked()
+        elif result.outcome == UNKNOWN_CREDENTIAL:
+            # The job was stopped and its folder removed; wipe whatever else is there.
+            self._quietly(self._scratch.wipe, "wiping scratch")
+            self._register_again()
+        elif result.outcome == UNFIT:
+            raise FollowerExit(EXIT_UNFIT, f"this machine cannot serve its pool: {result.detail}")
+        elif result.outcome == SCRATCH_BROKEN:
+            if result.detail in SCRATCH_FATAL:
+                raise FollowerExit(
+                    EXIT_CONFIGURATION, f"the scratch folder is not usable ({result.detail})"
+                )
+            if self._scratch_failed(result.detail):
+                self._prepare_scratch()
+        elif result.outcome == ABANDONED and result.detail == INVALID_JOB_ID:
+            # A leader that keeps sending these must not be asked in a hot loop.
+            self._stopping.wait(REFUSED_CLAIM_WAIT_SECONDS)
+
+    def _idle(self, answer: NoWork) -> bool:
+        """Wait before the next claim. True: a stop was asked meanwhile, leave the loop.
+        Leaves through FollowerExit when drained for good."""
+        if answer.draining:
+            if not self.drained:
+                self.drained = True
+                logger.info(
+                    "the leader is draining this follower; it will be given nothing more",
+                    extra={"event": "drained", "follower_id": self.follower_id},
+                )
+            if self._settings.on_drained == "exit":
+                raise FollowerExit(EXIT_OK, "drained")
+            # Parked: stay up (a service manager would only start it again) and keep asking,
+            # slowly, so the leader sees it alive and a revocation is noticed.
+            wait = max(answer.retry_after, self._parked_poll)
+        else:
+            self.drained = False
+            wait = answer.retry_after * (1.0 + IDLE_JITTER * self._rng())
+        return self._stopping.wait(wait)
+
+    def _claim_refused(self, refused: Refused) -> None:
+        if refused.status == 403:
+            self._exit_revoked()
+        if refused.status == 401:
+            self._register_again()
+            return
+        logger.error(
+            "the leader refused a claim (%s %s)", refused.status, refused.code,
+            extra={"follower_id": self.follower_id},
+        )
+        self._stopping.wait(REFUSED_CLAIM_WAIT_SECONDS)
+
+    def _exit_revoked(self) -> None:
+        # The credential file is kept on purpose: a restart finds it, is refused again and
+        # exits again. Deleting it would let a join token undo the revocation.
+        self._skip_deregister = True
+        raise FollowerExit(EXIT_UNAUTHORISED, "this follower has been revoked")
+
+    def _register_again(self) -> None:
+        """The leader does not know the stored credential (its database was replaced, or
+        the registration was given to another machine): register once more, if there is a
+        token to do it with."""
+        self._skip_deregister = True  # until it is known again, a deregister would be a 401
+        if self._registered_again:
+            raise FollowerExit(
+                EXIT_UNAUTHORISED, "the leader does not know this follower's credential"
+            )
+        self._registered_again = True
+        logger.warning("the leader does not know this follower's credential; registering again")
+        self.register()
+        self._skip_deregister = False
+
+    def _run(self, claim: ClaimResponse) -> JobResult:
+        runner = self._runner
+        if runner is None:
+            raise FollowerExit(EXIT_UNEXPECTED, "serve() was called before prepare()")
+        control = JobControl()
+        with self._lock:
+            self._control = control
+            if self._stopping.is_set():  # a stop arrived between the claim and here
+                control.stop(SHUTDOWN)
+        try:
+            return runner.run(claim, control)
+        finally:
+            with self._lock:
+                self._control = None
+            self._cancel_timer()
+
+    def _cancel_timer(self) -> None:
+        with self._lock:
+            timer, self._timer = self._timer, None
+        if timer is not None:
+            timer.cancel()
+            timer.join(timeout=5)
+
+    def _deregister(self) -> None:
+        if not self._client.credential:
+            return
+        try:
+            self._client.deregister()
+        except (Transient, Refused):
+            logger.warning("could not deregister; the leader will notice the silence")
+
+    # --- stopping ------------------------------------------------------------------------
+
+    def stop(self, *, now: bool = False) -> None:
+        """Stop claiming. A job in progress is finished only if its estimated time left
+        fits the grace period; otherwise, and on a second call, it is released."""
+        with self._lock:
+            again = self._stopping.is_set()
+            self._stopping.set()
+            control, runner = self._control, self._runner
+            if control is None:
+                return
+            if now or again or runner is None:
+                control.stop(SHUTDOWN)
+                return
+            grace = self._settings.shutdown_grace_seconds
+            remaining = runner.remaining()
+            # 0 means the runner has not taken the job up yet (or has just finished it): the
+            # job is unknown, so it is released rather than waited for.
+            if remaining is not None and 0 < remaining <= grace:
+                logger.info("stopping after the current job (about %d s left)", remaining)
+                timer = threading.Timer(grace, control.stop, args=(SHUTDOWN,))
+                timer.daemon = True
+                self._timer = timer
+                timer.start()
+            else:
+                logger.info("stopping now; the current job is released")
+                control.stop(SHUTDOWN)

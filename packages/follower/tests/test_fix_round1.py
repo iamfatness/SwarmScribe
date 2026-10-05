@@ -85,6 +85,16 @@ class Recorder(http.server.BaseHTTPRequestHandler):
 
     def _answer(self):
         self.server.seen.append((self.command, self.path, dict(self.headers)))
+        # Read the whole request body before answering. A server that answers a PUT or POST
+        # and closes with the client's body still unread makes the operating system reset the
+        # connection, and the client then sees a ReadError instead of the answer: a race in
+        # this stub (about 3 in 100 requests on Windows), never in the code under test.
+        remaining = int(self.headers.get("Content-Length") or 0)
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                break
+            remaining -= len(chunk)
         body = b"abc"
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))

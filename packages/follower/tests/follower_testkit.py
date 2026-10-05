@@ -269,7 +269,8 @@ class FakeLeader:
         for job_id, job in self.jobs.items():  # the real release_all
             if job["state"] == "leased":
                 self._release(job_id)
-        self.state = "gone"
+        if self.state == "active":  # the real leader: a draining follower stays draining
+            self.state = "gone"
         return httpx.Response(204)
 
     def _claim(self) -> httpx.Response:

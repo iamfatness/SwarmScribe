@@ -162,6 +162,29 @@ class CredentialStore:
                 f"cannot write {self.path}: {exc.strerror or type(exc).__name__}"
             ) from None
 
+    def clean_stale_temp(self) -> int:
+        """Delete the temporary files an interrupted `save` left beside the credential
+        (`<name>.<pid>.<random>.new`). Call it only while holding the state-folder lock, when
+        no other follower can be writing one. Never touches the credential itself, and a link
+        or folder of that name is left alone. Returns how many were deleted."""
+        deleted = 0
+        try:
+            names = [entry.name for entry in self.path.parent.iterdir()]
+        except OSError:
+            return 0
+        prefix = self.path.name + "."
+        for name in names:
+            if not (name.startswith(prefix) and name.endswith(".new")):
+                continue
+            temp = self.path.parent / name
+            try:
+                if stat.S_ISREG(os.lstat(temp).st_mode):
+                    temp.unlink()
+                    deleted += 1
+            except OSError:
+                pass  # in use for the moment: the next start tries again
+        return deleted
+
     def delete(self) -> bool:
         try:
             self.path.unlink()

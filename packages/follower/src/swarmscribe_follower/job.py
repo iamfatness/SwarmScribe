@@ -63,6 +63,7 @@ REVOKED_FOLLOWER = "revoked"  # this follower was revoked: it must exit
 UNKNOWN_CREDENTIAL = "unauthorised"  # the leader no longer knows this follower
 UNFIT = "unfit"  # this machine cannot serve the claim: released, and it must exit
 SCRATCH_BROKEN = "scratch"  # the scratch folder is not usable or not ours: released, exit 2
+INVALID_JOB_ID = "invalid job id"  # JobResult.detail of an ABANDONED claim that is ignored
 
 
 @dataclass(frozen=True)
@@ -161,7 +162,7 @@ class JobRunner:
             # It names a scratch folder and a URL path: nothing is done with one that is
             # not a UUID, and the lease is left to expire.
             logger.error("the claim's job id is not a UUID; the claim is ignored")
-            return JobResult(ABANDONED, "invalid job id")
+            return JobResult(ABANDONED, INVALID_JOB_ID)
         extra = {"job_id": claim.job_id, "lease_id": claim.lease_id}
         logger.info("job claimed", extra={**extra, "event": "job.claimed"})
         keeper = LeaseKeeper(self._client, claim.job_id, claim.lease_id, self._interval, control)

@@ -1,0 +1,25 @@
+# The follower chart's values for the kind test (e2e/follower-kind/run_e2e.py). Test-only:
+# a plain-http leader inside the cluster, a small image with tiny.en baked in, and a memory
+# limit that has room for a four-minute recording and not for an hour.
+image:
+  repository: swarmscribe-follower
+  tag: e2e
+  pullPolicy: Never
+replicaCount: 2
+leader:
+  url: http://leader:8080
+  allowHttp: true
+poolToken:
+  existingSecret: pool-token
+pool: default
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: "2"
+    memory: 2500Mi
+scratch:
+  sizeLimit: 1Gi
+# Long enough to hand a recording back, short enough for a test: the follower is told 30 s.
+terminationGracePeriodSeconds: 60

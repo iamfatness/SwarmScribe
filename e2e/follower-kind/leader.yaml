@@ -1,0 +1,98 @@
+# A throwaway leader for the kind test of the follower chart (e2e/follower-kind/run_e2e.py):
+# Postgres and one leader replica with local storage, in the test's namespace. This is NOT
+# how a leader is deployed: no TLS, no identity provider, storage in an emptyDir, and every
+# value here is test-only. The leader's chart is roadmap item 6.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: postgres}
+  template:
+    metadata:
+      labels: {app: postgres}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: POSTGRES_PASSWORD, value: postgres}
+            - {name: POSTGRES_DB, value: swarmscribe}
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "swarmscribe"]
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  selector: {app: postgres}
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: leader
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: leader}
+  template:
+    metadata:
+      labels: {app: leader}
+    spec:
+      initContainers:
+        - name: migrate
+          image: swarmscribe-leader:e2e
+          imagePullPolicy: Never
+          command: ["sh", "-c", "until swarmscribe-leader migrate; do sleep 2; done"]
+          env: &leader-env
+            - name: SWARMSCRIBE_DATABASE_URL
+              value: postgresql://postgres:postgres@postgres:5432/swarmscribe
+            # The leader builds its own file links from this, and the followers fetch them
+            # from their pods: it must be the Service's name (follower spec 12.6).
+            - name: SWARMSCRIBE_PUBLIC_URL
+              value: http://leader:8080
+            - {name: SWARMSCRIBE_LINK_KEY, value: follower-kind-link-key-0123456789abcdef}
+            # A lease far shorter than a long transcription: only heartbeats keep it, and a
+            # killed follower's job comes back within seconds.
+            - {name: SWARMSCRIBE_LEASE_SECONDS, value: "8"}
+            - {name: SWARMSCRIBE_HEARTBEAT_SECONDS, value: "2"}
+            - {name: SWARMSCRIBE_REAPER_INTERVAL_SECONDS, value: "1"}
+            - {name: SWARMSCRIBE_SCANNER_INTERVAL_SECONDS, value: "1"}
+            - {name: SWARMSCRIBE_CLAIM_RETRY_AFTER, value: "1"}
+            - {name: SWARMSCRIBE_FOLLOWER_GONE_AFTER_SECONDS, value: "20"}
+      containers:
+        - name: leader
+          image: swarmscribe-leader:e2e
+          imagePullPolicy: Never
+          env: *leader-env
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: {path: /readyz, port: 8080}
+            periodSeconds: 2
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: leader
+spec:
+  selector: {app: leader}
+  ports:
+    - port: 8080
+      targetPort: 8080

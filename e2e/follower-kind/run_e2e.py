@@ -64,11 +64,17 @@ MODEL, COMPUTE_TYPE = "tiny.en", "int8"
 CALLS, TALKS = "calls", "talks"  # two locations: split into Agent/Customer, and mono
 SHORT = (f"{CALLS}/call-1.wav", f"{CALLS}/call-2.wav", f"{TALKS}/talk-1.wav", f"{TALKS}/talk-2.wav")
 KILLED, DELETED = f"{CALLS}/long-kill.wav", f"{CALLS}/long-delete.wav"
-TOO_LONG, AFTER_DRAIN = f"{TALKS}/an-hour.wav", f"{TALKS}/after-drain.wav"
+TOO_LONG = f"{TALKS}/an-hour.wav"
+# Offered after a drain. The other follower takes one recording at a time while a drained one
+# that still claimed would be idle and polling, so it would win about half of them: all eight
+# missing it has a chance below 0.5%.
+AFTER_DRAIN = tuple(f"{TALKS}/after-drain-{n}.wav" for n in range(8))
 LEFT_WORD, RIGHT_WORD = "weather", "report"  # what the fixture says, left then right
 LONG_REPEATS = 48  # the 5 s fixture, 48 times: four minutes, some 30 s to a minute on two cores
 MID_JOB_SECONDS = 5.0
 GRACE_SECONDS = 60  # values.yaml: terminationGracePeriodSeconds
+MEMORY_LIMIT_MIB = 2500  # values.yaml: resources.limits.memory, which the chart passes in MiB
+REFUSAL_LIMIT = f"{MEMORY_LIMIT_MIB} MiB (SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB)"
 STEP_SECONDS = 180.0
 
 
@@ -86,7 +92,8 @@ def call(*command: str, stdin: str | None = None, check: bool = True) -> str:
     )
     if check and done.returncode != 0:
         said = (done.stderr.strip() or done.stdout.strip())[-600:]
-        raise AssertionError(f"`{' '.join(command[:4])} ...` failed: {said}")
+        # No argument is ever a secret: the pool token goes in on stdin.
+        raise AssertionError(f"`{' '.join(command)}` failed: {said}")
     return done.stdout
 
 
@@ -267,22 +274,42 @@ def load(image: str) -> None:
     Desktop's image store can make it stop with "content digest ... not found" on an image
     that was pulled, so the fallback pipes one platform of it into the node."""
     done = subprocess.run(
-        ["kind", "load", "docker-image", image, "--name", CLUSTER], capture_output=True
+        ["kind", "load", "docker-image", image, "--name", CLUSTER],
+        capture_output=True, text=True, errors="replace",
     )
     if done.returncode == 0:
         return
     node = f"{CLUSTER}-control-plane"
     save = subprocess.Popen(
-        ["docker", "save", "--platform", "linux/amd64", image], stdout=subprocess.PIPE
+        ["docker", "save", "--platform", "linux/amd64", image],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    imported = subprocess.run(
-        ["docker", "exec", "-i", node, "ctr", "-n", "k8s.io", "images", "import", "-"],
-        stdin=save.stdout, capture_output=True,
-    )
-    save.wait()
-    expect(
-        save.returncode == 0 and imported.returncode == 0,
-        f"could not load {image} into the cluster: is it built (or pulled)?",
+    try:
+        imported = subprocess.run(
+            ["docker", "exec", "-i", node, "ctr", "-n", "k8s.io", "images", "import", "-"],
+            stdin=save.stdout, capture_output=True,
+        )
+    finally:
+        # If the import ended early, `docker save` may be blocked writing to a pipe nobody
+        # reads: close our end, then stop it if it is still there.
+        save.stdout.close()
+        if save.poll() is None:
+            save.kill()
+        saved_err = save.stderr.read()
+        save.stderr.close()
+        save.wait()
+    if imported.returncode == 0 and save.returncode == 0:
+        return
+
+    def tail(text: bytes | str) -> str:
+        if isinstance(text, bytes):
+            text = text.decode("utf-8", "replace")
+        return text.strip()[-400:] or "(nothing)"
+
+    raise AssertionError(
+        f"could not load {image} into the cluster. `kind load docker-image` said: "
+        f"{tail(done.stderr or done.stdout)}. Then `docker save | ctr import` said: "
+        f"save: {tail(saved_err)}; import: {tail(imported.stderr or imported.stdout)}"
     )
 
 
@@ -431,8 +458,12 @@ def scenario() -> dict[str, float]:
 
     # 6. A pod that replaces one that has gone takes over its row.
     before = len(followers())
+    gone_before = {row["id"] for row in followers("gone")}
     kubectl("scale", f"deploy/{DEPLOYMENT}", "--replicas=1")
-    until(lambda: len(followers("gone")) >= 1 and len(pods()) == 1, "a follower to be gone")
+    until(
+        lambda: len(pods()) == 1 and {r["id"] for r in followers("gone")} - gone_before,
+        "the follower of the pod that was scaled away to be gone",
+    )
     kubectl("scale", f"deploy/{DEPLOYMENT}", "--replicas=2")
     until(two_active_followers, "the new pod to register")
     expect(len(followers()) == before, f"the leader has {len(followers())} rows, not {before}")
@@ -450,7 +481,7 @@ def scenario() -> dict[str, float]:
     reason = refused["failure_reason"] or ""
     expect(
         reason.startswith("out_of_resources: ") and "60 minutes" in reason
-        and "2500 MiB (SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB)" in reason,
+        and REFUSAL_LIMIT in reason,
         f"{TOO_LONG} failed with an unexpected reason: {reason[:200]}",
     )
     expect([o for _, o in refused["tried"]] == ["failed"] * 3, f"{TOO_LONG}: {refused['tried']}")
@@ -465,9 +496,12 @@ def scenario() -> dict[str, float]:
         lambda: metrics(drained_pod, address).get('swarmscribe_follower_state{state="draining"}'),
         "the drained follower to say so in /metrics", 60.0,
     )
-    add(AFTER_DRAIN)
-    done = until(lambda: completed(AFTER_DRAIN), f"{AFTER_DRAIN} to complete")
-    expect(done["tried"][0][0] != drained, "a drained follower took a recording")
+    for key in AFTER_DRAIN:
+        add(key)
+    until(lambda: all(completed(key) for key in AFTER_DRAIN), "the recordings after the drain")
+    for key in AFTER_DRAIN:
+        tried = [who for who, _ in job(key)["tried"]]
+        expect(drained not in tried, f"a drained follower took {key}")
     status = next(container(p) for p in pods() if p["metadata"]["name"] == drained_pod)
     expect(
         status["restartCount"] == restarts and status["ready"],
@@ -515,6 +549,15 @@ def no_gpu() -> None:
     """What a pod does where there is no GPU: a `cuda` image exits 3 and says why; a pod
     that asks for a GPU stays Pending."""
     load(CUDA_IMAGE)
+    try:
+        _no_gpu_checks()
+    finally:
+        for release in ("wrong-node", "gpu-pool"):
+            call("helm", "--kubeconfig", str(KUBECONFIG), "-n", NAMESPACE, "uninstall", release,
+                 check=False)
+
+
+def _no_gpu_checks() -> None:
     install("wrong-node", CUDA_IMAGE, "--set", "replicaCount=1")
     install("gpu-pool", CUDA_IMAGE, "--set", "replicaCount=1", "--set", "gpu.enabled=true")
 
@@ -541,7 +584,6 @@ def no_gpu() -> None:
 
     why = until(unschedulable, "the GPU pod to be found unschedulable", 60.0)
     expect("Insufficient nvidia.com/gpu" in why, f"the GPU pod is unschedulable for: {why}")
-    helm("uninstall", "wrong-node", "gpu-pool")
     print(
         f"passed: without a GPU the cuda image exits 3 and says `{said}`; a pod of a GPU "
         "pool stays Pending (Insufficient nvidia.com/gpu)"

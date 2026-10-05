@@ -2,6 +2,7 @@
 its leader and its driver agree with each other and with the memory guard's figures."""
 
 import importlib.util
+import json
 import re
 import sys
 from pathlib import Path
@@ -11,7 +12,9 @@ from swarmscribe_follower.memory import job_mb
 
 yaml = pytest.importorskip("yaml")
 
-KIND = Path(__file__).resolve().parents[3] / "e2e" / "follower-kind"
+ROOT = Path(__file__).resolve().parents[3]
+KIND = ROOT / "e2e" / "follower-kind"
+CHART = ROOT / "deploy" / "helm" / "swarmscribe-follower"
 # Measured, in MiB (README, "Sizing a pool"): tiny.en once loaded, and what a follower keeps.
 TINY_LOADED, KEPT_AFTER_A_LONG_JOB = 230, 300
 
@@ -36,7 +39,9 @@ def test_the_kind_values_admit_the_long_recordings_and_refuse_the_hour(driver):
     longest = driver.LONG_REPEATS * 5.0  # the fixture is five seconds long
     assert TINY_LOADED + KEPT_AFTER_A_LONG_JOB + job_mb(longest, split=True) < limit
     assert job_mb(3600, split=False) > limit
-    assert f"{limit} MiB" in "2500 MiB"  # what the scenario looks for in the refusal
+    # What the scenario looks for in the refusal is the limit the values give, exactly.
+    assert limit == driver.MEMORY_LIMIT_MIB
+    assert f"{limit} MiB (SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB)" in driver.REFUSAL_LIMIT
     assert values["terminationGracePeriodSeconds"] == driver.GRACE_SECONDS
     assert values["poolToken"]["existingSecret"] == "pool-token"  # store_pool_token's Secret
 
@@ -74,3 +79,57 @@ def test_an_image_is_split_into_its_repository_and_its_tag(driver, image, parts)
 def test_an_image_without_a_tag_is_refused(driver, image):
     with pytest.raises(AssertionError, match="name:tag"):
         driver.image_parts(image)
+
+
+def test_the_chart_turns_the_memory_limit_into_the_figure_the_driver_expects(driver):
+    # The follower is told the container's limit in MiB (divisor 1Mi): 2500Mi reads as 2500.
+    template = (CHART / "templates" / "deployment.yaml").read_text(encoding="utf-8")
+    assert "SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB" in template
+    assert "resource: limits.memory" in template and "divisor: 1Mi" in template
+    values = yaml.safe_load((KIND / "values.yaml").read_text(encoding="utf-8"))
+    quantity = values["resources"]["limits"]["memory"]
+    assert quantity.endswith("Mi") and int(quantity[:-2]) == driver.MEMORY_LIMIT_MIB
+
+
+def unknown_keys(values: dict, schema: dict, path: str = "") -> list[str]:
+    """Keys of `values` that the schema's `properties` do not name, at every depth."""
+    found = []
+    properties = schema.get("properties")
+    for key, value in values.items():
+        if properties is None:
+            continue  # a free-form map (settings, nodeSelector, ...)
+        if key not in properties:
+            found.append(f"{path}{key}")
+        elif isinstance(value, dict):
+            found += unknown_keys(value, properties[key], f"{path}{key}.")
+    return found
+
+
+def test_the_kind_values_use_only_keys_the_charts_schema_names():
+    # jsonschema is not a dependency of this repository, so this is a key check, not a full
+    # validation: every key, at every depth, exists in the schema's `properties` at its path.
+    schema = json.loads((CHART / "values.schema.json").read_text(encoding="utf-8"))
+    values = yaml.safe_load((KIND / "values.yaml").read_text(encoding="utf-8"))
+    assert unknown_keys(values, schema) == []
+    assert unknown_keys({"leader": {"urll": "x"}, "bogus": 1}, schema) == ["leader.urll", "bogus"]
+    defaults = yaml.safe_load((CHART / "values.yaml").read_text(encoding="utf-8"))
+    for key, value in values.items():  # an override keeps the default's kind of value
+        assert isinstance(value, type(defaults[key])) or defaults[key] in ("", None), key
+
+
+def test_the_drain_step_offers_enough_recordings_to_catch_a_drained_follower_that_claims(driver):
+    # Two followers: the other is busy with one recording at a time, so a drained follower
+    # that still claims is idle and polling and takes about half of them; a miss of all N
+    # is below 0.5% at N = 8.
+    assert len(driver.AFTER_DRAIN) >= 8
+    assert len(set(driver.AFTER_DRAIN)) == len(driver.AFTER_DRAIN)
+
+
+def test_a_failed_command_is_reported_whole(driver):
+    with pytest.raises(AssertionError) as caught:
+        driver.call(
+            sys.executable, "-c", "import sys; print('boom', file=sys.stderr); sys.exit(3)",
+            "tail-marker",
+        )
+    message = str(caught.value)
+    assert "tail-marker" in message and "boom" in message

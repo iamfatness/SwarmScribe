@@ -25,6 +25,7 @@ from .credentials import CredentialFileError, CredentialStore
 from .device import cached_models, probe
 from .errors import EXIT_CONFIGURATION, EXIT_OK, EXIT_UNFIT, FollowerExit
 from .leader import LeaderClient, Refused, Transient
+from .metrics import Metrics
 from .models import ModelHost, ModelUnavailable, OutOfMemory
 from .scratch import Scratch
 from .signals import StopSignals
@@ -137,14 +138,20 @@ def build(settings: Settings) -> Agent:
     except DeviceUnavailableError as error:
         raise FollowerExit(EXIT_UNFIT, str(error)) from None
     verify = tls(settings)
+    metrics = Metrics()
     return Agent(
         settings,
         client=LeaderClient(settings.leader_url, verify=verify),
         links=Links(verify=verify, allow_http=settings.allow_http),
-        models=ModelHost(found.choice.device, allowed=frozenset(settings.allowed_models)),
+        models=ModelHost(
+            found.choice.device,
+            allowed=frozenset(settings.allowed_models),
+            on_loaded=metrics.model_loaded,
+        ),
         scratch=Scratch(settings.scratch, settings.state_dir),
         store=CredentialStore(settings.credential_file),
         probe=found,
+        metrics=metrics,
     )
 
 

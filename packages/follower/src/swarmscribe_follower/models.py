@@ -6,6 +6,7 @@ the old one is closed, so two are never in memory together."""
 
 import logging
 import re
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -42,10 +43,12 @@ class ModelHost:
         *,
         factory: EngineFactory = Transcriber,
         allowed: frozenset[str] = frozenset(),
+        on_loaded: Callable[[float], None] | None = None,
     ) -> None:
         self.device = device
         self._factory = factory
         self._allowed = allowed
+        self._on_loaded = on_loaded  # told how many seconds a load and its warm-up took
         self._loaded: tuple[str, str] | None = None
         self._transcriber: Any = None
 
@@ -66,6 +69,7 @@ class ModelHost:
         self.close()
         settings = TranscribeSettings(model=model, compute_type=compute_type, device=self.device)
         transcriber = None
+        started = time.monotonic()
         try:
             transcriber = self._factory(settings)
             transcriber.warm_up()
@@ -80,6 +84,8 @@ class ModelHost:
                 f"{model} ({compute_type}, {self.device}): {type(exc).__name__}: {str(exc)[:500]}"
             ) from exc
         self._transcriber, self._loaded = transcriber, (model, compute_type)
+        if self._on_loaded is not None:
+            self._on_loaded(time.monotonic() - started)
         logger.info("model %s (%s) loaded on %s", model, compute_type, self.device)
         return transcriber
 

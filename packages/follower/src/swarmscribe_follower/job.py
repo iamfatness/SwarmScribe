@@ -40,6 +40,7 @@ from .lease import (
     JobStopped,
     LeaseKeeper,
 )
+from .metrics import Metrics
 from .models import ModelHost, ModelUnavailable, OutOfMemory, is_out_of_memory
 from .scratch import Scratch, ScratchDiskFull, ScratchError, ScratchWipeFailed
 from .transfer import (
@@ -141,10 +142,12 @@ class JobRunner:
         heartbeat_interval: float,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        metrics: Metrics | None = None,
     ) -> None:
         self._client, self._links, self._models, self._scratch = client, links, models, scratch
         self._device, self._interval = device, heartbeat_interval
         self._clock, self._sleep = clock, sleep
+        self._metrics = metrics or Metrics()
         self._control: JobControl | None = None
         self._phase = "idle"
         self._transcribing_since = 0.0
@@ -181,7 +184,14 @@ class JobRunner:
             return JobResult(ABANDONED, INVALID_JOB_ID)
         extra = {"job_id": claim.job_id, "lease_id": claim.lease_id}
         logger.info("job claimed", extra={**extra, "event": "job.claimed"})
-        keeper = LeaseKeeper(self._client, claim.job_id, claim.lease_id, self._interval, control)
+        keeper = LeaseKeeper(
+            self._client,
+            claim.job_id,
+            claim.lease_id,
+            self._interval,
+            control,
+            on_failure=self._metrics.heartbeat_failed,
+        )
         folder: Path | None = None
         self._control, self._phase = control, "starting"
         try:
@@ -299,6 +309,7 @@ class JobRunner:
             downloaded = self._with_fresh_links(claim, control, links, download)
         except Transient:
             raise _Release("the recording could not be downloaded for ten minutes") from None
+        self._metrics.downloaded(source.stat().st_size)
 
         self._phase = "model"
         transcriber = self._models.get(settings.model, settings.compute_type)
@@ -314,6 +325,7 @@ class JobRunner:
         transcript = transcriber.transcribe(
             source, vocabulary, settings=settings, progress=on_progress
         )
+        self._metrics.transcribed(transcript.duration, self._clock() - self._transcribing_since)
         if transcript.source_checksum != downloaded:
             raise _Fail("engine_error", "the recording changed on disk during the job", True)
         files = write_outputs(transcript, folder)  # all three, or none: never a partial set
@@ -331,6 +343,7 @@ class JobRunner:
                     ),
                     pause=control.pause,
                 )
+                self._metrics.uploaded(path.stat().st_size)
             return sent
 
         for _round in range(SUBMIT_ROUNDS):

@@ -98,10 +98,12 @@ class LeaseKeeper(threading.Thread):
         *,
         lease_seconds: float | None = None,
         clock: Callable[[], float] = time.monotonic,
+        on_failure: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(name="lease-keeper", daemon=True)
         self._client, self._job_id, self._lease_id = client, job_id, lease_id
         self._interval, self._control, self._clock = interval, control, clock
+        self._on_failure = on_failure  # told of every heartbeat the leader did not answer
         self._lease_seconds = lease_seconds
         self._done = threading.Event()
         self.last_loop = clock()  # liveness: when the loop last went round
@@ -151,6 +153,8 @@ class LeaseKeeper(threading.Thread):
                 )
             except Transient:
                 self.failures += 1
+                if self._on_failure is not None:
+                    self._on_failure()
                 if self.failures == 1:
                     logger.warning("heartbeat failed; retrying", extra=extra)
                 if self._lease_has_certainly_expired():

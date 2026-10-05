@@ -51,20 +51,63 @@ class CredentialStore:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
 
+    def _folder_problem(self, folder: os.stat_result, *, mode_matters: bool = True) -> str | None:
+        """The rule for the folder, in one place: it must be this user's, and nobody else may
+        be able to write to it. None when it can be trusted; else why not, naming the folder,
+        its owner and mode, and what to do."""
+        if os.name == "nt":
+            return None
+        me = os.getuid()
+        where = self.path.parent
+        found = f"owner uid {folder.st_uid}, mode {stat.S_IMODE(folder.st_mode):04o}"
+        if folder.st_uid != me:
+            return (
+                f"the folder {where} is owned by another user and will not be trusted with"
+                f" the credential ({found}; the follower runs as uid {me}); give it to the"
+                f" follower with `chown {me} {where} && chmod 700 {where}`, or use a folder or"
+                " volume that is the follower's own"
+            )
+        if mode_matters and stat.S_IMODE(folder.st_mode) & 0o022:
+            return (
+                f"the folder {where} is writable by others and will not be trusted with the"
+                f" credential ({found}); run `chmod 700 {where}`"
+            )
+        return None
+
+    def check_folder(self, *, tighten: bool = True) -> None:
+        """Refuse, BEFORE anything is registered, a folder whose credential `load` would
+        refuse at the next start: a follower that registered there would spend its join token,
+        work, and after a restart never trust its own credential again. The rule is `load`'s
+        own (`_folder_problem`).
+
+        While there is no credential yet, a folder that is this user's but looser than 0700
+        is tightened first, exactly as `save` would do a moment later. `tighten=False`
+        (`doctor`, which changes nothing) passes such a folder instead, and a missing one:
+        `run` creates it 0700. Once a credential exists nothing is tightened: a folder that
+        others could write to while it held the credential is refused, as it always was."""
+        folder = self.path.parent
+        fresh = not os.path.lexists(self.path)
+        try:
+            if tighten and fresh:
+                private_folder(folder)
+            info = folder.stat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise CredentialFileError(
+                f"cannot use the folder {folder}: {exc.strerror or type(exc).__name__}"
+            ) from None
+        problem = self._folder_problem(info, mode_matters=tighten or not fresh)
+        if problem is not None:
+            raise CredentialFileError(problem)
+
     def _check_trust(self, folder: os.stat_result, file: os.stat_result) -> None:
         if os.name == "nt":
             return
-        me = os.getuid()
-        if folder.st_uid != me:
-            raise CredentialFileError(
-                f"the folder {self.path.parent} is owned by another user and will not be trusted"
-            )
-        if stat.S_IMODE(folder.st_mode) & 0o022:
-            raise CredentialFileError(
-                f"the folder {self.path.parent} is writable by others and will not be trusted;"
-                f" run `chmod 700 {self.path.parent}`"
-            )
-        if file.st_uid != me:
+        problem = self._folder_problem(folder)
+        if problem is not None:
+            raise CredentialFileError(problem)
+        if file.st_uid != os.getuid():
             raise CredentialFileError(
                 f"{self.path} is owned by another user and will not be trusted; delete it"
                 " and join again"

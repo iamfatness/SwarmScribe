@@ -1,9 +1,13 @@
 """The follower's life: prepare, register, claim and work until told to stop (follower
 spec 5.2, 5.3, 5.5, 5.6).
 
-`run_supervised()` installs the signal handlers FIRST, then runs `prepare()` (the state lock, the
+The signal handlers are installed FIRST: by `entry.run`, before the follower is even
+imported, which hands them to `run_supervised()` (called without them, it installs its own).
+`run_supervised()` then runs `prepare()` (the state lock, the state folder's trust check, the
 scratch folder, the cheap checks, the start-up model, the registration) and `serve()` on a
-thread of its own, while the main thread watches the signals. A stop during start-up therefore
+thread of its own, while the main thread watches the signals. A stop that arrived before
+`run_supervised()` was called is acted on before the worker starts: nothing is locked,
+loaded or registered. A stop during start-up therefore
 ends the process: the registration's retry loop, the scratch retry waits and the checks between
 steps all see it. One step cannot be interrupted: a model load or download (and a request in
 flight, bounded by its timeout); the stop is noticed the moment it returns, and nothing is
@@ -39,7 +43,6 @@ dropped; it is never logged, put in an exception or kept on the agent."""
 
 import logging
 import random
-import signal
 import threading
 import time
 import traceback
@@ -75,6 +78,7 @@ from .leader import Interrupted, LeaderClient, NoWork, Refused, Transient, retry
 from .lease import SHUTDOWN, JobControl
 from .models import ModelHost, ModelUnavailable, OutOfMemory
 from .scratch import Scratch, ScratchError, ScratchNotOurs, ScratchOutside
+from .signals import StopSignals
 from .statelock import hold_state_lock
 from .transfer import Links
 
@@ -100,37 +104,6 @@ SCRATCH_FAILURE_LIMIT = len(SCRATCH_RETRY_WAITS) + 1
 FINISH_CAP_SECONDS = 120.0
 POLL_SECONDS = 0.1  # how often the main thread looks at the signal counter
 SCRATCH_FATAL = frozenset({ScratchNotOurs.__name__, ScratchOutside.__name__})
-
-
-class StopSignals:
-    """What the signal handlers do: count. Nothing else (no lock, no logging, no `Event`):
-    see the module docstring. `count` is how many signals have arrived."""
-
-    NAMES = ("SIGINT", "SIGTERM", "SIGBREAK")  # whichever the platform has
-
-    def __init__(self) -> None:
-        self._arrived: list[None] = []
-
-    @property
-    def count(self) -> int:
-        return len(self._arrived)
-
-    def handler(self, _signum, _frame) -> None:
-        self._arrived.append(None)  # one C call: a nested handler cannot interleave in it
-
-    def install(self) -> dict[int, object]:
-        """Install the handler (main thread only); returns what to give `restore`."""
-        previous = {}
-        for name in self.NAMES:
-            number = getattr(signal, name, None)
-            if number is not None:
-                previous[number] = signal.signal(number, self.handler)
-        return previous
-
-    @staticmethod
-    def restore(previous: dict[int, object]) -> None:
-        for number, handler in previous.items():
-            signal.signal(number, handler)
 
 
 class Agent:
@@ -179,13 +152,16 @@ class Agent:
 
     def prepare(self) -> None:
         """Everything that can fail before the leader hears of this follower, cheapest first:
-        the state folder's lock, the scratch folder, that there is a credential or a token to
-        register with; then the start-up model and a real inference with it; then the
-        credential. Raises FollowerExit (EXIT_OK when a stop was asked meanwhile); whatever it
-        had taken (the lock, the model) is let go again."""
+        the state folder's lock, that the folder can be trusted with a credential, the scratch
+        folder, that there is a credential or a token to register with; then the start-up
+        model and a real inference with it; then the credential. Raises FollowerExit (EXIT_OK
+        when a stop was asked meanwhile); whatever it had taken (the lock, the model) is let
+        go again."""
         try:
+            self._stopped_during_start()
             if self._state_lock is None:
                 self._state_lock = self._hold_lock(self._settings.state_dir)
+            self._check_state_folder()
             self._store.clean_stale_temp()
             if not self._prepare_scratch():
                 raise FollowerExit(EXIT_OK, "stopped before it started")
@@ -201,6 +177,19 @@ class Agent:
     def _stopped_during_start(self) -> None:
         if self._stopping.is_set():
             raise FollowerExit(EXIT_OK, "stopped before it started")
+
+    def _check_state_folder(self) -> None:
+        """Fail now, not at the first restart: `load` refuses a credential in a folder that
+        is another user's or that others can write to (a bind mount from Windows, a
+        Kubernetes `emptyDir`, a root-made folder). Registering there would spend a
+        single-use join token on a follower that can never start a second time."""
+        try:
+            self._store.check_folder()
+        except CredentialFileError as error:
+            raise FollowerExit(
+                EXIT_CONFIGURATION,
+                f"{error}. Nothing was registered and no join token was used.",
+            ) from None
 
     def _check_can_register(self) -> None:
         """Fail now, not after a model load: a follower with neither a credential for this
@@ -531,16 +520,22 @@ class Agent:
 
     # --- stopping ------------------------------------------------------------------------
 
-    def run_supervised(self, *, poll: float = POLL_SECONDS) -> int:
+    def run_supervised(
+        self, *, poll: float = POLL_SECONDS, signals: StopSignals | None = None
+    ) -> int:
         """Start up and serve on a worker thread while this (the main) thread watches for
         signals; returns the exit code. The handlers are installed first, so a stop during
-        start-up is seen (module docstring). The first signal calls `stop()`, the second
-        `stop(now=True)`. The handlers only count; every lock is taken here, in normal
-        context. A FollowerExit from start-up is raised here, on this thread. Must be called
-        on the main thread. However it ends, the handlers are put back and the worker has
-        ended."""
-        signals = StopSignals()
-        previous = signals.install()
+        start-up is seen (module docstring): `signals` are handlers the caller installed
+        already (`entry.run`, before the imports), and stay the caller's to put back; without
+        them they are installed here and put back at the end. A signal that arrived before
+        this call stops the follower before the worker starts. The first signal calls
+        `stop()`, the second `stop(now=True)`. The handlers only count; every lock is taken
+        here, in normal context. A FollowerExit from start-up is raised here, on this thread.
+        Must be called on the main thread. However it ends, the worker has ended."""
+        previous: dict[int, object] = {}
+        if signals is None:
+            signals = StopSignals()
+            previous = signals.install()
         codes: list[int] = []
         failed: list[Exception] = []
 
@@ -554,8 +549,10 @@ class Agent:
             codes.append(self.serve())
 
         worker = threading.Thread(target=work, name="worker")
+        seen = signals.count
+        if seen:  # a stop that arrived before start-up began: nothing is to be started
+            self.stop(now=seen >= 2)
         worker.start()
-        seen = 0
         try:
             while worker.is_alive():
                 worker.join(poll)

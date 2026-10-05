@@ -27,6 +27,7 @@ from .errors import EXIT_CONFIGURATION, EXIT_OK, EXIT_UNFIT, FollowerExit
 from .leader import LeaderClient, Refused, Transient
 from .models import ModelHost, ModelUnavailable, OutOfMemory
 from .scratch import Scratch
+from .signals import StopSignals
 from .statelock import hold_state_lock
 from .transfer import Links
 
@@ -147,12 +148,17 @@ def build(settings: Settings) -> Agent:
     )
 
 
-def command_run(settings: Settings, build: Build) -> int:
+def command_run(settings: Settings, build: Build, signals: StopSignals | None = None) -> int:
     # The agent takes the state folder's lock itself and releases it when it ends.
-    # run_supervised installs the signal handlers, then starts up and serves: a stop while
-    # the model loads or the registration retries ends the process.
+    # `signals` are the handlers entry.run installed before anything was imported (without
+    # them, run_supervised installs its own): a stop that arrived during the imports ends
+    # here, before the device is probed or anything is built; one that arrives while the
+    # agent is built, the model loads or the registration retries is seen by run_supervised.
+    if signals is not None and signals.count:
+        logger.info("stopping: stopped before it started")
+        return EXIT_OK
     agent = build(settings)
-    return agent.run_supervised()
+    return agent.run_supervised(signals=signals)
 
 
 def command_join(
@@ -171,8 +177,12 @@ def command_join(
         del token
     lock = hold_state_lock(settings.state_dir)
     try:
+        store = CredentialStore(settings.credential_file)
         try:
-            stored = CredentialStore(settings.credential_file).load()
+            # Before the token is spent: a folder the credential would be refused in at
+            # the next start is refused now (agent.py, _check_state_folder).
+            store.check_folder()
+            stored = store.load()
         except CredentialFileError as error:
             raise FollowerExit(EXIT_CONFIGURATION, str(error)) from None
         if stored is not None and stored.leader_url != settings.leader_url:
@@ -243,6 +253,16 @@ def _folder_problem(path: Path) -> str | None:
     return None
 
 
+def _untrusted(settings: Settings) -> str | None:
+    """Why `run` would refuse to keep a credential in the state folder (another user's, or
+    writable by others), or None. Changes nothing: `run` tightens a folder of its own."""
+    try:
+        CredentialStore(settings.credential_file).check_folder(tighten=False)
+    except CredentialFileError as error:
+        return str(error)
+    return None
+
+
 def _free_space(path: Path) -> str:
     try:
         return f"{shutil.disk_usage(_nearest_existing(path)).free / 2**30:.1f} GiB free"
@@ -270,6 +290,8 @@ def command_doctor(
     folders = (("state folder", settings.state_dir), ("scratch folder", settings.scratch))
     for name, folder in folders:
         problem = _folder_problem(folder)
+        if problem is None and folder == settings.state_dir:
+            problem = _untrusted(settings)
         if problem is None:
             print(f"{name}: ok ({folder}, {_free_space(folder)})", file=out)
         else:
@@ -357,7 +379,10 @@ def main(
     out: TextIO | None = None,
     err: TextIO | None = None,
     stdin: TextIO | None = None,
+    signals: StopSignals | None = None,
 ) -> int:
+    """`signals`: the stop-signal handlers `entry.run` installed before this module was
+    imported, for `run` only (entry.py says why)."""
     out, err, stdin = out or sys.stdout, err or sys.stderr, stdin or sys.stdin
     args = parser().parse_args(argv)
     if args.command == "doctor":
@@ -376,7 +401,7 @@ def main(
     logs.configure_logging(settings.log_format, stream=err)
     try:
         if args.command == "run":
-            return command_run(settings, build)
+            return command_run(settings, build, signals)
         if args.command == "join":
             return command_join(settings, build, args.token_stdin, out, stdin)
         if args.command == "leave":
@@ -398,5 +423,6 @@ def main(
         return EXIT_UNEXPECTED
 
 
-def run() -> None:
-    sys.exit(main())
+# `run`, the command's entry point, lives in entry.py: it installs the stop-signal handlers
+# before this module and its imports are loaded.
+from .entry import run  # noqa: E402, F401

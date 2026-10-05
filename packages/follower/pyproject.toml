@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.scripts]
-swarmscribe-follower = "swarmscribe_follower.main:run"
+swarmscribe-follower = "swarmscribe_follower.entry:run"
 
 [tool.uv.sources]
 swarmscribe-protocol = { workspace = true }

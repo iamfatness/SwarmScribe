@@ -124,8 +124,13 @@ networkPolicy:
   ingress:
     # Who may reach /healthz and /metrics (NetworkPolicyPeer objects), e.g. your Prometheus:
     #   - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}
-    # Empty: nobody. The kubelet's probes come from the pod's own node, which a
-    # NetworkPolicy never cuts off. /metrics has no authentication.
+    # Empty: nobody. On most CNIs the kubelet's probes come from the pod's own node, which
+    # the policy does not cut off; on a CNI that applies ingress policy to node traffic they
+    # are dropped, the startup probe fails and every pod restarts. If the pods' probes fail
+    # with the policy on, add the nodes' address range here (the port is already limited to
+    # healthPort):
+    #   - ipBlock: {cidr: 10.0.0.0/16}
+    # or set networkPolicy.enabled: false. /metrics has no authentication.
     from: []
   egress:
     dns:
@@ -143,6 +148,8 @@ networkPolicy:
       # huggingface.co. The port of leader.url is always allowed as well. Peers are matched
       # AFTER Service address translation: for a leader inside the cluster the port that
       # counts is its pod's, so list that here if it differs from the Service's.
+      # Object storage that serves its signed links on a port other than 443 (MinIO on 9000,
+      # for example) is blocked until that port is added to this list.
       ports: [443]
       cidrs: ["0.0.0.0/0", "::/0"]
       # More ranges to cut out of 0.0.0.0/0 and ::/0.

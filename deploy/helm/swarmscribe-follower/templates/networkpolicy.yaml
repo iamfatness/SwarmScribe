@@ -24,8 +24,9 @@ spec:
     matchLabels:
       {{- include "swarmscribe-follower.selectorLabels" . | nindent 6 }}
   policyTypes: ["Ingress", "Egress"]
-  # /healthz and /metrics, and only for the peers named in values. The kubelet's probes come
-  # from the pod's own node, which no NetworkPolicy cuts off.
+  # /healthz and /metrics, and only for the peers named in values. On most CNIs the kubelet's
+  # probes come from the pod's own node, which no NetworkPolicy cuts off; where they are cut
+  # off, add the nodes' range to networkPolicy.ingress.from or set networkPolicy.enabled: false.
   {{- if .Values.networkPolicy.ingress.from }}
   ingress:
     - ports:

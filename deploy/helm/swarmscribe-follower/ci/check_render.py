@@ -445,6 +445,24 @@ def check_gpu(_docs: list[dict]) -> list[str]:
     single = render("-f", str(GPU_VALUES), "--set", "replicaCount=1")
     if "PodDisruptionBudget" in kinds(single):
         problems.append("a PodDisruptionBudget is rendered for one replica (it blocks drains)")
+    for zero in ("0", "0%"):
+        refused_file(
+            problems,
+            f"podDisruptionBudget.maxUnavailable {zero!r} (it blocks every eviction)",
+            {"podDisruptionBudget": {"enabled": True, "maxUnavailable": zero}},
+        )
+    for allowed in ("25%", "1"):
+        for as_string in (True, False):
+            if as_string or allowed == "1":
+                flag = "--set-string" if as_string else "--set"
+                got = one(
+                    render(
+                        "-f", str(GPU_VALUES), flag, f"podDisruptionBudget.maxUnavailable={allowed}"
+                    ),
+                    "PodDisruptionBudget",
+                )["spec"]["maxUnavailable"]
+                if str(got) != allowed:
+                    problems.append(f"podDisruptionBudget.maxUnavailable {allowed} is not kept")
     return problems
 
 

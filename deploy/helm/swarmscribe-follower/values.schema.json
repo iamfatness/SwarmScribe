@@ -98,7 +98,12 @@
       "additionalProperties": false,
       "properties": {
         "enabled": {"type": "boolean"},
-        "maxUnavailable": {"type": ["integer", "string"], "minimum": 1}
+        "maxUnavailable": {
+          "anyOf": [
+            {"type": "integer", "minimum": 1},
+            {"type": "string", "pattern": "^[1-9][0-9]*%?$"}
+          ]
+        }
       }
     },
     "networkPolicy": {

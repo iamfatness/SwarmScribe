@@ -394,11 +394,12 @@ html:has(dialog[open]) {
 /* ---- Narrow screens: cells are tighter and a row's actions stack, so a table keeps its fit ---- */
 
 @media (max-width: 900px) {
-  /* Tighter cells, so the recording and the notes under it keep their room. */
+  /* Tighter cells, so the recording and the notes under it keep their room. The system fonts
+     differ in width from one platform to the next, so the fit is not cut to the pixel. */
   th,
   td {
-    padding-right: var(--s-2);
-    padding-left: var(--s-2);
+    padding-right: 6px;
+    padding-left: 6px;
   }
 
   th:first-child,

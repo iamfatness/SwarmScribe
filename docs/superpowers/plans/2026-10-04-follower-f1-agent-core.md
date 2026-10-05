@@ -37,7 +37,7 @@ Decisions this plan makes. Those marked **(owner)** are the owner's to overturn.
 2. **`500` is transient, except on submit.** A leader bug that answers `500` to submit for ever would otherwise keep a job leased for ever while its heartbeats succeed; after five the attempt is failed, retryably (follower spec 6.4).
 3. **A drained follower exits 0 by default and parks on request (owner).** `SWARMSCRIBE_FOLLOWER_ON_DRAINED=exit|park` (follower spec 5.5). The credential file is kept either way, so a restart is still drained.
 4. **A revoked follower keeps its credential file** and exits 4. A restart finds the file, is refused again and exits again; it never uses a join token it may still hold (follower spec D8).
-5. **An unknown credential (`401`) registers again once per process**, if a token is configured. The leader reuses the rows of `gone` pool-token followers (F0), so a machine that was wrongly thought gone meets this.
+5. **An unknown credential (`401`) registers again once per process**, if a token is configured. The leader reuses the rows of `gone` pool-token followers (F0), so a machine that was wrongly thought gone meets this. The same `401` in the middle of a job stops the job and wipes scratch first (Adjustment 1).
 6. **A claim whose job id is not a UUID is ignored entirely**: the id becomes a folder name and a URL path segment (follower spec D25).
 7. **The `httpx` and `httpcore` loggers are raised to `WARNING` when the package is imported**, not only by the command line: `httpx` logs every request URL at `INFO`, and no way of using the follower may log a link.
 8. **The contract test serves the real leader with `uvicorn` on a loopback port in the test process.** The follower's client is synchronous; `httpx`'s in-process ASGI transport is asynchronous only. Real HTTP also exercises streaming, `Content-Length` and headers as they really are.
@@ -56,6 +56,24 @@ Inputs and conditions the spec implies and that are most likely to bite a person
 6. **Secrets in logs**: a link URL in an HTTP client's own log line, a credential in a failure reason, transcript text in an error — Task 1, `test_importing_the_follower_already_silences_the_http_clients`; Task 8, `test_no_log_line_or_failure_reason_holds_a_link_a_credential_or_the_transcript`.
 7. **An optional setting passed as an empty string** (Compose and Kubernetes do this for unset variables): `SWARMSCRIBE_JOIN_TOKEN=""` means none — Task 1, `test_an_optional_setting_passed_as_an_empty_string_is_unset`.
 8. **A stop while a job is running**: finished only if it fits the grace period, released otherwise, released at once on a second stop, and the follower exits even when the release cannot be delivered — Task 9, the five shutdown tests.
+
+## Adjustments from the F0 final review
+
+F0's final review (`.superpowers/sdd/2026-10-04-follower-f0-leader-and-engine/final-review.md`) and its fix wave settle these. Each is applied in the task named; where the task text below is older than this section, this section wins.
+
+1. **A `401` during a job** (the row was reused, so the credential is gone) is not a lost lease. The job runner stops the job, wipes scratch, calls nothing, and the agent registers again once (Ruling 5). It must not be settled as `LEASE_LOST`: Task 7's `test_a_refused_heartbeat_stops_the_job_with_the_reason` row `401` keeps `UNAUTHORISED`, and Tasks 8 and 9 handle that reason as stop, wipe, then re-register, never as release or fail.
+2. **Fresh-links errors (Task 8, `_with_fresh_links`).**
+   - `409 stale_lease` is handled as a cancel: stop, wipe, call nothing, claim again (spec 6.3). The leader answers it for a cancelled job where a heartbeat would say `cancel`; treat both the same.
+   - `429` is expected within 60 s of the claim (`Retry-After` up to 60). It is `Transient`: wait the `Retry-After` and ask again (spec 6.4), without counting against the job. A link refused in the first minute of a job costs up to a minute.
+   - `503` (`Retry-After: 30` for unavailable storage) is retried in place (spec 6.4). Since the leader's fix wave the route answers `503` for every storage error, but keep `400 invalid_key` mapped as spec 6.2 says: `fail` `other`, retryable, with an error log.
+3. **Download links die with the lease.** F0's fix wave bound download links to the lease, as upload links already were (follower spec 12.2): once the lease ends, a download link answers `409 stale_lease`. `Links.download` therefore maps `409 stale_lease` to `LeaseLost`, as `upload` does (Task 5, and its table of refused downloads). The follower still stops on the directive or on the `409` from a job call, and never waits for a download to fail to learn the lease is gone; a link that is merely expired (`403`) is not a lost lease.
+4. **`MODEL_NAME` (Task 6)** must be no looser than the leader's rule: the pattern and at most 100 characters in all. Neither the leader nor the protocol exports an importable rule today, and the follower never imports the leader. So Task 6 begins by adding `MODEL_NAME_PATTERN` and `MODEL_NAME_MAX_LENGTH` to `swarmscribe_protocol` (constants only, no schema change; the snapshot is unchanged), and the leader's `admin_models.MODEL_PATTERN` and `max_length=100` import them. The follower imports the same constants from the protocol and defines no copy.
+5. **The test kit (Task 11).** The contract test names its own database with the kit's required prefix, `swarmscribe_kit_follower` (the kit now refuses any name that does not start `swarmscribe_kit_`, and refuses `swarmscribe_test` and `swarmscribe_console_test`). The kit has no pool-token helper: the test calls `auth.pool_tokens.create_pool_token` directly. `empty_tables` keeps `settings_profiles`, so a test that changes a profile restores it in a `finally`.
+6. **The engine (Tasks 6 and 8).**
+   - A stop takes effect at the next segment only: the progress callback runs once per segment, so a stop during a long segment waits for it. Do not promise a prompt stop, and keep the shutdown grace arithmetic in terms of a segment.
+   - `Transcriber.close()` while `transcribe` runs raises `RuntimeError`. `close()` is called only between jobs, on the worker thread that runs jobs, never from a signal handler or the agent's stop path while a job is running.
+   - The follower defines its own stop exception (`JobStopped`, in `lease.py`) and raises it from the progress callback; it does not use or subclass an engine exception for this, and the engine's own errors are told apart from it by type.
+   - `ModelHost` owns its own `Transcriber`: it builds it through its factory, warms it up and closes it. Nothing else holds a reference to it, and `JobRunner` receives the transcriber from `ModelHost.get()` for the length of one job only.
 
 ## File Structure
 
@@ -1602,7 +1620,7 @@ git commit -m "Follower: the leader client, one method per route, and the one re
 - Consumes: `Link` (protocol); `Transient`, `Refused`, `TRANSIENT_STATUSES`, `refusal_of`, `retry_after_of` (Task 4).
 - Produces:
   - `Links(*, transport=None, verify=True, timeout=120.0)` with `download(link: Link, destination: Path, check: Callable[[], None]) -> str` (the SHA-256; `check` is called between chunks and may raise), `upload(link: Link, path: Path) -> None`, `close()`.
-  - Exceptions: `SourceChanged` (download `412`, `404`, or code `source_changed`), `LinkExpired` (`403`), `LeaseLost` (upload `409 stale_lease`), `OutputTooLarge` (upload `413`), `OutOfSpace` (the recording does not fit on scratch); `Transient` for transport errors, `5xx`, `429`, a short body, and an upload's `409` that is not `stale_lease`; `Refused` otherwise and for a link with the wrong method.
+  - Exceptions: `SourceChanged` (download `412`, `404`, or code `source_changed`), `LinkExpired` (`403`), `LeaseLost` (`409 stale_lease` on an upload or a download), `OutputTooLarge` (upload `413`), `OutOfSpace` (the recording does not fit on scratch); `Transient` for transport errors, `5xx`, `429`, a short body, and an upload's `409` that is not `stale_lease`; `Refused` otherwise and for a link with the wrong method.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1677,6 +1695,7 @@ def test_a_download_can_be_stopped_between_chunks(tmp_path):
         (httpx.Response(412, text="<Error><Code>ConditionNotMet</Code></Error>"), SourceChanged),
         (error(404, "not_found"), SourceChanged),
         (error(403, "forbidden"), LinkExpired),
+        (error(409, "stale_lease"), LeaseLost),
         (error(503, "unavailable", **{"Retry-After": "30"}), Transient),
         (error(400, "invalid_key"), Refused),
     ],
@@ -1889,6 +1908,8 @@ class Links:
             return SourceChanged("the recording changed or was removed after it was ingested")
         if response.status_code == 403:
             return LinkExpired("the download link was refused")
+        if response.status_code == 409 and refusal.code == "stale_lease":
+            return LeaseLost("the lease this download belongs to has ended")
         if response.status_code in TRANSIENT_STATUSES:
             return Transient(response.status_code, retry_after_of(response), "download")
         return refusal
@@ -2254,12 +2275,14 @@ from collections.abc import Callable
 from typing import Any
 
 from swarmscribe_engine import Device, Transcriber, TranscribeSettings
+from swarmscribe_protocol import MODEL_NAME_MAX_LENGTH, MODEL_NAME_PATTERN
 
 logger = logging.getLogger(__name__)
 
 # A model is named, never located: the name comes over the wire and the loader would accept
-# a path. `owner/name` is a Hugging Face repository.
-MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}(/[A-Za-z0-9][A-Za-z0-9._-]{0,63})?")
+# a path. `owner/name` is a Hugging Face repository. The rule is the protocol's, shared with
+# the leader that accepts the name (Adjustment 4): never a copy.
+MODEL_NAME = re.compile(MODEL_NAME_PATTERN)
 
 EngineFactory = Callable[[TranscribeSettings], Any]
 
@@ -2299,7 +2322,7 @@ class ModelHost:
     def get(self, model: str, compute_type: str) -> Any:
         """The transcriber for (model, compute type), loading it if it is not the one in
         memory."""
-        if not MODEL_NAME.fullmatch(model):
+        if len(model) > MODEL_NAME_MAX_LENGTH or not MODEL_NAME.fullmatch(model):
             raise ModelUnavailable("the model name is not a plain name or owner/name")
         if self._allowed and model not in self._allowed:
             raise ModelUnavailable(f"the model {model} is not in this follower's allowed models")
@@ -5228,7 +5251,7 @@ One test file runs the follower against the real leader application, with a real
 - Test: `packages/follower/tests/test_real_leader.py`
 
 **Interfaces:**
-- Consumes: from F0's `leader_testkit`: `LINK_KEY`, `migrated_database(name) -> str`, `empty_tables(session)`, `add_recordings(sessionmaker, root, files, *, consent=..., public_url=..., **location)`, `new_join_token(sessionmaker)`; from the leader: `create_app(settings, background=False)`, `Settings`, `make_engine`, `make_sessionmaker`, `auth.followers.drain`, `auth.followers.revoke_follower`, `auth.pool_tokens.create_pool_token`, `jobs.admin.cancel_job`; `uvicorn` (a dependency of the leader); `FakeEngine`, `CPU`, `SPOKEN` from `follower_testkit`.
+- Consumes: from F0's `leader_testkit`: `LINK_KEY`, `migrated_database(name) -> str`, `empty_tables(session)`, `add_recordings(sessionmaker, root, files, *, consent=..., public_url=..., **location)`, `new_join_token(sessionmaker)` (a join token; for a pool token call `create_pool_token`); from the leader: `create_app(settings, background=False)`, `Settings`, `make_engine`, `make_sessionmaker`, `auth.followers.drain`, `auth.followers.revoke_follower`, `auth.pool_tokens.create_pool_token`, `jobs.admin.cancel_job`; `uvicorn` (a dependency of the leader); `FakeEngine`, `CPU`, `SPOKEN` from `follower_testkit`.
 - Produces: nothing other tasks use.
 
 - [ ] **Step 1: Write the tests**
@@ -5250,7 +5273,7 @@ import uuid
 import pytest
 import uvicorn
 from follower_testkit import CPU, SPOKEN, FakeEngine
-from leader_testkit import LINK_KEY, add_recordings, empty_tables, migrated_database, new_join_token
+from leader_testkit import LINK_KEY, add_recordings, empty_tables, migrated_database
 from sqlalchemy import select
 from swarmscribe_follower.agent import Agent
 from swarmscribe_follower.config import Settings
@@ -5270,7 +5293,7 @@ from swarmscribe_leader.db.session import make_engine, make_sessionmaker
 from swarmscribe_leader.jobs import admin as job_admin
 from swarmscribe_protocol import SegmentsDocument
 
-DATABASE = "swarmscribe_follower_test"
+DATABASE = "swarmscribe_kit_follower"  # the kit refuses names without this prefix
 
 
 @pytest.fixture(scope="session")
@@ -5307,7 +5330,18 @@ class RealLeader:
         )
 
     def join_token(self) -> str:
-        return self.on_database(new_join_token)
+        """A pool token's plaintext, made with the leader's own function (the kit has no
+        pool-token helper)."""
+
+        async def make(sessionmaker):
+            async with sessionmaker() as session:
+                _row, plaintext = await create_pool_token(
+                    session, name="follower-tests", pool="default", actor="follower tests"
+                )
+                await session.commit()
+            return plaintext
+
+        return self.on_database(make)
 
 
 @pytest.fixture
@@ -5628,7 +5662,7 @@ The leader's `public_url` is the address it is served on: its own file links are
 - [ ] **Step 2: Run them**
 
 Run: `uv run pytest packages/follower/tests/test_real_leader.py -q`
-Expected: PASS (8 tests), in under a minute. They use the database `swarmscribe_follower_test`, on the same Postgres as the leader's tests (`SWARMSCRIBE_TEST_DATABASE_URL`, or the local `.pgdata` server).
+Expected: PASS (8 tests), in under a minute. They use the database `swarmscribe_kit_follower`, on the same Postgres as the leader's tests (`SWARMSCRIBE_TEST_DATABASE_URL`, or the local `.pgdata` server).
 
 If one fails, the follower and the leader disagree about the contract. Do not change `FakeLeader` to match the follower: find out which side the specs support (follower spec 5.1 and 12; leader spec 6), fix that side, and make `FakeLeader` behave as the real leader does.
 

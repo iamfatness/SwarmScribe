@@ -1,0 +1,19 @@
+A SwarmScribe follower pool: {{ .Values.replicaCount }} follower(s) for {{ .Values.leader.url }}
+
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "swarmscribe-follower.fullname" . }}
+
+A pod is Running and Ready as soon as the follower's threads are up. That it has loaded its
+model and joined the leader is in its log (`registered`) and in the leader's follower list.
+
+A pod that keeps restarting says why in the last line of its log:
+  exit 2: a setting is wrong
+  exit 3: no usable GPU, or the model is not in the image
+  exit 4: the pool token was refused, or the follower was revoked
+
+A drained follower stays Running and takes no work; delete the pod to replace it.
+{{- if .Values.networkPolicy.enabled }}
+
+A NetworkPolicy limits what the pods can reach and who can reach /metrics. It needs a
+network plugin that enforces NetworkPolicy; check that yours does.
+{{- end }}

@@ -1,0 +1,7 @@
+apiVersion: v2
+name: swarmscribe-follower
+description: SwarmScribe followers - one pool of workers that transcribe recordings for a leader
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"

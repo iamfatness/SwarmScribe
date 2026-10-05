@@ -76,3 +76,26 @@ test("an answer that arrives after Escape closes nothing else", async ({ page })
   await expect(second).toBeVisible();
   await expect(second.getByRole("heading")).toHaveText(secondTitle ?? "");
 });
+
+for (const height of [600, 800, 900]) {
+  test(`a refused form shows its title, the first field in error and its message: window ${height}px tall`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height });
+    await signIn(page, "admin", "/leaders/eu-1/locations");
+    await page.getByRole("button", { name: "Add location" }).click();
+    const dialog = page.getByRole("dialog", { name: /^Add a location/ });
+    await expect(dialog).toBeVisible();
+    // The submit button is at the bottom of a form taller than a short window.
+    await dialog.getByRole("button", { name: "Add location" }).click();
+    const message = dialog.getByRole("alert").first();
+    await expect(message).toBeVisible();
+    const field = dialog.locator("[aria-invalid=true]").first();
+    await expect(field).toBeFocused();
+    await expect(field).toBeInViewport({ ratio: 1 });
+    await expect(message).toBeInViewport({ ratio: 1 });
+    // Its label is not cut off at the dialog's top edge, and the title is still in view.
+    await expect(field.locator("xpath=ancestor::label")).toBeInViewport({ ratio: 1 });
+    await expect(dialog.getByRole("heading", { level: 2 }).first()).toBeInViewport({ ratio: 1 });
+  });
+}

@@ -63,7 +63,7 @@ const COPY: Record<string, Copy> = {
   // The console's own session and requests.
   unauthenticated: { title: "You are signed out. Sign in again." },
   csrf_failed: { title: "This page is out of date. Reload it, then try again." },
-  forbidden: { title: "Your role does not allow this." },
+  forbidden: { title: "Your role does not allow this.", retryable: false },
   actor_not_representable: {
     title: "The leader cannot be told who you are, so the console will not act for you.",
   },

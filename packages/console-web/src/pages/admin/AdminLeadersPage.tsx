@@ -144,11 +144,11 @@ function DialogButtons({
 }) {
   return (
     <div className="dialog-buttons">
-      <button type="submit" className="button button-primary" aria-disabled={busy || undefined}>
-        {submitLabel}
-      </button>
       <button type="button" className="button" onClick={onCancel}>
         Cancel
+      </button>
+      <button type="submit" className="button button-primary" aria-disabled={busy || undefined}>
+        {submitLabel}
       </button>
     </div>
   );

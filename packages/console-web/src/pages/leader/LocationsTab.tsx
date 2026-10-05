@@ -2,6 +2,7 @@ import { useId, useRef, useState, type FormEvent } from "react";
 import { ApiError, api, leaderPath } from "../../api/client";
 import type { ChannelMode, LocationOut, RequiredDevice } from "../../api/types";
 import { useAction } from "../../app/useAction";
+import { revealField } from "../../app/revealField";
 import { useDialogAction } from "../../app/useDialogAction";
 import { ActionButton } from "../../components/ActionButton";
 import { BreakPath } from "../../components/BreakPath";
@@ -111,7 +112,7 @@ function AddLocationDialog({
     const first = FIELD_ORDER.find((field) => found[field] !== undefined);
     if (first !== undefined) {
       const control = formRef.current?.elements.namedItem(first);
-      if (control instanceof HTMLElement) control.focus();
+      if (control instanceof HTMLElement) revealField(control);
       return;
     }
     const body = locationBody(form);

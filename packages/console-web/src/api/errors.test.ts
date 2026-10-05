@@ -71,6 +71,8 @@ describe("describeError", () => {
   it("offers no retry for a switched-off leader: asking again cannot work", () => {
     expect(describeError(new ApiError(409, "leader_disabled", "x")).retryable).toBe(false);
     expect(describeError(new ApiError(503, "leader_unreachable", "x")).retryable).toBe(true);
+    // Nor for a refusal for want of a role: the same request gets the same answer.
+    expect(describeError(new ApiError(403, "forbidden", "this needs the admin role")).retryable).toBe(false);
   });
 
   it("sends a person whose leader is gone back to the fleet", () => {

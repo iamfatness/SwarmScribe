@@ -10,12 +10,21 @@
   background: var(--panel);
 }
 
+/* Below about 740px (a phone, or a laptop zoomed to 200%) a table is wider than its region and
+   scrolls sideways inside it. The region then shows a soft edge on the side that has more,
+   which goes when that side is reached: the two covers move with the table and hide the edge
+   where there is nothing further. */
 .table-scroll {
   max-width: 100%;
   overflow-x: auto;
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
-  background: var(--panel);
+  background:
+    linear-gradient(to right, var(--panel) 30%, transparent) left / 2.5rem 100% no-repeat local,
+    linear-gradient(to left, var(--panel) 30%, transparent) right / 2.5rem 100% no-repeat local,
+    linear-gradient(to right, var(--edge), transparent) left / 1rem 100% no-repeat scroll,
+    linear-gradient(to left, var(--edge), transparent) right / 1rem 100% no-repeat scroll,
+    var(--panel);
 }
 
 table {

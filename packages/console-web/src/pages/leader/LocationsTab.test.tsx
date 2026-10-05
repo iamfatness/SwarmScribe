@@ -6,7 +6,7 @@ import { fail, reply } from "../../test/fetchMock";
 import { leader } from "../../test/fixtures";
 import { renderApp } from "../../test/renderApp";
 import { EMPTY_FORM, validateLocation } from "./locationForm";
-import { locationBody } from "./LocationsTab";
+import { channels, deviceText, locationBody } from "./LocationsTab";
 
 const LOCATION: LocationOut = {
   id: "l1",
@@ -135,6 +135,50 @@ describe("location form rules", () => {
 });
 
 describe("locations tab", () => {
+  it("says channels, device and state in the console's words", async () => {
+    expect(channels({ channel_mode: "mono", channel_labels: ["Left", "Right"] })).toBe("Mono");
+    expect(channels({ channel_mode: "stereo_split", channel_labels: ["Agent", "Caller"] })).toBe(
+      "Stereo, one speaker per side: Agent, Caller",
+    );
+    expect(channels({ channel_mode: "auto", channel_labels: ["Left", "Right"] })).toBe(
+      "Automatic: Left, Right",
+    );
+    expect(channels({ channel_mode: "quad", channel_labels: ["A", "B"] })).toBe("quad: A, B");
+    expect(deviceText("any")).toBe("Any device");
+    expect(deviceText("cuda")).toBe("GPU (CUDA) only");
+    expect(deviceText("cpu")).toBe("CPU only");
+    expect(deviceText("tpu")).toBe("tpu");
+    renderApp("/leaders/eu-1/locations").on(
+      LOCATIONS,
+      reply(200, [
+        { ...LOCATION, input_prefix: "incoming/", required_device: "cuda", scan_requested: true },
+        DISABLED,
+      ]),
+    );
+    const region = await screen.findByRole("region", { name: "Location list" });
+    expect(
+      within(region)
+        .getAllByRole("columnheader")
+        .map((th) => th.textContent),
+    ).toEqual(["Location", "Folder", "Pool", "Scanning", "Last scan", "Actions"]);
+    const intake = within(region).getByRole("row", { name: /^intake/ });
+    expect(
+      within(intake)
+        .getAllByRole("cell")
+        .slice(0, 4)
+        .map((td) => td.textContent),
+    ).toEqual([
+      "/srv/intakeLooks in incoming/Mono",
+      "defaultGPU (CUDA) only",
+      "OnEvery 15 min",
+      "Not yetA scan is asked forthe root folder is not readable",
+    ]);
+    const archive = within(region).getByRole("row", { name: /^archive/ });
+    expect(within(archive).getAllByRole("cell")[1]).toHaveTextContent("defaultAny device");
+    expect(within(archive).getAllByRole("cell")[2]).toHaveTextContent("Switched offEvery 15 min");
+    expect(within(archive).getByRole("button", { name: "Switch on archive" })).toHaveTextContent(/^Switch on$/);
+  });
+
   it("requests a scan, and asks before disabling", async () => {
     const mock = renderApp("/leaders/eu-1/locations", { fleet: [leader({ role: "admin" })] })
       .on(LOCATIONS, reply(200, [LOCATION]))
@@ -148,15 +192,15 @@ describe("locations tab", () => {
       );
     expect(await screen.findByText("the root folder is not readable")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Scan now intake" }));
-    expect(await screen.findByText("A scan of intake is requested.")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Disable intake" }));
-    const dialog = screen.getByRole("alertdialog", { name: "Disable intake?" });
+    expect(await screen.findByText("A scan of intake is asked for.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Switch off intake" }));
+    const dialog = screen.getByRole("alertdialog", { name: "Switch off intake?" });
     expect(mock.callsTo("POST /api/leaders/eu-1/locations/intake/disable")).toHaveLength(0);
-    await userEvent.click(within(dialog).getByRole("button", { name: "Disable location" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Switch it off" }));
     await waitFor(() =>
       expect(mock.callsTo("POST /api/leaders/eu-1/locations/intake/disable")).toHaveLength(1),
     );
-    expect(await screen.findByText("intake is disabled.")).toBeInTheDocument();
+    expect(await screen.findByText("intake is switched off.")).toBeInTheDocument();
   });
 
   it("enables a disabled location and offers no scan for it", async () => {
@@ -166,8 +210,8 @@ describe("locations tab", () => {
         "POST /api/leaders/eu-1/locations/archive/enable",
         reply(200, { ...DISABLED, enabled: true }),
       );
-    await userEvent.click(await screen.findByRole("button", { name: "Enable archive" }));
-    expect(await screen.findByText("archive is enabled.")).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("button", { name: "Switch on archive" }));
+    expect(await screen.findByText("archive is switched on.")).toBeInTheDocument();
     expect(mock.callsTo("POST /api/leaders/eu-1/locations/archive/enable")).toHaveLength(1);
     expect(screen.queryByRole("button", { name: "Scan now archive" })).not.toBeInTheDocument();
   });
@@ -177,7 +221,7 @@ describe("locations tab", () => {
       LOCATIONS,
       reply(200, [LOCATION]),
     );
-    expect(await screen.findByRole("button", { name: "Disable intake" })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "Switch off intake" })).toBeDisabled();
     const add = screen.getByRole("button", { name: "Add location" });
     expect(add).toBeDisabled();
     expect(add).toHaveAccessibleDescription("needs admin");
@@ -193,7 +237,7 @@ describe("locations tab", () => {
     );
     expect(await screen.findByRole("button", { name: "Scan now intake" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Add location" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Disable intake" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Switch off intake" })).toBeDisabled();
   });
 
   it("announces a refused scan where the person is", async () => {
@@ -213,9 +257,9 @@ describe("locations tab", () => {
     renderApp("/leaders/eu-1/locations", { fleet: [leader({ role: "admin" })] })
       .on(LOCATIONS, reply(200, [LOCATION]))
       .on("POST /api/leaders/eu-1/locations/intake/disable", fail(503, "leader_unreachable"));
-    await userEvent.click(await screen.findByRole("button", { name: "Disable intake" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Switch off intake" }));
     const dialog = screen.getByRole("alertdialog");
-    await userEvent.click(within(dialog).getByRole("button", { name: "Disable location" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Switch it off" }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
       "The leader is not answering right now.",
     );

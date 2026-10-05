@@ -1,4 +1,5 @@
 import type { ConsentReport } from "../../api/types";
+import { BreakPath } from "../../components/BreakPath";
 import { formatCount, formatTime } from "../../lib/format";
 import { ReadState, RefreshButton, shortId, useLeaderRead, type TabProps } from "./common";
 
@@ -8,8 +9,8 @@ export function ConsentTab({ leader }: TabProps) {
     <>
       <div className="section-head">
         <p className="muted">
-          Recordings by consent state, and transcripts made from recordings that are no longer
-          consented.
+          How many recordings are consented, and the transcripts that were made from a recording
+          no longer consented.
         </p>
         <RefreshButton read={read} />
       </div>
@@ -18,12 +19,12 @@ export function ConsentTab({ leader }: TabProps) {
           <>
             {report.truncated && (
               <p className="notice">
-                The report is cut short; the leader holds more flagged transcripts.
+                This list is cut short: the leader holds more transcripts to review than it sent.
               </p>
             )}
             <h3>By location</h3>
             {report.locations.length === 0 ? (
-              <p>This leader has no locations.</p>
+              <p>This leader has no locations yet.</p>
             ) : (
               <div
                 className="table-scroll"
@@ -70,8 +71,8 @@ export function ConsentTab({ leader }: TabProps) {
                     <tr>
                       <th scope="col">Job</th>
                       <th scope="col">Recording</th>
-                      <th scope="col">Completed</th>
-                      <th scope="col">Outputs</th>
+                      <th scope="col">Finished</th>
+                      <th scope="col">Files written</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -81,14 +82,17 @@ export function ConsentTab({ leader }: TabProps) {
                           <code>{shortId(row.job_id)}</code>
                         </th>
                         <td className="long">
-                          {row.location}: <span className="mono">{row.key}</span>
+                          {row.location}:{" "}
+                          <span className="mono">
+                            <BreakPath text={row.key} />
+                          </span>
                         </td>
-                        <td>{row.completed_at ? formatTime(row.completed_at) : "–"}</td>
+                        <td className="nowrap">{row.completed_at ? formatTime(row.completed_at) : "–"}</td>
                         <td className="long">
                           <ul className="cell-list">
                             {row.outputs.map((output) => (
                               <li key={output} className="mono">
-                                {row.output_location}: {output}
+                                {row.output_location}: <BreakPath text={output} />
                               </li>
                             ))}
                           </ul>
@@ -101,7 +105,7 @@ export function ConsentTab({ leader }: TabProps) {
             )}
             {report.truncated && (
               <p className="notice">
-                The report is cut short; the leader holds more flagged transcripts.
+                This list is cut short: the leader holds more transcripts to review than it sent.
               </p>
             )}
           </>

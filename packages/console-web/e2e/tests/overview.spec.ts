@@ -263,33 +263,59 @@ test("the longest leader name and a very long label never push the page sideways
   }
 });
 
-// Every table with row actions: its page and the name of its scrolling region.
-const ACTION_TABLES: [path: string, region: string][] = [
-  ["/leaders/eu-1/jobs", "Job list"],
-  ["/leaders/eu-1/pools", "Followers"],
-  ["/leaders/eu-1/locations", "Location list"],
-  ["/leaders/eu-1/tokens", "Join token list"],
-  ["/admin/leaders", "Registered leaders"],
-  ["/admin/grants", "Grants"],
-  ["/admin/admins", "Console administrators"],
+// Every table with row actions: its page, the name of its scrolling region, and whether it
+// has been folded to fit at every width (the leader's own tabs have; Administration and the
+// join tokens are folded in their own tasks and until then scroll at tablet width).
+const ACTION_TABLES: [path: string, region: string, fits: boolean][] = [
+  ["/leaders/eu-1/jobs", "Job list", true],
+  ["/leaders/eu-1/pools", "Followers", true],
+  ["/leaders/eu-1/locations", "Location list", true],
+  ["/leaders/eu-1/tokens", "Join token list", false],
+  ["/admin/leaders", "Registered leaders", false],
+  ["/admin/grants", "Grants", false],
+  ["/admin/admins", "Console administrators", false],
 ];
 
-// Until R2 folds the columns, a pinned Actions column would hide the text beneath it at rest
-// (Detail at 1280, Created at 768), so nothing is pinned: tables fit where they can and
-// scroll where they cannot, and Actions is reached by scrolling.
-test("every table fits at 1280 and 900, and scrolls at 768 with Actions reachable and no text covered", async ({
-  page,
-}) => {
+// Tables with no row actions, in the same pages or on their own.
+const PLAIN_TABLES: [path: string, region: string][] = [
+  ["/leaders/eu-1/pools", "Pools"],
+  ["/leaders/eu-1/consent", "Consent by location"],
+];
+
+/** How far a table's region scrolls sideways: more than 1 means a column does not fit. */
+async function settledOverflow(region: Locator): Promise<number> {
+  // Layout can still be moving just after a page opens (fonts, the first list arriving), so
+  // the width is read twice, a frame apart, until it stops changing. The limit is not eased.
+  let last = Number.NaN;
+  for (let tries = 0; tries < 20; tries += 1) {
+    const now = await region.evaluate(
+      (el) =>
+        new Promise<number>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve(el.scrollWidth - el.clientWidth)));
+        }),
+    );
+    if (now === last) return now;
+    last = now;
+  }
+  return last;
+}
+
+// A pinned Actions column would hide the text beneath it at rest, so a table either fits its
+// region (all of the leader's own tables, at every width) or, where it is still too wide
+// (Administration, join tokens, at tablet width), scrolls with nothing pinned over its text
+// and Actions reachable by scrolling.
+test("every table fits at 1280 and 900, and the leader's own tables at 768 too", async ({ page }) => {
   await signIn(page, "admin");
   for (const width of [1280, 900, 768]) {
     await page.setViewportSize({ width, height: 1000 });
-    for (const [path, name] of ACTION_TABLES) {
+    for (const [path, name, fits] of ACTION_TABLES) {
       await page.goto(path);
       const region = page.getByRole("region", { name, exact: true });
       await expect(region).toBeVisible();
+      await expect(page.getByText(/^Loading/)).toHaveCount(0);
       const where = `${path} at ${width}`;
-      const widest = await region.evaluate((el) => el.scrollWidth - el.clientWidth);
-      if (width >= 900) expect(widest, `${where} needs no sideways scroll`).toBeLessThanOrEqual(1);
+      const widest = await settledOverflow(region);
+      if (width >= 900 || fits) expect(widest, `${where} needs no sideways scroll`).toBeLessThanOrEqual(1);
 
       // No cell is pinned over its neighbours, so no column's text is hidden under another.
       const pinned = await region.evaluate(
@@ -318,26 +344,14 @@ test("every table fits at 1280 and 900, and scrolls at 768 with Actions reachabl
       });
       expect(onTop, where).toBe(true);
     }
+    for (const [path, name] of PLAIN_TABLES) {
+      await page.goto(path);
+      const region = page.getByRole("region", { name, exact: true });
+      await expect(region).toBeVisible();
+      expect(await settledOverflow(region), `${path} ${name} at ${width} needs no sideways scroll`).toBeLessThanOrEqual(1);
+    }
   }
 });
-
-/** How far a table's region scrolls sideways: more than 1 means a column does not fit. */
-async function settledOverflow(region: Locator): Promise<number> {
-  // Layout can still be moving just after a page opens (fonts, the first list arriving), so
-  // the width is read twice, a frame apart, until it stops changing. The limit is not eased.
-  let last = Number.NaN;
-  for (let tries = 0; tries < 20; tries += 1) {
-    const now = await region.evaluate(
-      (el) =>
-        new Promise<number>((resolve) => {
-          requestAnimationFrame(() => requestAnimationFrame(() => resolve(el.scrollWidth - el.clientWidth)));
-        }),
-    );
-    if (now === last) return now;
-    last = now;
-  }
-  return last;
-}
 
 /** Names in a path that wrap across lines although the whole name would fit in its table cell. */
 function splitPieces(page: Page, region: string): Promise<string[]> {

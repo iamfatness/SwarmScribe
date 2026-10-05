@@ -140,10 +140,15 @@ test("an operator drains a follower but cannot revoke one", async ({ page }) => 
     page.getByRole("region", { name: "Pools" }).getByRole("rowheader", { name: "gpu" }),
   ).toBeVisible();
   await page
-    .getByRole("button", { name: /^Drain follower / })
+    .getByRole("button", { name: /^Wind down follower / })
     .first()
     .click();
-  await expect(page.getByText(/^Follower \w{8} is draining\.$/)).toBeVisible();
+  await expect(
+    page.getByText(/^Follower \w{8} is winding down: it finishes what it has and takes nothing new\.$/),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Followers" }).getByRole("cell", { name: "Winding down" }),
+  ).toHaveCount(2);
   await expect(page.getByRole("button", { name: /^Revoke follower / }).first()).toBeDisabled();
 });
 
@@ -156,7 +161,7 @@ test("an admin revokes a follower and its leased job goes back to the queue", as
     .first();
   await row.getByRole("button", { name: /^Revoke follower / }).click();
   await page.getByRole("alertdialog").getByRole("button", { name: "Revoke follower" }).click();
-  await expect(page.getByText(/is revoked; 1 leased jobs went back to the queue\./)).toBeVisible();
+  await expect(page.getByText(/is revoked\. 1 job went back to waiting\./)).toBeVisible();
 });
 
 test("an admin adds, disables, enables and scans locations", async ({ page }) => {
@@ -171,25 +176,30 @@ test("an admin adds, disables, enables and scans locations", async ({ page }) =>
   await dialog.getByRole("textbox", { name: "Right channel label" }).fill("Caller");
   await dialog.getByRole("button", { name: "Add location" }).click();
   await expect(page.getByText("Location calls is added.")).toBeVisible();
-  await expect(page.getByRole("row", { name: /calls/ })).toContainText("stereo_split (Agent, Caller)");
+  await expect(page.getByRole("row", { name: /^calls/ })).toContainText(
+    "Stereo, one speaker per side: Agent, Caller",
+  );
 
-  await page.getByRole("button", { name: "Disable archive" }).click();
-  await page.getByRole("alertdialog").getByRole("button", { name: "Disable location" }).click();
-  await expect(page.getByText("archive is disabled.")).toBeVisible();
-  await page.getByRole("button", { name: "Enable archive" }).click();
-  await expect(page.getByText("archive is enabled.")).toBeVisible();
+  await page.getByRole("button", { name: "Switch off archive" }).click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "Switch it off" }).click();
+  await expect(page.getByText("archive is switched off.")).toBeVisible();
+  await expect(page.getByRole("row", { name: /^archive/ }).getByRole("cell").nth(2)).toHaveText(
+    "Switched offEvery 15 min",
+  );
+  await page.getByRole("button", { name: "Switch on archive" }).click();
+  await expect(page.getByText("archive is switched on.")).toBeVisible();
   await page.getByRole("button", { name: "Scan now intake" }).click();
-  await expect(page.getByText("A scan of intake is requested.")).toBeVisible();
-  await expect(page.getByRole("row", { name: /intake/ })).toContainText("Scan requested");
+  await expect(page.getByText("A scan of intake is asked for.")).toBeVisible();
+  await expect(page.getByRole("row", { name: /^intake/ })).toContainText("A scan is asked for");
 });
 
 test("a leader's own refusal is shown and focus stays in the dialog: us-1 caps the console at operator", async ({
   page,
 }) => {
   await signIn(page, "admin", "/leaders/us-1/locations");
-  await page.getByRole("button", { name: "Disable intake" }).click();
+  await page.getByRole("button", { name: "Switch off intake" }).click();
   const dialog = page.getByRole("alertdialog");
-  const confirm = dialog.getByRole("button", { name: "Disable location" });
+  const confirm = dialog.getByRole("button", { name: "Switch it off" });
   await confirm.click();
   await expect(dialog.getByRole("alert")).toContainText("Your role does not allow this.");
   await expect(dialog.getByRole("alert")).toContainText("this needs the admin role");

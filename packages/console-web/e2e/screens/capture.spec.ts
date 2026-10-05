@@ -146,6 +146,16 @@ for (const theme of THEMES) {
       await page.goto("/leaders/us-1/jobs");
       await expect(page.getByRole("alert").first()).toBeVisible();
       await shot("leader-down");
+      const down: [name: string, path: string][] = [
+        ["leader-down-pools", "/leaders/us-1/pools"],
+        ["leader-down-locations", "/leaders/us-1/locations"],
+        ["leader-down-consent", "/leaders/us-1/consent"],
+      ];
+      for (const [name, path] of down) {
+        await page.goto(path);
+        await expect(page.getByRole("alert").first()).toBeVisible();
+        await shot(name);
+      }
 
       // The fleet in its other states. Each answer is the real one, changed on the way.
       await setLeaderMode(request, "us-1", "ok");

@@ -161,8 +161,14 @@ for (const theme of THEMES) {
       await expect(page.getByRole("dialog").getByRole("alert").first()).toBeVisible();
       await expectAccessible(page, `add location dialog with errors (${theme})`);
       await page.keyboard.press("Escape");
-      await page.getByRole("button", { name: "Disable intake" }).click();
-      await expectAccessible(page, `disable location confirm dialog (${theme})`);
+      await page.getByRole("button", { name: "Switch off intake" }).click();
+      await expectAccessible(page, `switch off location confirm dialog (${theme})`);
+    });
+
+    test("administration's refusal of a viewer has no accessibility violations", async ({ page }) => {
+      await signIn(page, "viewer", "/admin/leaders");
+      await expect(page.getByText(/Console administration needs a console administrator/)).toBeVisible();
+      await expectAccessible(page, `administration as a viewer (${theme})`);
     });
 
     test("the administration dialogs have no accessibility violations", async ({ page }) => {

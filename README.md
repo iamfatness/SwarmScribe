@@ -517,7 +517,7 @@ credential at every later start.) What each kind of mount needs:
 | a folder of a Linux host (`-v /srv/follower:...`) | `sudo chown 10001:10001 /srv/follower && sudo chmod 700 /srv/follower` before the first start |
 | a `tmpfs` | its owner and mode said: `--tmpfs /var/lib/swarmscribe-follower:uid=10001,gid=10001,mode=0700`. A plain tmpfs belongs to root and is writable by all |
 | a folder of a Windows or macOS host under Docker Desktop (`-v C:\follower:...`) | not usable: inside the container it is seen as root's and writable by all (measured). Use a named volume |
-| a Kubernetes `emptyDir` | it is root's and mode `0777` by default, and `fsGroup` changes its group, not its owner: refused. Until the chart (F3) arrives, give the folder to the follower in an init container that runs as root with the same volume mounted (`chown 10001:10001 /state && chmod 700 /state`); this has not been run yet, the chart will do it and test it |
+| a Kubernetes `emptyDir` | it is root's and mode `0777` by default, and `fsGroup` changes its group, not its owner: refused as the state folder itself. Point `SWARMSCRIBE_FOLLOWER_STATE_DIR` at a folder inside the mount (`/var/lib/swarmscribe-follower/state`): the follower creates it as its own, `0700`. Not yet run on a cluster; the chart (F3) will do this |
 
 The follower never changes a folder that is not its own; one of its own that is looser than
 `0700` it tightens itself.

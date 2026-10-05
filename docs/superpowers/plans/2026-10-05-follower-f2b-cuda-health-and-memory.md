@@ -10,7 +10,20 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-04-follower-design.md` (decisions D15, D16, D18, D22; sections 4.1, 5.2, 5.4, 5.7, 8.1, 9, 10 and ruling R5), with `docs/superpowers/plans/2026-10-04-follower-f1-followups.md` (section "F2").
 
-**This plan is the second of two.** It needs F2a (`2026-10-05-follower-f2a-cpu-image-and-compose.md`) merged: `docker/follower.Dockerfile` with its stages `manifests`, `deps-cpu`, `build-cpu`, `models`, `runtime`, `cpu`; `docker/check-follower-image.sh <image> <cpu|cuda> [model]`; `e2e/follower-compose/` with `Target`, `CPU` and `target` in its driver; `doctor --no-leader`.
+**This plan is the second of two.** It needs F2a (`2026-10-05-follower-f2a-cpu-image-and-compose.md`) merged, with its final fix wave (see "Adjustments after F2a's final review" below): `docker/follower.Dockerfile` with its stages `manifests`, `deps-cpu`, `build-cpu`, `models`, `runtime`, `cpu`; `docker/check-follower-image.sh <image> <cpu|cuda> [model]`; `e2e/follower-compose/` with `Target`, `CPU` and `target` in its driver; `doctor --no-leader`.
+
+## Adjustments after F2a's final review (2026-10-05)
+
+F2a's final review (`.superpowers/sdd/2026-10-05-follower-f2a-cpu-image-and-compose/final-review.md`) and its fix wave changed what this plan builds on. The steps below are already rewritten for it; this list says what changed and why, so that nobody "corrects" them back.
+
+1. **The Dockerfile's `ENV` block is one setting per line and ends with the two `HF_HUB_*` lines** (F2a's M10). Task 4 step 1 adds the listener's address after the last of them. `packages/follower/tests/test_image_files.py` fails a line that holds two settings.
+2. **Task 7 replaces README "Follower image" wholesale, so its text carries what F2a's fix wave added there**: the init, the table of what each kind of state-folder mount needs, the engine command with `--model` and `--compute-type`, `MODELS` without spaces, `--security-opt no-new-privileges`, the token file. F2a's memory warning and "no `HEALTHCHECK` yet" are replaced by this plan's own sections, because this plan builds both. It also settles M7's restart count: `--restart on-failure:5` **(owner)**.
+3. **An init is PID 1**: `ENTRYPOINT ["/usr/bin/tini", "--", "swarmscribe-follower"]`, and the command starts in `swarmscribe_follower/entry.py` (`[project.scripts]` names `entry:run`), which installs the stop-signal handlers before anything is imported. `command_run` takes `signals` and ends with `agent.run_supervised(signals=signals)`. The check script stops a container the moment it starts, nine times (`"$name-early"`), and expects exit 0 or 143, never 137. Task 4's edits of the check script are anchored on the container named `"$name"`, after that loop, and must keep the loop, the PID 1 check, `docker stop --time 8` and `< 3 s`. The `HEALTHCHECK`'s `python -c` child every 30 s is reaped by the init.
+4. **The state folder's trust check runs before registering** (`CredentialStore.check_folder`, called by `Agent.prepare`, `join` and `doctor`): done in F2a's fix wave, nothing to do here. F3's chart must make the `emptyDir` pass it (a 0700 subfolder that the follower creates, as the F1 follow-ups say).
+5. **The check script checks the labels** (title, source, description, and `org.opencontainers.image.version` against the installed package) for both targets: done. The `cuda` target inherits them from `runtime`; do not set labels again in the `cuda` stage.
+6. **`MODELS` is read one way**: names separated by commas, no spaces, no empty item, passed to the fetcher after `--`: done. `MODELS=large-v3` in this plan already has that form.
+7. **Test counts.** `packages/follower/tests/test_compose_driver.py` has 24 test items after F2a's fix wave (it had 15 when this plan was written). The expected counts below are 24 and 25. If they differ, count with `uv run pytest packages/follower/tests/test_compose_driver.py --collect-only -q` and go by "one more than before, none failing", not by the number.
+8. **Free disk space before every `cuda` build.** F2a's final review filled C: on the development machine (1.2 GB free): Docker's data disk could not grow, took write errors, and the engine stopped answering. The `cuda` image is 2.5 GB, with `large-v3` baked in 8.5 GB, and a build needs as much again for its cache. Tasks 5 and 6 start with a check of the free space and do not build under 30 GB free. Image sizes this plan expects were measured before the init was added: expect them about 1 MB larger.
 
 ## Global Constraints
 
@@ -1024,7 +1037,7 @@ def test_run_listens_before_the_model_is_loaded_and_stops_listening_at_the_end(
         ("SWARMSCRIBE_FOLLOWER_HEALTH_ADDR", "127.0.0.1:9108"),
     ):
         monkeypatch.setenv(name, value)
-    code = cli.command_run(Settings(), lambda settings: make_agent(tmp_path, leader, engine))
+    code = cli.command_run(Settings(), lambda settings: make_agent(tmp_path, leader, engine))  # `signals` is optional
     assert code == 0
     assert events == [("made", ("127.0.0.1", 9108), True, True), ("start", 0), ("close", 1)]
 
@@ -1468,11 +1481,11 @@ from .health import HealthServer
 from .leader import LeaderClient, Refused, Transient
 ```
 
-**2.** Replace
+**2.** Replace (the last two lines of `command_run`; the check of `signals.count` above them stays: a stop that arrived during the imports must end `run` before a port is opened)
 
 ```python
     agent = build(settings)
-    return agent.run_supervised()
+    return agent.run_supervised(signals=signals)
 ```
 
 with
@@ -1488,7 +1501,7 @@ with
         )
         listener.start()
     try:
-        return agent.run_supervised()
+        return agent.run_supervised(signals=signals)
     finally:
         if listener is not None:
             listener.close()
@@ -2174,16 +2187,18 @@ git commit -m "feat(follower): refuse a recording that cannot fit in memory, bef
 
 In `docker/follower.Dockerfile`, two changes.
 
-**1.** Replace
+**1.** The `ENV` block is one setting per line and ends with the two `HF_HUB_*` lines (the engine CLI in the image reads them; keep them and the comment under them). Add the listener's address as the new last line. Replace
 
 ```dockerfile
-    SWARMSCRIBE_FOLLOWER_OFFLINE=${BAKED:-0}
+    HF_HUB_CACHE=/models \
+    HF_HUB_OFFLINE=${BAKED:-0}
 ```
 
 with
 
 ```dockerfile
-    SWARMSCRIBE_FOLLOWER_OFFLINE=${BAKED:-0} \
+    HF_HUB_CACHE=/models \
+    HF_HUB_OFFLINE=${BAKED:-0} \
     SWARMSCRIBE_FOLLOWER_HEALTH_ADDR=127.0.0.1:9108
 ```
 
@@ -2193,19 +2208,20 @@ with
 # No HEALTHCHECK yet: the follower listens on no port. Plan F2b adds the listener and it.
 ```
 
-with
+(leave the comment about `tini` under it, `STOPSIGNAL` and the `ENTRYPOINT` as they are) with
 
 ```dockerfile
 # /healthz says the follower's threads are alive; it answers while the model loads and
 # while the leader is away. Loopback only: nothing outside the container can reach it. A
 # follower started with the listener turned off (the variable set to nothing) is not probed.
+# The probe's `python -c` child is reaped by the init every time.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD ["python", "-c", "import os, sys, urllib.request; a = os.environ.get('SWARMSCRIBE_FOLLOWER_HEALTH_ADDR', ''); sys.exit(0 if not a or urllib.request.urlopen('http://' + a + '/healthz', timeout=3).status == 200 else 1)"]
 ```
 
 - [ ] **Step 2: Have the check script look**
 
-In `docker/check-follower-image.sh`, three changes.
+In `docker/check-follower-image.sh`, three changes. The script already checks the labels, the init and the immediate stop (F2a's fix wave): keep all of it. Two of the anchors below occur twice in the script, once in the immediate-stop loop (the container `"$name-early"`) and once after it (the container `"$name"`); change the SECOND of each, as the context lines show. The immediate-stop loop stays without a health interval: its containers are stopped before a probe could run.
 
 **1.** Replace
 
@@ -2230,25 +2246,29 @@ docker inspect --format '{{json .Config.Healthcheck}}' "$image" | grep -q '/heal
 **2.** Replace
 
 ```bash
+    docker run -d --name "$name" "${locked[@]}" "${gpu[@]}" "${leader[@]}" \
       -e SWARMSCRIBE_JOIN_TOKEN=not-a-token "$image" >/dev/null
 ```
 
 with
 
 ```bash
+    docker run -d --name "$name" "${locked[@]}" "${gpu[@]}" "${leader[@]}" \
       --health-interval 2s --health-start-period 1s \
       -e SWARMSCRIBE_JOIN_TOKEN=not-a-token "$image" >/dev/null
 ```
 
-**3.** Replace
+**3.** Replace (four spaces of indentation: the line after the check that the follower is the child of PID 1, not the six-space one inside the loop)
 
 ```bash
+      || fail "the follower is not the child of PID 1: $children"
     begun="$(date +%s)"
 ```
 
 with
 
 ```bash
+      || fail "the follower is not the child of PID 1: $children"
 
     # Healthy with no leader in reach: /healthz is about the follower's own threads.
     health=""
@@ -2284,7 +2304,7 @@ ok: swarmscribe-follower:e2e is a cpu follower with tiny.en baked in (936 MB)
 ok: swarmscribe-follower:cpu is a cpu follower (787 MB)
 ```
 
-The first now also waits, with `--network none`, until Docker calls the container `healthy`: a follower that cannot reach its leader is alive, and says so.
+The sizes were measured before the init was added to the image: about 1 MB more is right. The first now also waits, with `--network none`, until Docker calls the container `healthy`: a follower that cannot reach its leader is alive, and says so.
 
 - [ ] **Step 4: Write the failing test of the Compose limit**
 
@@ -2306,7 +2326,7 @@ def test_the_memory_limit_admits_the_long_recordings_and_refuses_the_hour(loaded
 ```
 
 Run: `uv run pytest packages/follower/tests/test_compose_driver.py -v`
-Expected: the new test fails with `KeyError: 'SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB'`; the other 15 pass.
+Expected: the new test fails with `KeyError: 'SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB'`; the other 24 pass.
 
 - [ ] **Step 5: Give the Compose followers a memory limit and a faster probe**
 
@@ -2561,7 +2581,7 @@ Why the hour is silence at 8 kHz and 8 bits: the guard reads the length from the
 - [ ] **Step 7: Run the driver's tests, the whole suite, and the scenario**
 
 Run: `uv run pytest packages/follower/tests/test_compose_driver.py -v`
-Expected: 16 passed.
+Expected: 25 passed.
 
 Run: `uv run ruff check . && uv run pytest`
 Expected: `All checks passed!` and no failure.
@@ -2605,7 +2625,7 @@ In `packages/follower/pyproject.toml`, replace
 
 ```toml
 [project.scripts]
-swarmscribe-follower = "swarmscribe_follower.main:run"
+swarmscribe-follower = "swarmscribe_follower.entry:run"
 ```
 
 with
@@ -2618,7 +2638,7 @@ cuda = [
 ]
 
 [project.scripts]
-swarmscribe-follower = "swarmscribe_follower.main:run"
+swarmscribe-follower = "swarmscribe_follower.entry:run"
 ```
 
 Run: `uv lock`
@@ -2708,6 +2728,15 @@ ENV LD_LIBRARY_PATH=/app/.venv/lib/python3.12/site-packages/nvidia/cublas/lib \
 `cpu` stays last: a `docker build` without `--target` must never produce the GPU image by accident.
 
 - [ ] **Step 3: Build the `cuda` image and check it (no GPU needed)**
+
+First, free disk space. The image is 2.5 GB and the build needs about as much again; Docker Desktop's data disk lives on C: and breaks when C: fills (it did, in F2a's final review).
+
+```bash
+df -h /c | tail -1          # Linux: df -h /var/lib/docker
+docker system df
+```
+
+Expected: at least 30 GB available. If there is less, stop and free space (your own images and build cache only: `docker image rm` by name, `docker builder prune`; never `docker system prune`, never an image you did not make). Do not start the build under that.
 
 ```bash
 docker build -t swarmscribe-follower:cuda --target cuda -f docker/follower.Dockerfile .
@@ -2856,9 +2885,11 @@ with
 ```
 
 Run: `uv run ruff check . && uv run pytest packages/follower/tests/test_compose_driver.py -q`
-Expected: `All checks passed!` and 16 passed.
+Expected: `All checks passed!` and 25 passed.
 
 - [ ] **Step 3: Build the `cuda` image with large-v3 baked in, and check it on the GPU**
+
+Free disk space first, as in Task 5 step 3: this image is 8.5 GB, on top of the 2.5 GB one. `df -h /c | tail -1` must show at least 30 GB available; do not build under that.
 
 ```bash
 docker build --build-arg MODELS=large-v3 -t swarmscribe-follower:cuda-large-v3 --target cuda -f docker/follower.Dockerfile .
@@ -2871,7 +2902,7 @@ Expected: the build prints `baked large-v3: Systran/faster-whisper-large-v3@edaa
 ok: swarmscribe-follower:cuda-large-v3 is a cuda follower with large-v3 baked in (8484 MB)
 ```
 
-With `CHECK_GPU=1` it ran `doctor` on the GPU with no network (`device: cuda (NVIDIA GeForce RTX 4090, 24564 MiB)`, `model: large-v3 (float16) loaded and ran`) and stopped a follower as PID 1.
+With `CHECK_GPU=1` it ran `doctor` on the GPU with no network (`device: cuda (NVIDIA GeForce RTX 4090, 24564 MiB)`, `model: large-v3 (float16) loaded and ran`) stopped a container nine times in its first half second (exit 0 or 143, never 137; on a GPU a stop that lands in the load of `large-v3` may take as long as the load, which the script allows for a `cuda` target), and stopped a follower that was waiting for its leader (the child of the init, which is PID 1).
 
 - [ ] **Step 4: Run the scenario on the GPU**
 
@@ -3012,13 +3043,19 @@ docker build -t swarmscribe-follower:cpu  --target cpu  -f docker/follower.Docke
 docker build -t swarmscribe-follower:cuda --target cuda -f docker/follower.Dockerfile .
 ```
 
-**Run one.** The follower is the container's only process (`docker stop` reaches it
-directly: it exits `0` with the job in hand released, see "Stopping" above) and runs as user
-10001. Restart it on failure only: exit `0` (stopped, or drained) and exit `4` (revoked, or
-no valid token) are final.
+**Run one.** The follower runs as user 10001. PID 1 is a minimal init (`tini`, Debian's
+package) and the follower is its only child: `docker stop` reaches the follower through it,
+and the follower exits `0` with the job in hand released (see "Stopping" above). A stop in
+the first tens of milliseconds, before Python has started, ends the container with `143`:
+nothing had been started. No `--init` flag is needed, and a stop is never lost (a lost stop
+would end in a kill, `137`, when the stop window closes). Restart it on failure, a few
+times: exit `0` (stopped, or drained) is final for Docker, but Docker cannot tell the other
+codes apart, and without a count a revoked follower (exit `4`) or a misconfigured one
+(exit `2`) would be started again for ever.
 
 ```
-docker run -d --restart on-failure --read-only --cap-drop ALL --stop-timeout 930 \
+docker run -d --restart on-failure:5 --read-only --cap-drop ALL --stop-timeout 930 \
+  --security-opt no-new-privileges \
   -e SWARMSCRIBE_LEADER_URL=https://leader.example.org \
   -e SWARMSCRIBE_JOIN_TOKEN=<the token> \
   -e SWARMSCRIBE_FOLLOWER_SHUTDOWN_GRACE_SECONDS=900 \
@@ -3026,6 +3063,11 @@ docker run -d --restart on-failure --read-only --cap-drop ALL --stop-timeout 930
   -v swarmscribe-models:/models \
   swarmscribe-follower:cpu
 ```
+
+A token on the command line stays in the shell's history. To keep it out, put it in a file
+that user 10001 can read, mount it read-only and name it:
+`-v /path/to/join-token:/run/secrets/join-token:ro -e
+SWARMSCRIBE_JOIN_TOKEN_FILE=/run/secrets/join-token`.
 
 For a GPU machine: the `cuda` tag and `--gpus all`. The shorter line of the design
 (`docker run -e SWARMSCRIBE_LEADER_URL=... -e SWARMSCRIBE_JOIN_TOKEN=... swarmscribe-follower:cpu`)
@@ -3040,9 +3082,23 @@ It writes in three places and nowhere else, so the root filesystem can be read-o
 | `/scratch` | the recording being transcribed; emptied after every job and at every start | a declared volume |
 | `/models` | the model cache | a plain folder: mount a volume to keep downloads (with `--read-only` it is needed), or bake the models in |
 
-A state folder given as a `tmpfs` must be the follower's own: `--tmpfs
-/var/lib/swarmscribe-follower:uid=10001,gid=10001,mode=0700`. A plain tmpfs belongs to root
-and is writable by all, and the credential is refused there.
+**The state folder must be the follower's own.** The credential is kept only in a folder
+that belongs to the user the follower runs as (10001 in the image) and that nobody else can
+write to. The follower checks this before it registers: a folder that fails is refused at
+once with exit `2`, a message that names the folder, its owner and its mode, and no join
+token is used. `swarmscribe-follower doctor` reports the same on its `state folder` line.
+What each kind of mount needs:
+
+| The state folder is | What it needs |
+|---|---|
+| a named volume (`-v swarmscribe-follower:/var/lib/swarmscribe-follower`), or nothing at all | nothing: Docker gives a new volume the image's owner and mode (10001, `0700`) |
+| a folder of a Linux host (`-v /srv/follower:...`) | `sudo chown 10001:10001 /srv/follower && sudo chmod 700 /srv/follower` before the first start |
+| a `tmpfs` | its owner and mode said: `--tmpfs /var/lib/swarmscribe-follower:uid=10001,gid=10001,mode=0700`. A plain tmpfs belongs to root and is writable by all |
+| a folder of a Windows or macOS host under Docker Desktop (`-v C:\follower:...`) | not usable: inside the container it is seen as root's and writable by all (measured). Use a named volume |
+| a Kubernetes `emptyDir` | it is root's and mode `0777` by default, and `fsGroup` changes its group, not its owner: refused as the state folder itself. Point `SWARMSCRIBE_FOLLOWER_STATE_DIR` at a folder inside the mount (`/var/lib/swarmscribe-follower/state`): the follower creates it as its own, `0700`. The chart (F3) does this |
+
+The follower never changes a folder that is not its own; one of its own that is looser than
+`0700` it tightens itself.
 
 **GPU prerequisites.** An NVIDIA GPU with a driver new enough for CUDA 12, and a Docker that
 can hand it to a container: on Linux the NVIDIA Container Toolkit, on Windows Docker Desktop
@@ -3071,7 +3127,8 @@ docker build --build-arg MODELS=large-v3 -t swarmscribe-follower:cuda-large-v3 \
   --target cuda -f docker/follower.Dockerfile .
 ```
 
-`MODELS` is a comma-separated list. Each model is downloaded during the build from one
+`MODELS` is a list of names separated by commas, with no spaces (`tiny.en,large-v3`); a
+space or an empty item fails the build. Each model is downloaded during the build from one
 pinned commit and every file is checked against its SHA-256 in `docker/models.lock.json`;
 a file that differs fails the build. The first name becomes the start-up model
 (`SWARMSCRIBE_FOLLOWER_STARTUP_MODEL`), and the image is offline
@@ -3081,6 +3138,20 @@ for the device must therefore name a model the image holds (`swarmscribe-admin p
 set`). To allow a model that is not in the lock file yet, add the entry that
 `uv run python docker/fetch_models.py --pin <name>` prints. A baked image is its model
 larger: 3.1 GB for `large-v3`, 1.5 GB for `distil-large-v3`.
+
+The image also sets `HF_HUB_CACHE=/models` (and `HF_HUB_OFFLINE=1` when a model is baked),
+so the engine's own command in it, `swarmscribe-engine`, reads the same cache and stays
+offline. It does not know which model was baked: it asks for its device's default unless
+told, so name the baked model and its compute type:
+
+```
+docker run --rm --network none --entrypoint swarmscribe-engine \
+  -v "$PWD/recordings:/in:ro" -v "$PWD/out:/out" \
+  swarmscribe-follower:cpu-tiny.en /in/call.wav --out /out --model tiny.en --compute-type int8
+```
+
+(`out` must be writable by user 10001. Without `--model` an image that holds only `tiny.en`
+fails with `LocalEntryNotFoundError`.)
 
 **Health and metrics.** In the images the follower listens on `127.0.0.1:9108`, inside the
 container only, for the image's own `HEALTHCHECK`. `/healthz` answers 200 while the
@@ -3116,12 +3187,14 @@ reason, instead of being killed half-way three times, hours apart. Give the cont
 memory limit (`--memory 8g`) and the guard follows it.
 
 `bash docker/check-follower-image.sh <image> <cpu|cuda> [<baked model>]` checks an image
-without a leader: the user and the folders, that the leader and build tools are absent,
-that it starts read-only without capabilities, the listener and the `HEALTHCHECK`, for
-`cuda` that cuBLAS loads and that the image refuses to start without a GPU, and, for a
-baked image, that the model loads and runs with no network at all and that `docker stop`
-ends a follower that is still starting. `CHECK_GPU=1` also runs a baked `cuda` image on
-this machine's GPU.
+without a leader: its labels (title, source, description, and a version that is the
+installed follower's), the user and the folders, that the leader and build tools are absent,
+that an init is PID 1, that it starts read-only without capabilities, the listener and the
+`HEALTHCHECK`, for `cuda` that cuBLAS loads and that the image refuses to start without a
+GPU, and, for a baked image, that the model loads and runs with no network at all, that a
+container stopped the moment it starts ends with `0` or `143` and never `137`, and that
+`docker stop` ends a follower that is still starting. `CHECK_GPU=1` also runs a baked `cuda`
+image on this machine's GPU.
 
 **Known limits.**
 
@@ -3136,6 +3209,8 @@ this machine's GPU.
 - Where the platform does not say what a process holds (Windows, macOS), the memory guard
   counts the recording alone and not the loaded model.
 - The images are not published: build them, or push them to a registry of your own.
+- With `--init`, or in a pod that shares its process namespace, `tini` is not PID 1 and says
+  so in one warning line on stderr; it still forwards signals.
 
 ### Follower Compose test
 
@@ -3164,7 +3239,9 @@ docker compose -f e2e/follower-compose/docker-compose.yml --profile followers do
 ```
 
 It takes about two minutes and runs once per stack (it drains and revokes its followers): a
-second run stops at once and says to `down -v` first. The leader is plain `http` behind the
+second run stops at once and says to `down -v` first. A follower that exits before it has
+registered (an image built without `MODELS=tiny.en`, for one) stops the scenario at once,
+with the follower's exit code and what it said. The leader is plain `http` behind the
 proxy, as it is behind an ingress, so the followers set the development switch
 `SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1`. The driver adds the join token, the profile and the
 locations, and drains and revokes, with the leader's own functions against its database
@@ -3185,7 +3262,7 @@ docker compose -f e2e/follower-compose/docker-compose.yml -f e2e/follower-compos
 
 - [ ] **Step 3: Read it as a stranger would**
 
-Run each command block of "Follower images" that does not need a leader, exactly as written: the two `docker build` lines, `check-follower-image.sh` for both targets, and `docker run --rm swarmscribe-follower:cpu --help`. Expected: each works as the text beside it says. Fix the text, not the command, only if the text is what is wrong.
+Run each command block of "Follower images" that does not need a leader, exactly as written: the two `docker build` lines, `check-follower-image.sh` for both targets, `docker run --rm swarmscribe-follower:cpu --help`, and the `swarmscribe-engine` line against an image with `tiny.en` baked in (F2a's final review found that command wrong by running it). Do NOT run the `docker run -d` line with an unbaked image to the end: it downloads 1.5 GB into a volume, which is what filled the disk in F2a's final review; start it only with 30 GB free, and remove the container and its volumes afterwards. Expected: each works as the text beside it says. Fix the text, not the command, only if the text is what is wrong.
 
 - [ ] **Step 4: Amend the spec**
 
@@ -3204,8 +3281,10 @@ These are for the owner to approve with this plan's review; they change the spec
 - **Image sizes (8.1).** Without a model: `cpu` 0.6 GB, `cuda` 1.7 GB.
 - **Declared volumes (8.1).** The state folder and `/scratch` are both declared; `/models`
   is not (a volume there would copy a baked model on every start).
-- **Baked models (5.10).** `MODELS` is a comma-separated list; its first name is the
-  start-up model. Models come from Hugging Face at build time, each pinned to a commit and
+- **The init (8.1).** `tini` is PID 1 and the follower its child (already in 8.1, from
+  F2a's fix wave); the `HEALTHCHECK`'s children are reaped by it.
+- **Baked models (5.10).** `MODELS` is names separated by commas, with no spaces; its first
+  name is the start-up model. Models come from Hugging Face at build time, each pinned to a commit and
   to a SHA-256 per file in `docker/models.lock.json`.
 - **`doctor` (8.3).** `--no-leader` leaves the leader out; a `memory:` line says what the
   follower may use.

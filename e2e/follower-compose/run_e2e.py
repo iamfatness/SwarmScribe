@@ -255,9 +255,9 @@ def registrations(service: str) -> list[str]:
     return found
 
 
-# What a follower prints when its start-up model cannot be loaded (agent.py). An image built
-# without MODELS is not offline and tries a download the network forbids, so it may take a
-# while to say so; one built with another model says so at once and exits 3.
+# What a follower prints when its start-up model cannot be loaded (agent.py), before it exits
+# 3. An image built without MODELS, or with another model, does that at once here: the
+# followers' network has no route out to download one.
 MODEL_FAILURE = "cannot transcribe with its start-up model"
 EXIT_MEANS = {
     2: "its configuration or its state folder is refused",

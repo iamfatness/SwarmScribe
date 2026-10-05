@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Leader page, join token shown once</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+a{color:#f5b83d}a:hover{color:#ffd27a}
+</style>
+</helmet>
+<div style="min-height: 900px; box-sizing: border-box; display: flex; flex-wrap: wrap; background: #14110d; color: #f3ead9; font-family: 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', sans-serif; font-size: 15px; line-height: 1.5; position: relative">
+<aside style="flex: 1 1 220px; max-width: 248px; box-sizing: border-box; padding: 22px 18px; background: #1c1813; border-right: 1px solid rgba(243,234,217,0.14); display: flex; flex-direction: column; gap: 28px">
+  <a href="#fleet" style="display: inline-flex; align-items: center; gap: 10px; color: #f3ead9; text-decoration: none"><svg width="30" height="30" viewBox="0 0 64 64" aria-hidden="true"><path d="M32 4 56.25 18v28L32 60 7.75 46V18z" fill="#f5b83d" stroke="#f5b83d" stroke-width="4" stroke-linejoin="round"></path><path d="M32 51 21 30l4-14h14l4 14z" fill="#14110d" stroke="#14110d" stroke-width="2" stroke-linejoin="round"></path><path d="M32 51V33" stroke="#f5b83d" stroke-width="2.4" stroke-linecap="round"></path><circle cx="32" cy="30.5" r="3" fill="#f5b83d"></circle></svg><span style="font-size: 20px; font-weight: 700; letter-spacing: -0.02em">Swarm<em style="font-family: Georgia, 'Times New Roman', serif; font-weight: 400; color: #f5b83d">Scribe</em></span></a>
+  <nav aria-label="Console" style="display: flex; flex-direction: column; gap: 4px"><a href="#fleet" style="display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 12px; border-radius: 6px; text-decoration: none; color: #b5a993"><span style="width: 9px; height: 10px; background: #5c5243; clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%)"></span>Fleet</a><a href="#eu-1" aria-current="page" style="display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 12px 0 31px; border-radius: 6px; text-decoration: none; background: rgba(245,184,61,0.14); color: #f3ead9; font-weight: 600">eu-1</a><a href="#us-1" style="display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 12px 0 31px; border-radius: 6px; text-decoration: none; color: #b5a993">us-1</a><a href="#ap-1" style="display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 12px 0 31px; border-radius: 6px; text-decoration: none; color: #b5a993">ap-1<span style="margin-left: auto; font-size: 12px; color: #ff9d8f">no answer</span></a><div style="height: 12px"></div><a href="#administration" style="display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 12px; border-radius: 6px; text-decoration: none; color: #b5a993"><span style="width: 9px; height: 10px; background: #5c5243; clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%)"></span>Administration</a></nav>
+  <div style="margin-top: auto; padding-top: 16px; border-top: 1px solid rgba(243,234,217,0.14); font-size: 14px; color: #b5a993">
+    <div style="color: #f3ead9">mira@example.org</div>
+    <div>Admin on 2 leaders</div>
+    <button type="button" style="margin-top: 12px; min-height: 44px; width: 100%; background: transparent; color: #f3ead9; border: 1px solid rgba(243,234,217,0.3); border-radius: 6px; font: inherit; cursor: pointer">Sign out</button>
+  </div>
+</aside>
+<main style="flex: 999 1 560px; min-width: 0; box-sizing: border-box; padding: 30px 36px 56px; opacity: 0.35" aria-hidden="true">
+
+  <p style="margin: 0 0 6px; font-size: 14px; color: #b5a993"><a href="#fleet">Fleet</a> / eu-1</p>
+  <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px">
+    <div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 14px">
+      <h1 style="margin: 0; font-family: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif; font-weight: 400; font-size: 34px; line-height: 1.1; letter-spacing: -0.015em">eu-1</h1>
+      <span style="font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 12.5px; color: #b5a993">env=prod · region=eu</span>
+    </div>
+    <span style="display: inline-flex; align-items: center; gap: 8px; padding: 4px 10px; border: 1px solid rgba(245,184,61,0.5); border-radius: 14px; font-size: 13px; font-weight: 600"><span style="width: 9px; height: 10px; background: #f5b83d; clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%)"></span>Answering</span>
+  </div>
+  <p style="margin: 6px 0 0; color: #b5a993">You are an <strong style="color: #f3ead9; font-weight: 600">operator</strong> here. What needs an admin is shown, but switched off.</p>
+  <nav aria-label="eu-1" style="display: flex; flex-wrap: wrap; gap: 6px 26px; margin: 18px 0 24px; border-bottom: 1px solid rgba(243,234,217,0.14)"><a href="#Pools and followers" style="padding: 12px 2px; text-decoration: none; color: #b5a993; border-bottom: 2px solid transparent">Pools and followers</a><a href="#Jobs" style="padding: 12px 2px; text-decoration: none; color: #b5a993; border-bottom: 2px solid transparent">Jobs</a><a href="#Locations" style="padding: 12px 2px; text-decoration: none; color: #b5a993; border-bottom: 2px solid transparent">Locations</a><a href="#Join tokens" aria-current="page" style="padding: 12px 2px; text-decoration: none; color: #f3ead9; font-weight: 600; border-bottom: 2px solid #f5b83d">Join tokens</a><a href="#Consent report" style="padding: 12px 2px; text-decoration: none; color: #b5a993; border-bottom: 2px solid transparent">Consent report</a></nav>
+  <div style="background: #1c1813; border: 1px solid rgba(243,234,217,0.14); border-radius: 8px; padding: 18px 20px; color: #b5a993">Join tokens for eu-1</div>
+</main>
+<div role="dialog" aria-modal="true" aria-labelledby="tok-title" aria-describedby="tok-desc" style="position: absolute; left: 50%; top: 150px; transform: translateX(-50%); width: min(560px, 100% - 48px); box-sizing: border-box; padding: 28px 30px 26px; background: #f3ead9; color: #1c1712; border-radius: 6px; box-shadow: 0 40px 80px -30px rgba(0,0,0,0.9), 8px 8px 0 #f5b83d">
+  <h2 id="tok-title" style="margin: 0 0 8px; font-family: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif; font-weight: 400; font-size: 30px; line-height: 1.15">Here is the join token. It is shown once.</h2>
+  <p id="tok-desc" style="margin: 0 0 18px; color: #5c5243">Copy it now and give it to the machine that will join the <strong style="color: #1c1712">gpu</strong> pool. After you close this, nobody can read it again, including you.</p>
+  <label for="tok-value" style="display: block; margin-bottom: 6px; font-size: 14px; font-weight: 600">Join token</label>
+  <div style="display: flex; gap: 8px">
+    <input id="tok-value" type="text" readonly value="[THE TOKEN APPEARS HERE]" style="flex: 1 1 auto; min-width: 0; min-height: 48px; box-sizing: border-box; padding: 0 14px; background: #fffaf0; color: #1c1712; border: 2px solid #1c1712; border-radius: 4px; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 15px">
+    <button type="button" style="min-height: 44px; padding: 0 16px; border-radius: 6px; font: inherit; cursor: pointer; min-height: 48px; background: #14110d; color: #f3ead9; border: 0; font-weight: 600">Copy</button>
+  </div>
+  <p role="status" style="margin: 10px 0 0; font-size: 14px; color: #6b4300; font-weight: 600">Not copied yet.</p>
+  <dl style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 20px 0 0; padding-top: 16px; border-top: 1px solid rgba(28,23,18,0.16)">
+    <div><dt style="font-size: 13px; color: #5c5243">Pool</dt><dd style="margin: 0; font-weight: 600">gpu</dd></div>
+    <div><dt style="font-size: 13px; color: #5c5243">Can be used</dt><dd style="margin: 0; font-weight: 600">once</dd></div>
+    <div><dt style="font-size: 13px; color: #5c5243">Expires</dt><dd style="margin: 0; font-weight: 600">in 7 days</dd></div>
+  </dl>
+  <div style="display: flex; justify-content: flex-end; margin-top: 24px">
+    <button type="button" style="min-height: 44px; padding: 0 16px; border-radius: 6px; font: inherit; cursor: pointer; background: transparent; color: #1c1712; border: 1px solid #1c1712">I have stored it</button>
+  </div>
+</div></div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":900}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

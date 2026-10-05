@@ -25,11 +25,14 @@ driver 617.14. Built in a scratch folder from the `follower-f1` tree with this p
 
 ## The run of Task 6
 
-Run on 2026-10-05, on the same machine (Windows 11, Docker Desktop, RTX 4090), from the
-`follower-f2b` tree. Docker's data disk is on D: (1.4 TB free; C: had 93 GB free).
+Run on 2026-10-05. Recorded on the machine afterwards: Windows 10.0.26200.9457 (`cmd /c ver`),
+Docker Engine 29.8.1 (`docker version --format '{{.Server.Version}}'`), `NVIDIA GeForce RTX 4090`
+with driver 617.14 (`nvidia-smi --query-gpu=name,driver_version`; host `nvidia-smi` prints
+NVIDIA-SMI 617.14, KMD 617.14, CUDA 13.4). Docker's data disk is on D: (1.4 TB free; C: had
+93 GB free).
 
 - Step 1 (`nvidia-smi` in a container), this run: worked; the table names
-  `NVIDIA GeForce RTX 4090`, NVIDIA-SMI 615.78.02, driver (KMD) 617.14, CUDA 13.4.
+  `NVIDIA GeForce RTX 4090`, the container's `nvidia-smi` printed NVIDIA-SMI 615.78.02, KMD Version 617.14, CUDA UMD Version 13.4.
 - Step 3 (the check's last line), this run: the build took 1 min 56 s and printed
   `baked large-v3: Systran/faster-whisper-large-v3@edaa852ec7e1, 5 files, 3090 MB` (the
   download took 40 s); `CHECK_GPU=1 bash docker/check-follower-image.sh
@@ -38,6 +41,13 @@ Run on 2026-10-05, on the same machine (Windows 11, Docker Desktop, RTX 4090), f
 - Step 4 (the scenario's last line), this run: passed in 2 min 24 s. It printed
   `killed follower-1 mid-job` and `stopped follower-2 mid-job in 1.8 s`, then
   `passed (large-v3 on cuda): two followers registered in 9 s and shared six recordings; a killed follower's job was redone in 40 s under an 8 s lease; a stop mid-job took 1.8 s and counted no attempt; drain exited 0 and revoke exited 4, twice each`.
+- That the followers ran on the GPU: the image sets `SWARMSCRIBE_FOLLOWER_DEVICE=cuda` and
+  exits 3 without a GPU rather than falling back to the CPU; the scenario checks that each
+  follower registered as device `cuda` and that every transcript names large-v3 and `cuda`
+  (`run_e2e.py`); and the GPU `doctor` of this image, run after the scenario with
+  `--gpus all --read-only --cap-drop ALL --network none`, printed
+  `device: cuda (NVIDIA GeForce RTX 4090, 24564 MiB)` and
+  `model: large-v3 (float16) loaded and ran`. `nvidia-smi` was not watched during the run.
 
 ## What this does not prove
 

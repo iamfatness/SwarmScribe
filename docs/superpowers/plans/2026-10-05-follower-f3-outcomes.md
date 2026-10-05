@@ -52,37 +52,59 @@ this follower may use 3990 MiB`. The "hour" here is the 5-second fixture 720 tim
 
 ## The run of Task 2 (plan F3b)
 
-Run on 2026-10-05. Machine and versions: Windows `Microsoft Windows [Version 10.0.26200.9457]`;
-Docker Engine `29.8.1`; `kind v0.30.0 go1.24.6 windows/amd64` (node image Kubernetes `v1.34.0`,
-containerd `2.1.3`); Helm `v4.3.0+gbec5b06`; kubectl client `v1.33.0`. Images built from this
-branch: the leader 515MB, the follower `cpu` (with `tiny.en`) 938MB, the follower `cuda` 2.55GB.
+Run on 2026-10-05, twice, on the same machine and the same images. Versions, from the commands:
+`cmd /c ver`: `Microsoft Windows [Version 10.0.26200.9457]`; `docker version --format
+'{{.Server.Version}}'`: `29.8.1`; `kind version`: `kind v0.30.0 go1.24.6 windows/amd64`;
+`helm version --short`: `v4.3.0+gbec5b06`; `kubectl version --client`: `Client Version: v1.33.0`;
+`kubectl version` against the cluster: `Server Version: v1.34.0` (containerd 2.1.3). Images, built
+from this branch (`docker images`): `swarmscribe-leader:f3-e2e 515MB`,
+`swarmscribe-follower:f3-e2e 938MB` (`cpu`, with `tiny.en`), `swarmscribe-follower:f3-cuda 2.55GB`.
 
-- Step 3 (`up`): 111 s on a new cluster. Last line: `the cluster swarmscribe-follower-e2e is up,
-  with a leader in namespace swarmscribe-e2e`.
-- Step 4 (`run`): passed once, 116 s. The driver printed only its last line, whole:
-  `passed (tiny.en on cpu): two pods were Ready in 4 s and registered in 4 s; a killed follower
-  came back as itself and its recording was redone; a pod deleted mid-job was gone in 2.7 s and
-  counted no attempt; an hour was refused by the memory guard; a drained pod parked; revoked pods
-  exited 4 and a new token brought the pool back`. The run was not repeated.
-- Step 5 (a pod by hand): the leader, Postgres and two `pool-swarmscribe-follower-...` pods were
-  `1/1 Running`. PID 1 was `tini`. The `stat` lines:
-  `0:10001 3777 /var/lib/swarmscribe-follower`,
-  `10001:10001 2700 /var/lib/swarmscribe-follower/state`,
-  `10001:10001 600 /var/lib/swarmscribe-follower/state/credential.json`,
-  `0:10001 2777 /scratch`, and for the token file `0:10001 440 /run/secrets/swarmscribe/pool-token`.
-  `doctor --no-model` ended `memory: 2500 MiB may be used (SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB)`,
-  `leader: answers`, `joined: yes`, `result: ready`.
-- Step 6 (`no-gpu`): passed on the third attempt, 79 s. The first two attempts (83 s, 78 s)
-  failed in the driver, not in the chart: right after the `cuda` container's exit,
-  `kubectl logs --previous` printed `unable to retrieve container logs for containerd://...`
-  and exited 0, and the driver took that for the last line. The driver now waits until the log is
-  readable (commit `b1648e9`); with it the last line was: `passed: without a GPU the cuda image
-  exits 3 and says `error: cuda was requested but no CUDA GPU is available`; a pod of a GPU pool
-  stays Pending (Insufficient nvidia.com/gpu)`.
-- Step 7 (`down`): `deleted the cluster swarmscribe-follower-e2e`; `kind get clusters` then
-  printed `No kind clusters found.`
-- Not measured in this run: the timings and observations of the planner's table other than the
-  three the `run` line reports (Ready, registered, gone) and what the lines above state.
+### First run
+
+`up` and `run` passed (`run` once). `no-gpu` failed twice and passed on the third attempt. Its
+failures were in the driver, not the chart: right after the `cuda` container's first exit,
+`kubectl logs --previous` printed `unable to retrieve container logs for containerd://...` and
+exited 0, and the driver took that for the pod's last line (`FAILED: its last line does not say
+why: unable to retrieve container logs for containerd://...`). Looked at by hand, the same pod
+then logged `error: cuda was requested but no CUDA GPU is available` for `--previous` and for
+the current container. The driver now waits until the log is readable (commit `b1648e9`), and
+the third attempt passed with it. Durations of this run were not captured verbatim (each about 2
+minutes for `up` and `run`, about 1 1/2 minutes for each `no-gpu` attempt) and are not relied on.
+While diagnosing, one Helm release (`wrong-node`) was installed by hand with the driver's
+values and uninstalled again.
+
+### Second run, with the fixed driver, timed with `time`
+
+| Step | Result | `real` |
+|---|---|---|
+| `up` | `the cluster swarmscribe-follower-e2e is up, with a leader in namespace swarmscribe-e2e` | 1m51.442s |
+| `run` | passed: two pods Ready in 3 s and registered in 3 s; a pod deleted mid-job gone in 2.1 s | 1m52.346s |
+| `no-gpu` | passed the first time (the fix works) | 1m25.562s |
+| `down` | `deleted the cluster swarmscribe-follower-e2e` | 2.171s |
+
+`run`'s last line, whole: `passed (tiny.en on cpu): two pods were Ready in 3 s and registered in
+3 s; a killed follower came back as itself and its recording was redone; a pod deleted mid-job
+was gone in 2.1 s and counted no attempt; an hour was refused by the memory guard; a drained pod
+parked; revoked pods exited 4 and a new token brought the pool back`.
+
+`no-gpu`'s last line, whole: `passed: without a GPU the cuda image exits 3 and says `error: cuda
+was requested but no CUDA GPU is available`; a pod of a GPU pool stays Pending (Insufficient
+nvidia.com/gpu)`. The driver passes that line only after it has seen the container's
+`lastState.terminated.exitCode` equal 3 and read the last line of `kubectl logs --previous`; the
+pods are uninstalled when it ends, so they were not looked at afterwards.
+
+After `down`, `kind get clusters` printed `No kind clusters found.`
+
+The first run also looked at a pod by hand (step 5). Its output, from that run:
+`tini` as PID 1; `0:10001 3777 /var/lib/swarmscribe-follower`,
+`10001:10001 2700 /var/lib/swarmscribe-follower/state`,
+`10001:10001 600 /var/lib/swarmscribe-follower/state/credential.json`,
+`0:10001 2777 /scratch`, `0:10001 440 /run/secrets/swarmscribe/pool-token`; `doctor --no-model`
+ended `memory: 2500 MiB may be used (SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB)`,
+`leader: answers`, `joined: yes`, `result: ready`.
+
+The planner's table above is not reproduced beyond what these lines state.
 
 ## What this does not prove
 

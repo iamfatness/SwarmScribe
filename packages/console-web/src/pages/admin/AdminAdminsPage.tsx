@@ -7,7 +7,7 @@ import { ErrorPanel } from "../../components/ErrorPanel";
 import { formatTime } from "../../lib/format";
 import { ActionNotice, ReadState } from "../leader/common";
 import { useAdminList } from "./AdminFrame";
-import { PrincipalFields } from "./PrincipalFields";
+import { PrincipalFields, Who, whoText } from "./PrincipalFields";
 import { useRowFocus } from "../leader/rowFocus";
 
 const noop = () => undefined;
@@ -85,18 +85,19 @@ export function AdminAdminsSection() {
               <tbody>
                 {admins.map((admin) => (
                   <tr key={admin.id} data-row={admin.id}>
-                    <th scope="row" className="mono long ident">
-                      {admin.principal_kind}:{admin.principal}
+                    <th scope="row" className="long">
+                      <Who kind={admin.principal_kind} principal={admin.principal} />
                     </th>
                     <td>
-                      {formatTime(admin.created_at)} by {admin.created_by}
+                      <span className="nowrap">{formatTime(admin.created_at)}</span>{" "}
+                      <span className="by-line">by {admin.created_by}</span>
                     </td>
                     <td className="actions">
                       <button
                         type="button"
                         className="button button-danger"
                         onClick={() => setRemoving(admin)}
-                        aria-label={`Remove console administrator ${admin.principal_kind}:${admin.principal}`}
+                        aria-label={`Remove console administrator ${whoText(admin.principal_kind, admin.principal)}`}
                       >
                         Remove
                       </button>
@@ -110,14 +111,15 @@ export function AdminAdminsSection() {
       </ReadState>
       <AddAdminForm
         onDone={(admin) => {
-          setNotice(`${admin.principal_kind}:${admin.principal} is now a console administrator.`);
+          const who = whoText(admin.principal_kind, admin.principal, true);
+          setNotice(`${who} is now a console administrator.`);
           read.refresh();
         }}
       />
       {removing !== null && (
         <ConfirmDialog
           title="Remove this console administrator?"
-          message={`${removing.principal_kind}:${removing.principal} can no longer add leaders or give roles. The last administrator cannot be removed.`}
+          message={`${whoText(removing.principal_kind, removing.principal, true)} can no longer add leaders or give roles. The last administrator cannot be removed.`}
           confirmLabel="Remove administrator"
           onClose={() => setRemoving(null)}
           onConfirm={async () => {

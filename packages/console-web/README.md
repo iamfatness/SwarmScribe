@@ -36,25 +36,31 @@ never goes in a URL, in storage or in state that outlives its dialog.
 
 ## What it looks like
 
-Dark by default, on warm ink with honey amber; a designed light theme (paper page, ink rail)
-follows the system or the Theme switch. A rail on the left runs the full height of the window:
+Dark for everyone by default, on warm ink with honey amber, whatever the system is set to. A
+designed light theme (paper page, ink rail) is one choice away in the Theme switch, which also
+offers System; the choice is remembered. A rail on the left runs the full height of the window:
 the brand, Fleet, one link per leader you can see (flagged "no answer", "revoked" or "off"),
 Administration for console administrators, and your name, Theme and Sign out pinned at the
 bottom. Below 900px the rail becomes a sticky top bar with a Menu button.
 
-- **Fleet:** four totals, a full-width "Needs a look" band (the worst five things, with "Show
+- **Fleet:** four totals, a full-width "Needs a look" band (the worst six things, with "Show
   all N"), then a card per leader with its status, a 24-hour chart and four figures. Label
   filters are pills.
 - **A leader:** breadcrumb, name and labels, status pill, a line on what your role switches
   off, five tabs. Job states are pills with counts from the leader's last check. Every table
   fits its region at 1280, 900 and 768 pixels with no sideways scroll, so the Actions column is
-  not pinned.
+  not pinned. Narrower than that (a phone, or 200% zoom) a table scrolls inside its region,
+  which shows a soft edge on the side that has more.
 - **Dialogs** are paper sheets with an amber offset shadow (ink sheets on the light theme).
   The join token is shown once, in its own dialog, and cannot be closed by accident.
 - **Administration** is one page with three sections (Leaders, Who can do what, Console
   administrators), each with its own address.
 
-Wording is the console's own, not the leader's: see the copy tables in the spec.
+Wording is the console's own, not the leader's: see the copy tables in the spec. That
+includes errors. `src/api/errors.ts` has a title and, where it helps, a line of advice for
+every error code the console and its leaders send, and for a code it knows the server's own
+message is never shown (those are written for a log). A new code needs a row there; until it
+has one it is shown under a calm title by status, with its text marked "The answer said:".
 
 ## Look and wording
 
@@ -81,8 +87,9 @@ a component, not in another stylesheet (the mark's two brand constants in `shell
 only exception). A test fails on any hex colour outside that file. To change a colour, change
 its token. `src/styles/tokens.test.ts` measures the
 tokens: it fails when a text pair is under 4.5:1, a mark or control edge under 3:1, or the
-two copies of a colour set differ. The dark theme is the default; the light theme follows
-the system setting or the Theme switch in the rail.
+two copies of a colour set differ. The dark theme is the default for everyone: the stylesheet is
+dark with no attribute and no script. Light, and following the system, are choices in the
+Theme switch in the rail (`data-theme="light"` or `"system"` on `<html>`).
 
 There are no inline styles, no web fonts and no images from another origin. The logo is
 inline SVG (`src/components/Brand.tsx`); the favicon is a hashed asset.
@@ -92,8 +99,8 @@ inline SVG (`src/components/Brand.tsx`); the favicon is a hashed asset.
 `index.html` loads a small classic (blocking) script, in `<head>`, before the page's first paint. It is built from
 `src/theme-boot.ts` (Vite builds it on its own, with no imports left and a hashed name, so the
 CSP still holds) and does what `main.tsx` does later: reads the stored theme and sets
-`data-theme` on `<html>`. Without it, a person who chose Dark on a light system, or the
-reverse, would see the system's theme flash before the app loaded. `scripts/check-dist.mjs`
+`data-theme` on `<html>` (dark when nothing is stored). Without it, a person who chose Light or
+System would see the dark default flash before the app loaded. `scripts/check-dist.mjs`
 fails the build if the script is missing from `index.html`.
 
 ### Adding a route
@@ -128,6 +135,13 @@ in-memory Entra ID and two in-memory leaders (`eu-1`, `us-1`), on
 `SWARMSCRIBE_TEST_DATABASE_URL` or the local pgserver, plus a control server on
 `http://127.0.0.1:8901` that only the tests use. `E2E_HARNESS_COMMAND` replaces the command
 Playwright starts. Nothing may be left listening on 8900 or 8901 afterwards.
+
+Every test begins by resetting the harness, which empties the console's tables while the
+console may still be answering the last test's page or recording a check. The reset never
+waits long for a lock: it gives up after 300 ms and tries again, ten times at most, so it
+cannot deadlock with them (it used to, about once in 400 tests). The fake leaders can be taken
+down (`mode: "down"`) or made to revoke the console's credential (`mode: "revoked"`), and
+`us-1` lets the console act only as an operator.
 
 ## Screenshots to look at
 

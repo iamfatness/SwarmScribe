@@ -7,7 +7,7 @@ import { ErrorPanel } from "../../components/ErrorPanel";
 import { formatTime } from "../../lib/format";
 import { ActionNotice, ReadState } from "../leader/common";
 import { useAdminList } from "./AdminFrame";
-import { PrincipalFields } from "./PrincipalFields";
+import { PrincipalFields, Who, whoText } from "./PrincipalFields";
 import { useRowFocus } from "../leader/rowFocus";
 
 const noop = () => undefined;
@@ -87,37 +87,23 @@ export function AdminGrantsSection() {
   const [removing, setRemoving] = useState<GrantOut | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const rows = useRowFocus(read, setNotice);
+  const calloutId = useId();
 
   return (
     <div {...rows.props}>
       <div className="section-head">
         <h2>Who can do what</h2>
       </div>
-      <p className="page-sub">
-        A person's role on a leader is the highest one given to them that covers it. Giving or
-        removing a role takes effect at once. Group membership is read when a person signs in, so
-        a change to a group shows the next time they do.
+      <p className="page-sub section-sub">
+        A person's role on a leader is the highest one given to them that covers it.
       </p>
-      <div className="explain">
-        <p>
-          A viewer can look. An operator can also try jobs again, cancel them, scan a location and
-          wind followers down. An admin can also add and switch locations, revoke followers and
-          make join tokens.
-        </p>
-        <p>
-          A role covers leaders in one of three ways: <code>all</code> for every leader,{" "}
-          <code>leader:eu-1</code> for one leader by name, or <code>label:region=eu</code> for every
-          leader with that label. It is given to an Entra ID group, a Google group, one person by
-          email, or everyone at a domain.
-        </p>
-      </div>
       <ActionNotice message={notice} />
       <ReadState read={read} what="the roles">
         {(grants) =>
           grants.length === 0 ? (
             <p>Nobody has been given a role yet.</p>
           ) : (
-            <div className="table-scroll" role="region" aria-label="Grants" tabIndex={0}>
+            <div className="table-scroll" role="region" aria-label="Roles given" tabIndex={0}>
               <table className="medium">
                 <thead>
                   <tr>
@@ -131,20 +117,21 @@ export function AdminGrantsSection() {
                 <tbody>
                   {grants.map((grant) => (
                     <tr key={grant.id} data-row={grant.id}>
-                      <th scope="row" className="mono long ident">
-                        {grant.principal_kind}:{grant.principal}
+                      <th scope="row" className="long">
+                        <Who kind={grant.principal_kind} principal={grant.principal} />
                       </th>
                       <td className="nowrap">{grant.role}</td>
                       <td className="mono long ident">{grant.scope}</td>
                       <td>
-                        {formatTime(grant.created_at)} by {grant.created_by}
+                        <span className="nowrap">{formatTime(grant.created_at)}</span>{" "}
+                        <span className="by-line">by {grant.created_by}</span>
                       </td>
                       <td className="actions">
                         <button
                           type="button"
                           className="button button-danger"
                           onClick={() => setRemoving(grant)}
-                          aria-label={`Remove ${grant.role} on ${grant.scope} from ${grant.principal_kind}:${grant.principal}`}
+                          aria-label={`Remove ${grant.role} on ${grant.scope} from ${whoText(grant.principal_kind, grant.principal)}`}
                         >
                           Remove
                         </button>
@@ -157,18 +144,39 @@ export function AdminGrantsSection() {
           )
         }
       </ReadState>
-      <AddGrantForm
-        onDone={(grant) => {
-          setNotice(
-            `${grant.principal_kind}:${grant.principal} is now ${grant.role} on ${grant.scope}.`,
-          );
-          read.refresh();
-        }}
-      />
+      <div className="form-and-aside">
+        <AddGrantForm
+          onDone={(grant) => {
+            const who = whoText(grant.principal_kind, grant.principal, true);
+            setNotice(`${who} is now ${grant.role} on ${grant.scope}.`);
+            read.refresh();
+          }}
+        />
+        <section className="sheet callout" aria-labelledby={calloutId}>
+          <h2 id={calloutId}>How roles work</h2>
+          <ul>
+            <li>A viewer can look.</li>
+            <li>
+              An operator can also try jobs again, cancel them, scan a location and wind followers
+              down.
+            </li>
+            <li>An admin can also add and switch locations, revoke followers and make join tokens.</li>
+          </ul>
+          <p>
+            A role covers leaders in one of three ways: <code>all</code> for every leader,{" "}
+            <code>leader:eu-1</code> for one leader by name, or <code>label:region=eu</code> for
+            every leader with that label.
+          </p>
+          <p>
+            Giving or removing a role takes effect at once. Group membership is read when a person
+            signs in, so a change to a group shows the next time they do.
+          </p>
+        </section>
+      </div>
       {removing !== null && (
         <ConfirmDialog
           title="Remove this role?"
-          message={`${removing.principal_kind}:${removing.principal} stops being ${removing.role} on ${removing.scope} at once.`}
+          message={`${whoText(removing.principal_kind, removing.principal, true)} stops being ${removing.role} on ${removing.scope} at once.`}
           confirmLabel="Remove the role"
           onClose={() => setRemoving(null)}
           onConfirm={async () => {

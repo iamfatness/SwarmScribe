@@ -370,9 +370,11 @@ describe("jobs tab", () => {
       body: { code: "leader_unreachable", message: "leader eu-1 cannot be reached; try again" },
       headers: { "Retry-After": "15" },
     });
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "The leader is not answering right now.",
+    // The notice at the top says why; the tab says only that there is nothing to show.
+    expect(await screen.findByText(/Nothing to show until eu-1 answers/)).toHaveTextContent(
+      "Nothing to show until eu-1 answers. Try again in 15 seconds.",
     );
+    expect(screen.getByRole("main")).not.toHaveTextContent(/cannot be reached/);
     expect(screen.getByText(/eu-1 is not answering, so nothing here can be read or changed/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Pools and followers" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Failed/ })).toBeEnabled();

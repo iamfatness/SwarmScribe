@@ -19,7 +19,7 @@ export async function resetWorld(request: APIRequestContext): Promise<void> {
 export async function setLeaderMode(
   request: APIRequestContext,
   name: string,
-  mode: "ok" | "down",
+  mode: "ok" | "down" | "revoked",
 ): Promise<void> {
   const answer = await request.post(`${CONTROL}/control/leaders/${name}/mode`, { data: { mode } });
   expect(answer.ok()).toBe(true);
@@ -87,6 +87,18 @@ export async function expectAccessible(page: Page, context: string): Promise<voi
 }
 
 export const THEMES = ["light", "dark"] as const;
+
+/**
+ * Has the person's Theme choice already made when the page opens. The console is dark for
+ * everyone until they choose (the system's setting is not followed), so a test of the light
+ * theme chooses Light, as a person would. A choice made later, in the page, is kept.
+ */
+export async function chooseTheme(page: Page, theme: "light" | "dark" | "system"): Promise<void> {
+  await page.addInitScript((choice) => {
+    const key = "swarmscribe-console-theme";
+    if (localStorage.getItem(key) === null) localStorage.setItem(key, choice);
+  }, theme);
+}
 
 /**
  * Every test fails on a Content Security Policy violation, an uncaught page error or a

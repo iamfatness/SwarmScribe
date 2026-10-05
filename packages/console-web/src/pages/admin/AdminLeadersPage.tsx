@@ -1,5 +1,6 @@
 import { useId, useState, type FormEvent } from "react";
-import { ApiError, api } from "../../api/client";
+import { api } from "../../api/client";
+import { OwnRefusal } from "../../api/errors";
 import type { CredentialIn, LeaderEdit, LeaderIn, LeaderOut } from "../../api/types";
 import { useDialogAction } from "../../app/useDialogAction";
 import { BreakPath } from "../../components/BreakPath";
@@ -37,13 +38,13 @@ const leaderApi = (name: string) => `/api/admin/leaders/${encodeURIComponent(nam
 
 /**
  * The registry's own rules, checked before anything is sent so a mistake is heard at once and
- * the credential is not sent to be refused. They use the codes and fixed texts the console
- * answers with, so the person reads the same refusal either way; the server stays the
- * authority (it also refuses private-range and metadata addresses). None of these messages
- * contains what was typed.
+ * the credential is not sent to be refused. They use the console's codes, so the person reads
+ * the same title either way, and say the rule in our own words beneath it (an OwnRefusal: its
+ * text is shown, where a server's never is). The server stays the authority (it also refuses
+ * loopback and metadata addresses). None of these messages contains what was typed.
  */
 function refuse(code: string, message: string): never {
-  throw new ApiError(422, code, message);
+  throw new OwnRefusal(code, message);
 }
 
 function checkName(name: string): void {
@@ -143,11 +144,11 @@ function DialogButtons({
 }) {
   return (
     <div className="dialog-buttons">
-      <button type="submit" className="button button-primary" aria-disabled={busy || undefined}>
-        {submitLabel}
-      </button>
       <button type="button" className="button" onClick={onCancel}>
         Cancel
+      </button>
+      <button type="submit" className="button button-primary" aria-disabled={busy || undefined}>
+        {submitLabel}
       </button>
     </div>
   );
@@ -404,15 +405,15 @@ export function AdminLeadersSection() {
                       <td className="mono long">
                         <BreakPath text={leader.base_url} />
                       </td>
-                      <td className="mono long">{labelsText(leader.labels) || "–"}</td>
+                      <td className="mono long label-lines">{labelsText(leader.labels) || "–"}</td>
                       <td className="nowrap">{leader.enabled ? "On" : "Switched off"}</td>
                       <td>
                         {leader.credential_revoked ? (
                           <span className="badge badge-bad">Revoked by the leader</span>
                         ) : (
                           <span>
-                            Set {formatTime(leader.credential_updated_at)} by{" "}
-                            {leader.credential_updated_by}
+                            <span className="nowrap">Set {formatTime(leader.credential_updated_at)}</span>{" "}
+                            <span className="by-line">by {leader.credential_updated_by}</span>
                           </span>
                         )}
                       </td>

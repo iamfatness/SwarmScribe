@@ -21,20 +21,20 @@ test("a console administrator adds and removes a grant, and each remove button n
   await form.getByRole("combobox", { name: "Who" }).selectOption("domain");
   await form.getByRole("textbox", { name: "Domain" }).fill("example.org");
   await form.getByRole("button", { name: "Give the role" }).click();
-  await expect(page.getByText("domain:example.org is now operator on label:region=eu.")).toBeVisible();
+  await expect(page.getByText("Everyone at example.org is now operator on label:region=eu.")).toBeVisible();
 
   // A second grant for the same principal: the two remove buttons still differ by name.
   await form.getByRole("combobox", { name: "Role" }).selectOption("viewer");
   await form.getByRole("textbox", { name: "On which leaders" }).fill("all");
   await form.getByRole("textbox", { name: "Domain" }).fill("example.org");
   await form.getByRole("button", { name: "Give the role" }).click();
-  await expect(page.getByText("domain:example.org is now viewer on all.")).toBeVisible();
-  const removers = page.getByRole("button", { name: /^Remove .* from domain:example\.org$/ });
+  await expect(page.getByText("Everyone at example.org is now viewer on all.")).toBeVisible();
+  const removers = page.getByRole("button", { name: /^Remove .* from everyone at example\.org$/ });
   await expect(removers).toHaveCount(2);
   const names = await removers.evaluateAll((els) => els.map((el) => el.getAttribute("aria-label")));
   expect(new Set(names).size).toBe(2);
 
-  const operatorGrant = "Remove operator on label:region=eu from domain:example.org";
+  const operatorGrant = "Remove operator on label:region=eu from everyone at example.org";
   await page.getByRole("button", { name: operatorGrant }).click();
   await page.getByRole("alertdialog").getByRole("button", { name: "Remove the role" }).click();
   await expect(page.getByText("The role is removed.")).toBeVisible();
@@ -91,12 +91,36 @@ test("the console refuses a leader address it may not call", async ({ page }) =>
   await expect(dialog.getByRole("alert")).toContainText("The console may not call that address.");
 });
 
+test("a leader's address is on one line at 1280, 900 and 768, never broken after https://", async ({ page }) => {
+  await signIn(page, "admin", "/admin/leaders");
+  for (const width of [1280, 900, 768]) {
+    await page.setViewportSize({ width, height: 900 });
+    const region = page.getByRole("region", { name: "Registered leaders" });
+    await expect(region.getByRole("row", { name: /^eu-1/ })).toBeVisible();
+    const lines = await region.evaluate(async (el) => {
+      await document.fonts.ready;
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      return Array.from(el.querySelectorAll("td .path-part"), (part) => {
+        const range = document.createRange();
+        range.selectNodeContents(part);
+        const tops = new Set(Array.from(range.getClientRects(), (rect) => Math.round(rect.top)));
+        return `${part.textContent}: ${tops.size}`;
+      });
+    });
+    expect(lines, `at ${width}`).toEqual(["https://eu-1.leaders.example: 1", "https://us-1.leaders.example: 1"]);
+    // And the table still fits its region: the room came from the columns beside it.
+    expect(await region.evaluate((el) => el.scrollWidth - el.clientWidth), `at ${width}`).toBeLessThanOrEqual(1);
+  }
+});
+
 test("the last console administrator cannot be removed", async ({ page }) => {
   await signIn(page, "admin", "/admin/admins");
   await page.getByRole("button", { name: /^Remove console administrator / }).click();
   const dialog = page.getByRole("alertdialog");
   await dialog.getByRole("button", { name: "Remove administrator" }).click();
   await expect(dialog.getByRole("alert")).toContainText("The last console administrator cannot be removed.");
+  await expect(dialog.getByRole("alert")).toContainText("Add another one first.");
+  await expect(dialog.getByRole("alert")).not.toContainText("this is the last");
 });
 
 test("a person who is not a console administrator has no administration", async ({ page }) => {

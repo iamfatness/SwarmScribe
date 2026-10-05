@@ -282,9 +282,55 @@ describe("administration pages", () => {
 
   it("explains in plain words what a role is and how it is given", async () => {
     renderApp("/admin/grants", { session: ADMIN_SESSION }).on("GET /api/admin/grants", reply(200, [GRANT]));
-    expect(await screen.findByText(/A viewer can look\. An operator can also/)).toBeInTheDocument();
-    expect(screen.getByText("leader:eu-1").tagName).toBe("CODE");
-    expect(screen.getByText(/or everyone at a domain\./)).toBeInTheDocument();
+    // One line before the table; the rest is a callout after it, "How roles work".
+    const table = await screen.findByRole("region", { name: "Roles given" });
+    const opening = screen.getByText("A person's role on a leader is the highest one given to them that covers it.");
+    expect(opening.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const callout = screen.getByRole("region", { name: "How roles work" });
+    expect(table.compareDocumentPosition(callout) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const roles = within(callout).getAllByRole("listitem").map((item) => item.textContent);
+    expect(roles).toEqual([
+      "A viewer can look.",
+      "An operator can also try jobs again, cancel them, scan a location and wind followers down.",
+      "An admin can also add and switch locations, revoke followers and make join tokens.",
+    ]);
+    expect(within(callout).getByText("leader:eu-1").tagName).toBe("CODE");
+    expect(callout).toHaveTextContent("Giving or removing a role takes effect at once.");
+    expect(callout).toHaveTextContent(
+      "Group membership is read when a person signs in, so a change to a group shows the next time they do.",
+    );
+    // Nothing explanatory is left between the heading and the table but the one line.
+    expect(screen.getByRole("main")).not.toHaveTextContent(/A viewer can look\. An operator/);
+  });
+
+  it("says who holds a role in words, never as a kind code", async () => {
+    const grants: GrantOut[] = [
+      GRANT,
+      { ...GRANT, id: "g-entra", principal_kind: "entra_group", principal: "a1a1a1a1-0000-4000-8000-000000000001" },
+      { ...GRANT, id: "g-google", principal_kind: "google_group", principal: "ops@example.org" },
+      { ...GRANT, id: "g-email", principal_kind: "email", principal: "sam@example.org" },
+    ];
+    renderApp("/admin/grants", { session: ADMIN_SESSION }).on("GET /api/admin/grants", reply(200, grants));
+    const table = await screen.findByRole("region", { name: "Roles given" });
+    const who = within(table)
+      .getAllByRole("rowheader")
+      .map((cell) => cell.textContent);
+    expect(who).toEqual([
+      "Everyone at example.org",
+      "Entra ID group a1a1a1a1-0000-4000-8000-000000000001",
+      "Google group ops@example.org",
+      "sam@example.org",
+    ]);
+    expect(table).not.toHaveTextContent(/entra_group|google_group|domain:|email:/);
+    // The identifier itself is still there to copy, whole, in mono.
+    expect(within(table).getByText("a1a1a1a1-0000-4000-8000-000000000001")).toHaveClass("mono");
+    expect(
+      within(table).getByRole("button", {
+        name: "Remove operator on label:region=eu from Entra ID group a1a1a1a1-0000-4000-8000-000000000001",
+      }),
+    ).toBeInTheDocument();
+    // The stored form of which leaders stays as it is typed.
+    expect(within(table).getAllByText("label:region=eu")).toHaveLength(4);
   });
 
   it("shows the command in the credential help as code, without the backticks", async () => {
@@ -313,8 +359,13 @@ describe("administration pages", () => {
         principal: "example.org",
       }),
     );
-    await userEvent.click(screen.getByRole("button", { name: "Remove operator on label:region=eu from domain:example.org" }));
-    await userEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Remove the role" }));
+    expect(await screen.findByText("Everyone at example.org is now viewer on all.")).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Remove operator on label:region=eu from everyone at example.org" }),
+    );
+    const asking = screen.getByRole("alertdialog");
+    expect(asking).toHaveTextContent("Everyone at example.org stops being operator on label:region=eu at once.");
+    await userEvent.click(within(asking).getByRole("button", { name: "Remove the role" }));
     await waitFor(() => expect(mock.callsTo(`DELETE /api/admin/grants/${GRANT.id}`)).toHaveLength(1));
   });
 
@@ -325,7 +376,13 @@ describe("administration pages", () => {
         `DELETE /api/admin/console-admins/${ADMIN.id}`,
         fail(409, "last_admin", "the last console administrator cannot be removed"),
       );
-    await userEvent.click(await screen.findByRole("button", { name: `Remove console administrator entra_group:${ADMIN.principal}` }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: `Remove console administrator Entra ID group ${ADMIN.principal}` }),
+    );
+    expect(screen.getByRole("alertdialog")).toHaveTextContent(
+      `Entra ID group ${ADMIN.principal} can no longer add leaders or give roles.`,
+    );
+    expect(screen.getByRole("main")).not.toHaveTextContent("entra_group");
     await userEvent.click(
       within(screen.getByRole("alertdialog")).getByRole("button", { name: "Remove administrator" }),
     );

@@ -270,7 +270,7 @@ const ACTION_TABLES: [path: string, region: string][] = [
   ["/leaders/eu-1/locations", "Location list"],
   ["/leaders/eu-1/tokens", "Join token list"],
   ["/admin/leaders", "Registered leaders"],
-  ["/admin/grants", "Grants"],
+  ["/admin/grants", "Roles given"],
   ["/admin/admins", "Console administrators"],
 ];
 

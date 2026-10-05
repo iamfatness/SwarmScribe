@@ -1,6 +1,7 @@
 import { useCallback, type ReactNode } from "react";
-import { api, leaderPath } from "../../api/client";
-import type { FleetLeader } from "../../api/types";
+import { ApiError, api, leaderPath } from "../../api/client";
+import type { FleetLeader, Health } from "../../api/types";
+import { useCurrentLeader } from "../../app/currentLeader";
 import { usePoll, type PollState } from "../../app/usePoll";
 import { ErrorPanel } from "../../components/ErrorPanel";
 import { formatTime } from "../../lib/format";
@@ -32,6 +33,62 @@ export function ActionNotice({ message }: { message: string | null }) {
   );
 }
 
+/**
+ * The error a read gets when the fleet already shows why: the leader is not answering, is
+ * switched off, or revoked the console's credential. The notice at the top of the page has
+ * said so, so the tab says only that there is nothing to show, and what would change that.
+ */
+const EXPLAINED: Partial<
+  Record<Health, { code: string; line: (name: string) => string; retry: boolean }>
+> = {
+  unreachable: {
+    code: "leader_unreachable",
+    line: (name) => `Nothing to show until ${name} answers.`,
+    retry: true,
+  },
+  disabled: {
+    code: "leader_disabled",
+    line: (name) =>
+      `Nothing to show while ${name} is switched off. ` +
+      "A console administrator can switch it on under Administration.",
+    retry: false,
+  },
+  credential_revoked: {
+    code: "leader_credential_revoked",
+    line: (name) => `Nothing to show until the console's credential for ${name} is replaced.`,
+    retry: false,
+  },
+};
+
+/** A read's failure: one quiet line when the page has already said why, the error if not. */
+function ReadError({ read, retryLabel }: { read: PollState<unknown>; retryLabel?: string }) {
+  const leader = useCurrentLeader();
+  const { error } = read;
+  const explained = leader === null ? undefined : EXPLAINED[leader.health];
+  if (
+    leader !== null &&
+    explained !== undefined &&
+    error instanceof ApiError &&
+    error.code === explained.code
+  ) {
+    const wait = error.retryAfter !== null ? ` Try again in ${error.retryAfter} seconds.` : "";
+    return (
+      <div className="quiet-note">
+        <p role="status">
+          {explained.line(leader.name)}
+          {explained.retry && wait}
+        </p>
+        {explained.retry && (
+          <button type="button" className="button" onClick={read.refresh}>
+            Try again
+          </button>
+        )}
+      </div>
+    );
+  }
+  return <ErrorPanel error={error} onRetry={read.refresh} retryLabel={retryLabel} />;
+}
+
 /** A tab's read: the error with a retry, a loading line, or the content. */
 export function ReadState<T>({
   read,
@@ -43,12 +100,12 @@ export function ReadState<T>({
   children: (data: T) => ReactNode;
 }) {
   if (read.data === undefined) {
-    if (read.error !== null) return <ErrorPanel error={read.error} onRetry={read.refresh} />;
+    if (read.error !== null) return <ReadError read={read} />;
     return <p role="status">Loading {what}…</p>;
   }
   return (
     <>
-      {read.error !== null && <ErrorPanel error={read.error} onRetry={read.refresh} retryLabel="Reload" />}
+      {read.error !== null && <ReadError read={read} retryLabel="Reload" />}
       {children(read.data)}
     </>
   );

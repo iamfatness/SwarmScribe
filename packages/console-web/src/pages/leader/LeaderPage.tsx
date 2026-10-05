@@ -1,4 +1,5 @@
 import type { FleetLeader, Role } from "../../api/types";
+import { CurrentLeader } from "../../app/currentLeader";
 import { useFleet } from "../../app/fleet";
 import { Link } from "../../app/router";
 import { usePageTitle } from "../../app/usePageTitle";
@@ -28,11 +29,15 @@ function TabContent({ tab, leader }: { tab: TabId; leader: FleetLeader }) {
   }
 }
 
-/** What the person's role leaves switched off on this leader. */
-const ROLE_NOTE: Record<Role, string> = {
+/**
+ * What the person's role leaves switched off on this leader. An admin is promised nothing: a
+ * leader can let this console act only up to a lower role, and the console learns that limit
+ * only when the leader refuses something (the refusal then says so: api/errors.ts).
+ */
+const ROLE_NOTE: Record<Role, string | null> = {
   viewer: "What needs an operator or an admin is shown, but switched off.",
   operator: "What needs an admin is shown, but switched off.",
-  admin: "Nothing here is switched off for you.",
+  admin: null,
 };
 
 function HealthNote({ leader }: { leader: FleetLeader }) {
@@ -94,8 +99,8 @@ export function LeaderPage({ name, tab }: { name: string; tab: string }) {
         <HealthBadge leader={leader} />
       </div>
       <p className="page-sub role-line">
-        You are {leader.role === "viewer" ? "a" : "an"} <strong>{leader.role}</strong> here.{" "}
-        {ROLE_NOTE[leader.role]}
+        You are {leader.role === "viewer" ? "a" : "an"} <strong>{leader.role}</strong> here.
+        {ROLE_NOTE[leader.role] !== null && ` ${ROLE_NOTE[leader.role]}`}
       </p>
       <HealthNote leader={leader} />
       <nav aria-label={`${leader.name} sections`}>
@@ -115,7 +120,9 @@ export function LeaderPage({ name, tab }: { name: string; tab: string }) {
       </nav>
       <section className="tab-panel" aria-labelledby="tab-title">
         <h2 id="tab-title">{current.label}</h2>
-        <TabContent key={`${leader.name}/${current.id}`} tab={current.id} leader={leader} />
+        <CurrentLeader.Provider value={leader}>
+          <TabContent key={`${leader.name}/${current.id}`} tab={current.id} leader={leader} />
+        </CurrentLeader.Provider>
       </section>
     </>
   );

@@ -38,23 +38,37 @@
 
 /* ---- The join token, shown once ---- */
 
-.token-row {
-  display: flex;
-  gap: var(--s-2);
-  margin-top: 6px;
-}
-
+/* The token is 47 characters. Its field has the dialog's whole width, where it fits on one
+   line, and is a read-only box that wraps where it does not (a phone), as tall as its text:
+   no character is ever out of view and there is nothing to scroll. Copy sits beneath it,
+   with the line that says whether it has been copied. */
 .token-field {
-  flex: 1 1 auto;
-  min-width: 0;
+  display: block;
+  width: 100%;
   min-height: 48px;
+  margin-top: 6px;
+  padding: 10px var(--s-3);
   border: 2px solid var(--text);
   border-radius: var(--r-sm);
   font-size: var(--fs-body);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  resize: none;
+  field-sizing: content;
+}
+
+.token-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2) var(--s-4);
+  margin-top: var(--s-3);
 }
 
 .token-row .button {
   min-height: 48px;
+  min-width: 7rem;
 }
 
 .token-status {
@@ -63,6 +77,10 @@
   font-size: var(--fs-small);
   font-weight: 600;
   color: var(--accent-text);
+}
+
+.token-row .token-status {
+  margin: 0;
 }
 
 /* An empty status line stays in the page (a live region that appears from nothing is not
@@ -98,17 +116,55 @@
     gap: var(--s-2);
   }
 
-  .token-row {
-    flex-direction: column;
+  .token-row .button {
+    width: 100%;
   }
 }
 
-/* Plain-words explanation under a section heading (Who can do what). */
-.explain {
-  max-width: 72ch;
-  color: var(--muted);
+/* Where the box cannot size itself to its text (no field-sizing), it is given the lines the
+   token can need: two, and three on the narrowest phone. */
+@supports not (field-sizing: content) {
+  .token-field {
+    min-height: calc(3em + 24px);
+  }
+
+  @media (max-width: 360px) {
+    .token-field {
+      min-height: calc(4.5em + 24px);
+    }
+  }
 }
 
-.explain p {
-  margin: var(--s-2) 0;
+/* The one line under a section's heading, with air before the table it introduces. */
+.page-sub.section-sub {
+  margin: var(--s-1) 0 var(--s-5);
+}
+
+/* Who a role is given to: the words in the page's type, the name itself in mono. */
+.who-kind {
+  white-space: nowrap;
+}
+
+/* A form with what explains it: side by side where the page is wide, the form first where
+   it is not. */
+.form-and-aside {
+  display: grid;
+  grid-template-columns: minmax(0, 36rem);
+  align-items: start;
+  gap: 0 var(--s-7);
+}
+
+.form-and-aside > .callout {
+  max-width: 36rem;
+  margin-top: var(--s-8);
+}
+
+.callout p {
+  margin: var(--s-3) 0 0;
+}
+
+@media (min-width: 1200px) {
+  .form-and-aside {
+    grid-template-columns: minmax(0, 36rem) minmax(0, 1fr);
+  }
 }

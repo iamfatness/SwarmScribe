@@ -1,4 +1,4 @@
-import { THEMES, expect, expectAccessible, setLeaderMode, signIn, test } from "./support";
+import { THEMES, chooseTheme, expect, expectAccessible, setLeaderMode, signIn, test } from "./support";
 
 // Every page the app has, in both themes, with zero axe violations (WCAG 2.1 A and AA).
 const SIGNED_IN_PAGES: { path: string; heading: string }[] = [
@@ -16,7 +16,11 @@ const SIGNED_IN_PAGES: { path: string; heading: string }[] = [
 
 for (const theme of THEMES) {
   test.describe(`${theme} theme`, () => {
+    // The system is set the same way, but it is the choice that decides (dark is the default).
     test.use({ colorScheme: theme });
+    test.beforeEach(({ page }) => chooseTheme(page, theme));
+    // What was scanned really was this theme.
+    test.afterEach(({ page }) => expect(page.locator("html")).toHaveAttribute("data-theme", theme));
 
     test("the sign-in page has no accessibility violations", async ({ page }) => {
       await page.goto("/sign-in?signed_out=1");

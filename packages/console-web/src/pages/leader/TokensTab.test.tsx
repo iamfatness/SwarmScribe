@@ -188,7 +188,7 @@ describe("join tokens tab: the plaintext is shown once", () => {
     }
     expect(Object.keys(facts)).toEqual(["Pool", "Can be used", "Expires"]);
     expect(facts.Pool).toBe("gpu");
-    expect(facts["Can be used"]).toBe("2 times");
+    expect(facts["Can be used"]).toBe("2"+String.fromCharCode(0xa0)+"times");
     expect(facts.Expires).toMatch(/2026/);
     // The token, then Copy, then the way out: Copy is the dialog's one primary button.
     expect(within(shown).getAllByRole("button").map((button) => button.textContent)).toEqual([

@@ -2,13 +2,13 @@ import { useId, useState, type FormEvent } from "react";
 import { ApiError, api } from "../../api/client";
 import type { CredentialIn, LeaderEdit, LeaderIn, LeaderOut } from "../../api/types";
 import { useDialogAction } from "../../app/useDialogAction";
+import { BreakPath } from "../../components/BreakPath";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { Dialog } from "../../components/Dialog";
 import { ErrorPanel } from "../../components/ErrorPanel";
-import { formatTime } from "../../lib/format";
+import { countOf, formatTime } from "../../lib/format";
 import { ActionNotice, ReadState } from "../leader/common";
 import {
-  AdminFrame,
   labelsAreValid,
   labelsText,
   parseLabels,
@@ -49,7 +49,7 @@ function checkName(name: string): void {
 
 function checkAddress(address: string): void {
   if (!/^https:\/\/[^/\s]/i.test(address) || address.length > MAX_URL) {
-    refuse("invalid_url", "A leader URL is an https:// URL.");
+    refuse("invalid_url", "A leader's address starts with https://.");
   }
 }
 
@@ -205,10 +205,10 @@ function AddLeaderDialog({
             checked={enabled}
             onChange={(e) => setEnabled(e.target.checked)}
           />
-          Enabled
+          Switched on
         </label>
         {action.error !== null && <ErrorPanel error={action.error} />}
-        <DialogButtons busy={action.busy} submitLabel="Add leader" onCancel={action.close} />
+        <DialogButtons busy={action.busy} submitLabel="Add this leader" onCancel={action.close} />
       </form>
     </Dialog>
   );
@@ -291,7 +291,7 @@ function EditLeaderDialog({
             checked={enabled}
             onChange={(e) => setEnabled(e.target.checked)}
           />
-          Enabled
+          Switched on
         </label>
         {action.error !== null && <ErrorPanel error={action.error} />}
         <DialogButtons busy={action.busy} submitLabel="Save" onCancel={action.close} />
@@ -325,10 +325,10 @@ function RotateDialog({
     });
   };
   return (
-    <Dialog title={`Rotate the credential for ${leader.name}`} onClose={action.close}>
+    <Dialog title={`Replace the credential for ${leader.name}`} onClose={action.close}>
       <form className="form-grid" noValidate onSubmit={submit}>
         <p>
-          Create a new console credential on the leader first, replace it here, then revoke the old
+          Make a new console credential on the leader first, paste it here, then revoke the old
           one on the leader.
         </p>
         <CredentialField
@@ -349,11 +349,13 @@ function RotateDialog({
 
 type Open = { kind: "add" } | { kind: "edit" | "rotate" | "remove"; leader: LeaderOut } | null;
 
-function LeadersContent() {
+/** The Leaders section of Administration (pages/admin/AdminPage.tsx frames it). */
+export function AdminLeadersSection() {
   const read = useAdminList<LeaderOut>("/api/admin/leaders");
   const [open, setOpen] = useState<Open>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const rows = useRowFocus(read, setNotice);
+  const calloutId = useId();
   const close = () => setOpen(null);
   const done = (message: string) => {
     setNotice(message);
@@ -363,19 +365,20 @@ function LeadersContent() {
   return (
     <div {...rows.props}>
       <div className="section-head">
+        <h2>{read.data === undefined ? "Leaders" : countOf(read.data.length, "leader")}</h2>
         <button
           type="button"
           className="button button-primary"
           onClick={() => setOpen({ kind: "add" })}
         >
-          Add leader
+          Add a leader
         </button>
       </div>
       <ActionNotice message={notice} />
       <ReadState read={read} what="leaders">
         {(leaders) =>
           leaders.length === 0 ? (
-            <p>No leaders are registered.</p>
+            <p>This console talks to no leaders yet.</p>
           ) : (
             <div className="table-scroll" role="region" aria-label="Registered leaders" tabIndex={0}>
               <table className="wide">
@@ -384,7 +387,7 @@ function LeadersContent() {
                     <th scope="col">Leader</th>
                     <th scope="col">Address</th>
                     <th scope="col">Labels</th>
-                    <th scope="col">Enabled</th>
+                    <th scope="col">State</th>
                     <th scope="col">Credential</th>
                     <th scope="col">Actions</th>
                   </tr>
@@ -393,9 +396,11 @@ function LeadersContent() {
                   {leaders.map((leader) => (
                     <tr key={leader.name} data-row={leader.name}>
                       <th scope="row">{leader.name}</th>
-                      <td className="mono long">{leader.base_url}</td>
+                      <td className="mono long">
+                        <BreakPath text={leader.base_url} />
+                      </td>
                       <td className="mono long">{labelsText(leader.labels) || "–"}</td>
-                      <td className="nowrap">{leader.enabled ? "Yes" : "No"}</td>
+                      <td className="nowrap">{leader.enabled ? "On" : "Switched off"}</td>
                       <td>
                         {leader.credential_revoked ? (
                           <span className="badge badge-bad">Revoked by the leader</span>
@@ -419,9 +424,9 @@ function LeadersContent() {
                           type="button"
                           className="button"
                           onClick={() => setOpen({ kind: "rotate", leader })}
-                          aria-label={`Rotate credential for ${leader.name}`}
+                          aria-label={`Replace credential for ${leader.name}`}
                         >
-                          Rotate credential
+                          Replace credential
                         </button>
                         <button
                           type="button"
@@ -460,7 +465,7 @@ function LeadersContent() {
       {open?.kind === "remove" && (
         <ConfirmDialog
           title={`Remove ${open.leader.name}?`}
-          message="The console forgets this leader, its history and the grants that name it. The leader itself is not changed; revoke the console's credential there too."
+          message="The console forgets this leader, its history and the roles given on it by name. The leader itself is not changed: revoke the console's credential there too."
           confirmLabel="Remove leader"
           onClose={close}
           onConfirm={async () => {
@@ -469,14 +474,20 @@ function LeadersContent() {
           }}
         />
       )}
+      <section className="sheet callout" aria-labelledby={calloutId}>
+        <h2 id={calloutId}>Adding a leader takes two steps</h2>
+        <ol>
+          <li>
+            On the leader, an admin runs <code>swarmscribe-admin console create</code> and copies the
+            credential it prints.
+          </li>
+          <li>
+            Here, choose <strong>Add a leader</strong> and paste the address and that credential. The
+            credential is never shown again.
+          </li>
+        </ol>
+      </section>
     </div>
   );
 }
 
-export function AdminLeadersPage() {
-  return (
-    <AdminFrame title="Leaders">
-      <LeadersContent />
-    </AdminFrame>
-  );
-}

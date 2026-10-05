@@ -124,8 +124,23 @@ for (const theme of THEMES) {
       await page.getByRole("button", { name: "I have stored it" }).click();
 
       await page.goto("/admin/leaders");
-      await page.getByRole("button", { name: "Add leader" }).click();
+      await page.getByRole("button", { name: "Add a leader" }).click();
       await shot("dialog-add-leader", false);
+      await page.keyboard.press("Escape");
+      await page.getByRole("button", { name: "Edit eu-1" }).click();
+      await shot("dialog-edit-leader", false);
+      await page.keyboard.press("Escape");
+      await page.getByRole("button", { name: "Replace credential for eu-1" }).click();
+      await shot("dialog-replace-credential", false);
+      await page.keyboard.press("Escape");
+      await page.getByRole("button", { name: "Remove eu-1" }).click();
+      await expect(page.getByRole("alertdialog")).toBeVisible();
+      await shot("dialog-remove-leader", false);
+      await page.keyboard.press("Escape");
+      await page.goto("/admin/grants");
+      await page.getByRole("button", { name: /^Remove / }).first().click();
+      await expect(page.getByRole("alertdialog")).toBeVisible();
+      await shot("dialog-remove-role", false);
       await page.keyboard.press("Escape");
 
       // A viewer: what switched-off actions look like.

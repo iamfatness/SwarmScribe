@@ -1,14 +1,39 @@
 import { useId } from "react";
 import type { PrincipalKind } from "../../api/types";
 
-export const PRINCIPAL_KINDS: { value: PrincipalKind; label: string; hint: string }[] = [
-  { value: "entra_group", label: "Entra ID group", hint: "the group's object ID (a GUID)" },
-  { value: "google_group", label: "Google group", hint: "the group's email address" },
-  { value: "email", label: "Email address", hint: "a Google account's address" },
-  { value: "domain", label: "Domain", hint: "a Google Workspace domain, such as example.org" },
+/**
+ * The four ways to name who gets a role or becomes a console administrator. `label` is the
+ * choice as a person reads it, `field` the name of the box that follows it, `hint` what to
+ * put there.
+ */
+export const PRINCIPAL_KINDS: { value: PrincipalKind; label: string; field: string; hint: string }[] = [
+  {
+    value: "entra_group",
+    label: "An Entra ID group",
+    field: "Group object ID",
+    hint: "The group's object ID in Entra ID, a GUID.",
+  },
+  {
+    value: "google_group",
+    label: "A Google group",
+    field: "Group address",
+    hint: "The group's email address.",
+  },
+  {
+    value: "email",
+    label: "One person, by email",
+    field: "Email address",
+    hint: "The address of a Google account.",
+  },
+  {
+    value: "domain",
+    label: "Everyone at a domain",
+    field: "Domain",
+    hint: "A Google Workspace domain, such as example.org.",
+  },
 ];
 
-/** Who a grant or a console administrator entry names: a kind and the principal itself. */
+/** Who a role or a console administrator entry names: a kind, then the name itself. */
 export function PrincipalFields({
   kind,
   principal,
@@ -21,11 +46,11 @@ export function PrincipalFields({
   onPrincipal: (principal: string) => void;
 }) {
   const hintId = useId();
-  const hint = PRINCIPAL_KINDS.find((k) => k.value === kind)?.hint ?? "";
+  const chosen = PRINCIPAL_KINDS.find((k) => k.value === kind);
   return (
     <>
       <label className="field">
-        Principal kind
+        Who
         <select value={kind} onChange={(e) => onKind(e.target.value as PrincipalKind)}>
           {PRINCIPAL_KINDS.map((k) => (
             <option key={k.value} value={k.value}>
@@ -36,7 +61,7 @@ export function PrincipalFields({
       </label>
       <div className="field">
         <label className="field">
-          Principal
+          {chosen?.field ?? "Name"}
           <input
             required
             autoComplete="off"
@@ -47,7 +72,7 @@ export function PrincipalFields({
           />
         </label>
         <span id={hintId} className="field-help">
-          {hint}
+          {chosen?.hint ?? ""}
         </span>
       </div>
     </>

@@ -680,6 +680,7 @@ Rules:
 | "Draining" | "Winding down" |
 | "No followers have joined this leader." | "No follower has joined this leader yet." |
 | Followers columns "Follower", "Pool", "State", "Device", "Last seen", "Actions" | Same |
+| Followers column "Device": "cuda" / "cpu" (the follower's own code) | "GPU (CUDA)" / "CPU"; "–" if it reported none; a device the console does not know is shown as sent |
 | "Leases" | "Working on" |
 | State "active" / "draining" / "revoked" / "gone" | "At work" / "Winding down" / "Revoked" / "Gone" |
 | "Drain"; named "Drain follower {id}" | "Wind down"; named "Wind down follower {id}" |
@@ -849,7 +850,7 @@ Rules:
 #### Error titles (`api/errors.ts`)
 
 The title is ours; the server's own text follows it unchanged. Each title keeps its
-meaning. "Try again in {n} seconds." is unchanged.
+meaning. "Try again in {n} seconds." is unchanged, but it is said once: when the server's own text already ends "; try again" and a retry time is known, that tail gives way to "Try again in {n} seconds."
 
 | Code | Was | Is |
 | --- | --- | --- |

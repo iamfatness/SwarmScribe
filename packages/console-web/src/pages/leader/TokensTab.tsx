@@ -7,7 +7,7 @@ import { ActionButton } from "../../components/ActionButton";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { Dialog } from "../../components/Dialog";
 import { ErrorPanel } from "../../components/ErrorPanel";
-import { formatCount, formatTime } from "../../lib/format";
+import { formatCount, formatTime, withUnit } from "../../lib/format";
 import {
   ActionNotice,
   ReadState,
@@ -152,19 +152,19 @@ function CreateTokenDialog({
     >
       <form ref={formRef} className="form-grid" noValidate onSubmit={submit}>
         <div>
-          <label className="field" htmlFor={poolId}>
-            Pool
-          </label>
-          <input
-            id={poolId}
-            name="pool"
-            value={pool}
-            aria-required
-            aria-invalid={errors.pool === undefined ? undefined : true}
-            aria-describedby={errors.pool === undefined ? undefined : poolErrorId}
-            onKeyDown={ignoreRepeatedEnter}
-            onChange={(event) => setPool(event.target.value)}
-          />
+          <div className="field">
+            <label htmlFor={poolId}>Pool</label>
+            <input
+              id={poolId}
+              name="pool"
+              value={pool}
+              aria-required
+              aria-invalid={errors.pool === undefined ? undefined : true}
+              aria-describedby={errors.pool === undefined ? undefined : poolErrorId}
+              onKeyDown={ignoreRepeatedEnter}
+              onChange={(event) => setPool(event.target.value)}
+            />
+          </div>
           {errors.pool !== undefined && (
             <p id={poolErrorId} className="error-text" role="alert">
               {errors.pool}
@@ -306,7 +306,7 @@ export function TokenCreatedDialog({
         </div>
         <div>
           <dt>Can be used</dt>
-          <dd>{created.max_uses === 1 ? "once" : `${formatCount(created.max_uses)} times`}</dd>
+          <dd>{created.max_uses === 1 ? "once" : withUnit(formatCount(created.max_uses), "times")}</dd>
         </div>
         <div>
           <dt>Expires</dt>

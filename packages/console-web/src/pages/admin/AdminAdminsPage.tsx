@@ -6,7 +6,7 @@ import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { ErrorPanel } from "../../components/ErrorPanel";
 import { formatTime } from "../../lib/format";
 import { ActionNotice, ReadState } from "../leader/common";
-import { AdminFrame, useAdminList } from "./AdminFrame";
+import { useAdminList } from "./AdminFrame";
 import { PrincipalFields } from "./PrincipalFields";
 import { useRowFocus } from "../leader/rowFocus";
 
@@ -53,7 +53,8 @@ function AddAdminForm({ onDone }: { onDone: (admin: ConsoleAdminOut) => void }) 
   );
 }
 
-function AdminsContent() {
+/** The Console administrators section of Administration (pages/admin/AdminPage.tsx frames it). */
+export function AdminAdminsSection() {
   const read = useAdminList<ConsoleAdminOut>("/api/admin/console-admins");
   const [removing, setRemoving] = useState<ConsoleAdminOut | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -61,10 +62,9 @@ function AdminsContent() {
 
   return (
     <div {...rows.props}>
-      <p className="muted">
-        Console administrators manage leaders and grants. That gives them no role on any leader
-        unless a grant does.
-      </p>
+      <div className="section-head">
+        <h2>Console administrators</h2>
+      </div>
       <ActionNotice message={notice} />
       <ReadState read={read} what="console administrators">
         {(admins) => (
@@ -77,7 +77,7 @@ function AdminsContent() {
             <table className="medium">
               <thead>
                 <tr>
-                  <th scope="col">Principal</th>
+                  <th scope="col">Who</th>
                   <th scope="col">Added</th>
                   <th scope="col">Actions</th>
                 </tr>
@@ -110,19 +110,19 @@ function AdminsContent() {
       </ReadState>
       <AddAdminForm
         onDone={(admin) => {
-          setNotice(`${admin.principal_kind}:${admin.principal} is a console administrator.`);
+          setNotice(`${admin.principal_kind}:${admin.principal} is now a console administrator.`);
           read.refresh();
         }}
       />
       {removing !== null && (
         <ConfirmDialog
           title="Remove this console administrator?"
-          message={`${removing.principal_kind}:${removing.principal} can no longer manage leaders and grants. The last administrator cannot be removed.`}
+          message={`${removing.principal_kind}:${removing.principal} can no longer add leaders or give roles. The last administrator cannot be removed.`}
           confirmLabel="Remove administrator"
           onClose={() => setRemoving(null)}
           onConfirm={async () => {
             await api.del(`/api/admin/console-admins/${encodeURIComponent(removing.id)}`);
-            rows.done("Console administrator removed.");
+            rows.done("The console administrator is removed.");
           }}
         />
       )}
@@ -130,10 +130,3 @@ function AdminsContent() {
   );
 }
 
-export function AdminAdminsPage() {
-  return (
-    <AdminFrame title="Console administrators">
-      <AdminsContent />
-    </AdminFrame>
-  );
-}

@@ -81,7 +81,11 @@ export function describeError(error: unknown): ErrorText {
     const title = ERROR_TITLES[error.code] ?? titleForStatus(error.status);
     const parts: string[] = [];
     if (error.message && error.message !== title && !error.message.startsWith("The console answered HTTP")) {
-      parts.push(error.message);
+      // The server's own text may already end "; try again". With a Retry-After the panel says
+      // how long, so that tail goes rather than being said twice.
+      parts.push(
+        error.retryAfter === null ? error.message : error.message.replace(/[;,.]?\s*try again\.?$/i, "."),
+      );
     }
     if (error.retryAfter !== null) parts.push(`Try again in ${error.retryAfter} seconds.`);
     return { title, detail: parts.length > 0 ? parts.join(" ") : null };

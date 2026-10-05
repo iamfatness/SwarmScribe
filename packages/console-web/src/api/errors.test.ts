@@ -45,7 +45,13 @@ describe("describeError", () => {
     const text = describeError(
       new ApiError(503, "leader_unreachable", "leader eu-1 cannot be reached; try again", 15),
     );
-    expect(text.detail).toBe("leader eu-1 cannot be reached; try again Try again in 15 seconds.");
+    expect(text.detail).toBe("leader eu-1 cannot be reached. Try again in 15 seconds.");
+    expect(text.detail?.match(/try again/gi)).toHaveLength(1);
+  });
+
+  it("leaves the server's text exactly as sent when there is no Retry-After", () => {
+    const text = describeError(new ApiError(503, "leader_unreachable", "cannot be reached; try again", null));
+    expect(text.detail).toBe("cannot be reached; try again");
   });
 
   it("names the role a forbidden action needs, from the console's message", () => {

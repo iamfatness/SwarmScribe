@@ -8,9 +8,9 @@ const SIGNED_IN_PAGES: { path: string; heading: string }[] = [
   { path: "/leaders/eu-1/locations", heading: "eu-1" },
   { path: "/leaders/eu-1/tokens", heading: "eu-1" },
   { path: "/leaders/eu-1/consent", heading: "eu-1" },
-  { path: "/admin/leaders", heading: "Leaders" },
-  { path: "/admin/grants", heading: "Grants" },
-  { path: "/admin/admins", heading: "Console administrators" },
+  { path: "/admin/leaders", heading: "Administration" },
+  { path: "/admin/grants", heading: "Administration" },
+  { path: "/admin/admins", heading: "Administration" },
   { path: "/no-such-page", heading: "Page not found" },
 ];
 
@@ -167,20 +167,20 @@ for (const theme of THEMES) {
 
     test("administration's refusal of a viewer has no accessibility violations", async ({ page }) => {
       await signIn(page, "viewer", "/admin/leaders");
-      await expect(page.getByText(/Console administration needs a console administrator/)).toBeVisible();
+      await expect(page.getByText(/Administration is for console administrators/)).toBeVisible();
       await expectAccessible(page, `administration as a viewer (${theme})`);
     });
 
     test("the administration dialogs have no accessibility violations", async ({ page }) => {
       await signIn(page, "admin", "/admin/leaders");
-      await page.getByRole("button", { name: "Add leader" }).click();
+      await page.getByRole("button", { name: "Add a leader" }).click();
       await expectAccessible(page, `add leader dialog (${theme})`);
       await page.keyboard.press("Escape");
       await page.getByRole("button", { name: "Edit eu-1" }).click();
       await expectAccessible(page, `edit leader dialog (${theme})`);
       await page.keyboard.press("Escape");
-      await page.getByRole("button", { name: "Rotate credential for eu-1" }).click();
-      await expectAccessible(page, `rotate credential dialog (${theme})`);
+      await page.getByRole("button", { name: "Replace credential for eu-1" }).click();
+      await expectAccessible(page, `replace credential dialog (${theme})`);
       await page.keyboard.press("Escape");
       await page.getByRole("button", { name: "Remove eu-1" }).click();
       await expectAccessible(page, `remove leader confirm dialog (${theme})`);

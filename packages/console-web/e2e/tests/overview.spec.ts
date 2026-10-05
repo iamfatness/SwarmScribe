@@ -233,13 +233,13 @@ test("the longest leader name and a very long label never push the page sideways
   const name = `L${"o".repeat(99)}`;
   const label = `note=${"v".repeat(200)}`;
   await signIn(page, "admin", "/admin/leaders");
-  await page.getByRole("button", { name: "Add leader" }).click();
+  await page.getByRole("button", { name: "Add a leader" }).click();
   const dialog = page.getByRole("dialog", { name: "Add a leader" });
   await dialog.getByRole("textbox", { name: "Name" }).fill(name);
   await dialog.getByRole("textbox", { name: "Address (https://)" }).fill("https://long.leaders.example");
   await dialog.getByRole("textbox", { name: "Labels" }).fill(label);
   await dialog.getByLabel("Console credential").fill("c".repeat(20) + "_-" + "D".repeat(21));
-  await dialog.getByRole("button", { name: "Add leader" }).click();
+  await dialog.getByRole("button", { name: "Add this leader" }).click();
   await expect(dialog).toHaveCount(0);
 
   for (const width of [1280, 768, 390]) {
@@ -263,17 +263,15 @@ test("the longest leader name and a very long label never push the page sideways
   }
 });
 
-// Every table with row actions: its page, the name of its scrolling region, and whether it
-// has been folded to fit at every width (the leader's tabs and the join tokens have; the
-// Administration tables are folded in their own task and until then scroll at tablet width).
-const ACTION_TABLES: [path: string, region: string, fits: boolean][] = [
-  ["/leaders/eu-1/jobs", "Job list", true],
-  ["/leaders/eu-1/pools", "Followers", true],
-  ["/leaders/eu-1/locations", "Location list", true],
-  ["/leaders/eu-1/tokens", "Join token list", true],
-  ["/admin/leaders", "Registered leaders", false],
-  ["/admin/grants", "Grants", false],
-  ["/admin/admins", "Console administrators", false],
+// Every table with row actions: its page and the name of its scrolling region.
+const ACTION_TABLES: [path: string, region: string][] = [
+  ["/leaders/eu-1/jobs", "Job list"],
+  ["/leaders/eu-1/pools", "Followers"],
+  ["/leaders/eu-1/locations", "Location list"],
+  ["/leaders/eu-1/tokens", "Join token list"],
+  ["/admin/leaders", "Registered leaders"],
+  ["/admin/grants", "Grants"],
+  ["/admin/admins", "Console administrators"],
 ];
 
 // Tables with no row actions, in the same pages or on their own.
@@ -300,22 +298,20 @@ async function settledOverflow(region: Locator): Promise<number> {
   return last;
 }
 
-// A pinned Actions column would hide the text beneath it at rest, so a table either fits its
-// region (all of the leader's own tables, at every width) or, where it is still too wide
-// (Administration, join tokens, at tablet width), scrolls with nothing pinned over its text
-// and Actions reachable by scrolling.
-test("every table fits at 1280 and 900, and the leader's own tables at 768 too", async ({ page }) => {
+// A pinned Actions column would hide the text beneath it at rest, so a table fits its region
+// at every width, with nothing pinned over its text and Actions in view.
+test("every table fits at 1280, 900 and 768", async ({ page }) => {
   await signIn(page, "admin");
   for (const width of [1280, 900, 768]) {
     await page.setViewportSize({ width, height: 1000 });
-    for (const [path, name, fits] of ACTION_TABLES) {
+    for (const [path, name] of ACTION_TABLES) {
       await page.goto(path);
       const region = page.getByRole("region", { name, exact: true });
       await expect(region).toBeVisible();
       await expect(page.getByText(/^Loading/)).toHaveCount(0);
       const where = `${path} at ${width}`;
       const widest = await settledOverflow(region);
-      if (width >= 900 || fits) expect(widest, `${where} needs no sideways scroll`).toBeLessThanOrEqual(1);
+      expect(widest, `${where} needs no sideways scroll`).toBeLessThanOrEqual(1);
 
       // No cell is pinned over its neighbours, so no column's text is hidden under another.
       const pinned = await region.evaluate(

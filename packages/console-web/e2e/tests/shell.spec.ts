@@ -106,7 +106,7 @@ test("the current page is marked in the rail on every kind of page", async ({ pa
 
   await nav(page).getByRole("link", { name: "Administration" }).click();
   await expect(nav(page).getByRole("link", { name: "Administration" })).toHaveAttribute("aria-current", "page");
-  await page.getByRole("link", { name: "Grants" }).click();
+  await page.getByRole("link", { name: "Who can do what" }).click();
   await expect(nav(page).getByRole("link", { name: "Administration" })).toHaveAttribute("aria-current", "page");
   await expect(nav(page).locator("a[aria-current]")).toHaveCount(1);
 });

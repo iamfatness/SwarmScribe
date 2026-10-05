@@ -33,8 +33,8 @@ const ROTATE = "PUT /api/admin/leaders/eu-1/credential";
 const PATCH = "PATCH /api/admin/leaders/eu-1";
 
 async function openRotate() {
-  await userEvent.click(await screen.findByRole("button", { name: "Rotate credential for eu-1" }));
-  return screen.getByRole("dialog", { name: "Rotate the credential for eu-1" });
+  await userEvent.click(await screen.findByRole("button", { name: "Replace credential for eu-1" }));
+  return screen.getByRole("dialog", { name: "Replace the credential for eu-1" });
 }
 
 describe("leader administration requests", () => {
@@ -43,9 +43,9 @@ describe("leader administration requests", () => {
       LIST,
       reply(200, [LEADER]),
     );
-    await userEvent.click(await screen.findByRole("button", { name: "Add leader" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Add a leader" }));
     const dialog = screen.getByRole("dialog", { name: "Add a leader" });
-    const submit = within(dialog).getByRole("button", { name: "Add leader" });
+    const submit = within(dialog).getByRole("button", { name: "Add this leader" });
     const name = within(dialog).getByRole("textbox", { name: "Name" });
     const url = within(dialog).getByRole("textbox", { name: "Address (https://)" });
     const labels = within(dialog).getByRole("textbox", { name: "Labels" });
@@ -106,7 +106,7 @@ describe("leader administration requests", () => {
       .on(PATCH, reply(200, { ...LEADER, enabled: false }));
     await userEvent.click(await screen.findByRole("button", { name: "Edit eu-1" }));
     const dialog = screen.getByRole("dialog", { name: "Edit eu-1" });
-    await userEvent.click(within(dialog).getByRole("checkbox", { name: "Enabled" }));
+    await userEvent.click(within(dialog).getByRole("checkbox", { name: "Switched on" }));
     await userEvent.click(within(dialog).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(mock.callsTo(PATCH)[0]?.body).toEqual({ enabled: false }));
     expect(await screen.findByText("Leader eu-1 is saved.")).toBeInTheDocument();
@@ -165,7 +165,7 @@ describe("leader administration requests", () => {
     renderApp("/admin/leaders", { session: ADMIN_SESSION })
       .on(LIST, reply(200, [LEADER]))
       .on("POST /api/admin/leaders", fail(409, "exists", "a leader named '<b>x</b>' exists"));
-    await userEvent.click(await screen.findByRole("button", { name: "Add leader" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Add a leader" }));
     const dialog = screen.getByRole("dialog", { name: "Add a leader" });
     await userEvent.type(within(dialog).getByRole("textbox", { name: "Name" }), "eu-1");
     await userEvent.type(
@@ -173,7 +173,7 @@ describe("leader administration requests", () => {
       "eu-1.leaders.example",
     );
     await userEvent.type(within(dialog).getByLabelText("Console credential"), CREDENTIAL);
-    await userEvent.click(within(dialog).getByRole("button", { name: "Add leader" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Add this leader" }));
     const alert = await within(dialog).findByRole("alert");
     expect(alert).toHaveTextContent("That already exists.");
     expect(alert.querySelector("b")).toBeNull();
@@ -233,7 +233,7 @@ describe("a credential in the administration pages", () => {
     const mock = renderApp("/admin/leaders", { session: ADMIN_SESSION })
       .on(LIST, reply(200, [LEADER]))
       .on("POST /api/admin/leaders", reply(201, LEADER));
-    await userEvent.click(await screen.findByRole("button", { name: "Add leader" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Add a leader" }));
     const dialog = screen.getByRole("dialog", { name: "Add a leader" });
     await userEvent.type(within(dialog).getByRole("textbox", { name: "Name" }), "us-1");
     await userEvent.type(
@@ -241,7 +241,7 @@ describe("a credential in the administration pages", () => {
       "us-1.leaders.example",
     );
     await userEvent.type(within(dialog).getByLabelText("Console credential"), CREDENTIAL);
-    await userEvent.click(within(dialog).getByRole("button", { name: "Add leader" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Add this leader" }));
     await waitFor(() => expect(mock.callsTo("POST /api/admin/leaders")).toHaveLength(1));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(reactStateHolds(CREDENTIAL)).toBe(false);
@@ -255,10 +255,10 @@ describe("administrator and grant refusals", () => {
       .on("POST /api/admin/console-admins", fail(409, "exists", "already"));
     const form = await screen.findByRole("form", { name: "Add a console administrator" });
     await userEvent.selectOptions(
-      within(form).getByRole("combobox", { name: "Principal kind" }),
+      within(form).getByRole("combobox", { name: "Who" }),
       "email",
     );
-    await userEvent.type(within(form).getByRole("textbox", { name: "Principal" }), "a@example.org");
+    await userEvent.type(within(form).getByRole("textbox", { name: "Email address" }), "a@example.org");
     await userEvent.click(within(form).getByRole("button", { name: "Add administrator" }));
     await waitFor(() =>
       expect(mock.callsTo("POST /api/admin/console-admins")[0]?.body).toEqual({
@@ -273,9 +273,9 @@ describe("administrator and grant refusals", () => {
     renderApp("/admin/grants", { session: ADMIN_SESSION })
       .on("GET /api/admin/grants", reply(200, []))
       .on("POST /api/admin/grants", fail(422, "invalid_scope", "scope <i>x</i>"));
-    const form = await screen.findByRole("form", { name: "Add a grant" });
-    await userEvent.type(within(form).getByRole("textbox", { name: "Principal" }), "a1");
-    await userEvent.click(within(form).getByRole("button", { name: "Add grant" }));
+    const form = await screen.findByRole("form", { name: "Give a role" });
+    await userEvent.type(within(form).getByRole("textbox", { name: "Group object ID" }), "a1");
+    await userEvent.click(within(form).getByRole("button", { name: "Give the role" }));
     const alert = await within(form).findByRole("alert");
     expect(alert).toHaveTextContent("That is not a way to say which leaders.");
     expect(alert.querySelector("i")).toBeNull();

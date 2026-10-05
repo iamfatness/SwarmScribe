@@ -41,6 +41,7 @@ from console_testkit import (  # noqa: E402
 from fake_entra import FakeEntra, UnknownPersona  # noqa: E402
 from fake_leaders import CAPS, FakeLeaders  # noqa: E402
 from sqlalchemy import select, text  # noqa: E402
+from sqlalchemy.exc import DBAPIError  # noqa: E402
 from starlette.applications import Starlette  # noqa: E402
 from starlette.requests import Request  # noqa: E402
 from starlette.responses import JSONResponse  # noqa: E402
@@ -60,6 +61,18 @@ LEADERS = {
     "us-1": {"region": "us", "env": "prod"},
 }
 KEEP_TABLES = {"alembic_version"}
+# Emptying the tables races whatever the console is doing at that moment: a request still
+# being answered for the last test's page, or the poller recording a check. TRUNCATE wants
+# every table at once and they hold one while waiting for another, so the two can wait on
+# each other. The reset therefore never waits long for a lock: it gives up after
+# RESET_LOCK_TIMEOUT_MS (well inside Postgres's one-second deadlock check, so nothing is ever
+# chosen as a victim and no request is failed for it), lets the other side finish, and tries
+# again a bounded number of times.
+RESET_ATTEMPTS = 10
+RESET_LOCK_TIMEOUT_MS = 300
+RESET_BACKOFF_SECONDS = (0.02, 0.05, 0.1, 0.2)
+# Postgres: "deadlock detected" and "lock not available" (the lock timeout).
+RETRYABLE_SQLSTATES = {"40P01", "55P03"}
 logger = logging.getLogger("e2e-harness")
 
 
@@ -86,6 +99,8 @@ class Harness:
     def __init__(self, database_url: str) -> None:
         self.entra = FakeEntra()
         self.fakes = FakeLeaders()
+        # How often a reset found the tables busy and went round again (see RESET_ATTEMPTS).
+        self.reset_retries = 0
         settings = Settings(
             database_url=database_url,
             public_url=PUBLIC_URL,
@@ -115,13 +130,7 @@ class Harness:
         """Empty every console table, re-register the two leaders with grants and 24 hours
         of history, restore the fake leaders, and wait for both leaders' first poll."""
         self.fakes.reset()
-        tables = [
-            table.name
-            for table in reversed(Base.metadata.sorted_tables)
-            if table.name not in KEEP_TABLES
-        ]
-        async with self.console.state.engine.begin() as conn:
-            await conn.execute(text(f"TRUNCATE {', '.join(tables)} RESTART IDENTITY CASCADE"))
+        await self._empty_tables()
         keys = self.console.state.keys
         async with self.sessionmaker() as session:
             for name, labels in LEADERS.items():
@@ -150,6 +159,31 @@ class Harness:
             await session.commit()
         await self._seed_history()
         await self._wait_for_first_polls()
+
+    async def _empty_tables(self) -> None:
+        tables = [
+            table.name
+            for table in reversed(Base.metadata.sorted_tables)
+            if table.name not in KEEP_TABLES
+        ]
+        truncate = text(f"TRUNCATE {', '.join(tables)} RESTART IDENTITY CASCADE")
+        for attempt in range(1, RESET_ATTEMPTS + 1):
+            try:
+                async with self.console.state.engine.begin() as conn:
+                    # SET LOCAL: the timeout ends with this transaction.
+                    await conn.execute(
+                        text(f"SET LOCAL lock_timeout = '{RESET_LOCK_TIMEOUT_MS}ms'")
+                    )
+                    await conn.execute(truncate)
+                return
+            except DBAPIError as exc:
+                sqlstate = getattr(exc.orig, "sqlstate", None)
+                if sqlstate not in RETRYABLE_SQLSTATES or attempt == RESET_ATTEMPTS:
+                    raise
+                self.reset_retries += 1
+                backoff = RESET_BACKOFF_SECONDS[min(attempt, len(RESET_BACKOFF_SECONDS)) - 1]
+                logger.info("reset: tables busy (%s), attempt %d; trying again", sqlstate, attempt)
+                await asyncio.sleep(backoff)
 
     async def _seed_history(self) -> None:
         now = datetime.now(UTC)
@@ -192,7 +226,7 @@ class Harness:
 def control_app(harness: Harness) -> Starlette:
     async def reset(_request: Request) -> JSONResponse:
         await harness.reset()
-        return JSONResponse({"ok": True})
+        return JSONResponse({"ok": True, "retries": harness.reset_retries})
 
     async def authorize(request: Request) -> JSONResponse:
         body = await request.json()

@@ -7,6 +7,10 @@ metadata:
     {{- include "swarmscribe-follower.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  # A pod is Ready seconds after it starts, before its model loads or it registers; one that
+  # cannot do either exits within a minute. Without this a new pod counts as available at once
+  # and a bad image walks through the whole pool.
+  minReadySeconds: {{ .Values.minReadySeconds }}
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -19,7 +23,9 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "swarmscribe-follower.labels" . | nindent 8 }}
+        {{- /* The selector labels only: the chart and app version labels would restart every
+        follower on any chart bump. */}}
+        {{- include "swarmscribe-follower.selectorLabels" . | nindent 8 }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

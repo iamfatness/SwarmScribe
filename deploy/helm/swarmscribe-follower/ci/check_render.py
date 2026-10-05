@@ -30,6 +30,9 @@ STATE_MOUNT = "/var/lib/swarmscribe-follower"
 OWNED = (
     "STATE_DIR", "SCRATCH_DIR", "MODEL_DIR", "HEALTH_ADDR", "ON_DRAINED",
     "SHUTDOWN_GRACE_SECONDS", "MEMORY_LIMIT_MB", "ALLOW_HTTP", "POOL", "DEVICE",
+    # The follower also reads these with the prefix (populate_by_name): a token must not reach
+    # values, Helm's history or the pod spec by that road.
+    "JOIN_TOKEN", "JOIN_TOKEN_FILE", "LEADER_URL", "LEADER_CA_FILE",
 )
 FIXED = (
     "SWARMSCRIBE_LEADER_URL", "SWARMSCRIBE_JOIN_TOKEN", "SWARMSCRIBE_JOIN_TOKEN_FILE",
@@ -273,6 +276,29 @@ def check_core(docs: list[dict]) -> list[str]:
     if "HTTPS_PROXY" not in env(follower(proxied)):
         problems.append("Deployment: extraEnv HTTPS_PROXY is not passed on")
 
+    # A pod that cannot load its model or register exits within a minute: a new pod must not
+    # count as available before then, or a bad rollout walks through the whole pool.
+    if deployment["spec"].get("minReadySeconds") != 60:
+        problems.append("Deployment: minReadySeconds is not 60 by default")
+    for ready in (0, 5):
+        got = one(render("--set", f"minReadySeconds={ready}"), "Deployment")["spec"]
+        if got.get("minReadySeconds") != ready:
+            problems.append(f"Deployment: minReadySeconds={ready} is not passed on")
+    refused(problems, "a negative minReadySeconds", "minReadySeconds=-1")
+    refused(problems, "a text minReadySeconds", "minReadySeconds=soon")
+    # The pod template carries the selector labels and podLabels only: a chart version bump
+    # (helm.sh/chart, app.kubernetes.io/version) must not restart every follower.
+    template = deployment["spec"]["template"]["metadata"]["labels"]
+    if "helm.sh/chart" in template or "app.kubernetes.io/version" in template:
+        problems.append("Deployment: the pod template carries the chart or app version label")
+    if any(template.get(k) != v for k, v in deployment["spec"]["selector"]["matchLabels"].items()):
+        problems.append("Deployment: the pod template lacks a selector label")
+    if "helm.sh/chart" not in deployment["metadata"]["labels"]:
+        problems.append("Deployment: its own metadata lost the full labels")
+    labelled = one(render("--set", "podLabels.team=asr"), "Deployment")
+    if labelled["spec"]["template"]["metadata"]["labels"].get("team") != "asr":
+        problems.append("Deployment: podLabels are not on the pod template")
+
     # Values that would deploy a pool that cannot start, or that leak a token.
     refused(problems, "no image repository", "image.repository=")
     refused(problems, "no image tag", "image.tag=")
@@ -289,6 +315,9 @@ def check_core(docs: list[dict]) -> list[str]:
         ("a leader URL without a host", "https://"),
         ("a leader URL of another scheme", "ftp://leader.example.org"),
         ("a leader URL with a newline", "https://leader.example.org\nX"),
+        ("a leader URL with port 99999", "https://leader.example.org:99999"),
+        ("a leader URL with port 65536", "https://leader.example.org:65536"),
+        ("a leader URL with port 0", "https://leader.example.org:0"),
     ):
         refused_file(problems, what, {"leader": {"url": url}})
     for name in OWNED:

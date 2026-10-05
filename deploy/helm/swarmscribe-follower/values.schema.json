@@ -88,6 +88,7 @@
       }
     },
     "terminationGracePeriodSeconds": {"type": "integer", "minimum": 30},
+    "minReadySeconds": {"type": "integer", "minimum": 0},
     "metrics": {
       "type": "object",
       "additionalProperties": false,

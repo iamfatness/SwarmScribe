@@ -58,7 +58,8 @@ runtimeClassName: ""
 #   LOG_FORMAT: text
 # Names are upper case (^[A-Z][A-Z0-9_]*$). The render refuses a name the chart sets itself
 # (STATE_DIR, SCRATCH_DIR, MODEL_DIR, HEALTH_ADDR, ON_DRAINED, SHUTDOWN_GRACE_SECONDS,
-# MEMORY_LIMIT_MB, ALLOW_HTTP, POOL, DEVICE).
+# MEMORY_LIMIT_MB, ALLOW_HTTP, POOL, DEVICE) and the four the chart takes from its own
+# values (JOIN_TOKEN, JOIN_TOKEN_FILE, LEADER_URL, LEADER_CA_FILE).
 settings: {}
 
 # Extra environment for the follower container, as a list of {name, value|valueFrom}, for
@@ -70,11 +71,11 @@ extraEnv: []
 # your Prometheus.
 healthPort: 9108
 
-# Memory decides the longest recording a follower takes. A job needs about 3.6 GiB per hour
+# Memory decides the longest recording a follower takes. A job needs about 3600 MiB per hour
 # of recording beside the model, and a recording that cannot fit under the limit is refused
 # (failed `out_of_resources`), not killed half-way. The memory limit is passed to the follower
 # as SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB. Size it as
-#   what the model holds once loaded + 0.4 GiB + 3.6 GiB x hours of the longest recording
+#   what the model holds once loaded + 0.4 GiB + 3600 MiB x hours of the longest recording
 # (README, "Sizing a pool"). The default serves recordings of up to one hour with
 # distil-large-v3 on a CPU or large-v3 on a GPU. Keep the memory request equal to the limit:
 # a follower uses all of it for a few seconds of every long recording.
@@ -106,6 +107,13 @@ models:
 # (SWARMSCRIBE_FOLLOWER_SHUTDOWN_GRACE_SECONDS), so handing back fits inside it.
 terminationGracePeriodSeconds: 900
 
+# How long a new pod must stay up before the rollout counts it as available. A pod is Ready
+# about 3 s after it starts, before its model loads and before it registers; one that cannot
+# do either (a bad image, a revoked token) exits within a minute and must not count as
+# available, or an upgrade to it replaces the whole pool. Costs this long per batch on every
+# rollout.
+minReadySeconds: 60
+
 metrics:
   # true adds prometheus.io/scrape, /port and /path annotations to the pods.
   scrapeAnnotations: false
@@ -130,7 +138,11 @@ networkPolicy:
     # with the policy on, add the nodes' address range here (the port is already limited to
     # healthPort):
     #   - ipBlock: {cidr: 10.0.0.0/16}
-    # or set networkPolicy.enabled: false. /metrics has no authentication.
+    # or set networkPolicy.enabled: false. /metrics has no authentication. Where the network
+    # plugin does not match CIDR rules against cluster-managed pods or nodes (Cilium, and GKE
+    # Dataplane V2, which is Cilium), the ipBlock above does not let the probes in either:
+    # set networkPolicy.enabled: false, or use the plugin's own policy for node/host traffic.
+    # Not run here.
     from: []
   egress:
     dns:
@@ -154,7 +166,15 @@ networkPolicy:
       cidrs: ["0.0.0.0/0", "::/0"]
       # More ranges to cut out of 0.0.0.0/0 and ::/0.
       extraExcept: []
-    # Extra raw egress rules (NetworkPolicyEgressRule objects).
+    # Extra raw egress rules (NetworkPolicyEgressRule objects). Needed for a leader or an
+    # object store that runs INSIDE this cluster on a network plugin where an ipBlock does not
+    # match cluster-managed pods (Cilium, and GKE Dataplane V2, which inherits it): the rule
+    # above would cut the followers off (pods Ready, never registering; not run here). Name
+    # the peer by selector instead:
+    #   - to:
+    #       - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: swarmscribe}}
+    #         podSelector: {matchLabels: {app.kubernetes.io/name: swarmscribe-leader}}
+    #     ports: [{protocol: TCP, port: 8080}]
     extra: []
 
 serviceAccount:

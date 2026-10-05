@@ -47,7 +47,7 @@ def test_every_setting_the_chart_sets_is_a_setting_of_the_follower():
 def test_every_setting_the_chart_keeps_for_itself_is_a_setting_of_the_follower():
     (owned,) = re.findall(r"\$owned := list ((?:\"[A-Z_]+\" ?)+)", HELPERS)
     names = re.findall(r'"([A-Z_]+)"', owned)
-    assert len(names) == 10
+    assert len(names) == 14
     for name in names:
         assert name.lower() in Settings.model_fields, name
     for name in OWN_SETTING.findall(DEPLOYMENT):

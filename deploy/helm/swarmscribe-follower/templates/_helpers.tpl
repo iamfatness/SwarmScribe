@@ -59,7 +59,10 @@ render on a URL the follower itself would refuse. */}}
 {{- $authority := regexFind `^https?://[^/]+` $url }}
 {{- $port := regexFind `:[0-9]+$` $authority | trimPrefix ":" }}
 {{- if $port }}
-{{- $port }}
+{{- if or (lt (atoi $port) 1) (gt (atoi $port) 65535) }}
+{{- fail (printf "leader.url has the port %s: a port is 1 to 65535" $port) }}
+{{- end }}
+{{- atoi $port }}
 {{- else }}
 {{- ternary "80" "443" (hasPrefix "http://" $url) }}
 {{- end }}
@@ -70,9 +73,11 @@ render on a URL the follower itself would refuse. */}}
 {{- $_ := include "swarmscribe-follower.image" . }}
 {{- $_ := include "swarmscribe-follower.leaderPort" . }}
 {{- $_ := required "poolToken.existingSecret is required: the Secret holding the pool token (swarmscribe-admin pool-tokens create)" .Values.poolToken.existingSecret }}
-{{- /* Names the chart sets itself. The follower reads its environment case-insensitively,
-so every comparison is on the upper-cased name. */}}
-{{- $owned := list "STATE_DIR" "SCRATCH_DIR" "MODEL_DIR" "HEALTH_ADDR" "ON_DRAINED" "SHUTDOWN_GRACE_SECONDS" "MEMORY_LIMIT_MB" "ALLOW_HTTP" "POOL" "DEVICE" }}
+{{- /* Names the chart sets itself, and the four the follower also reads with the prefix
+(populate_by_name): a token must not reach values, Helm's history or the pod spec that way.
+The follower reads its environment case-insensitively, so every comparison is on the
+upper-cased name. */}}
+{{- $owned := list "STATE_DIR" "SCRATCH_DIR" "MODEL_DIR" "HEALTH_ADDR" "ON_DRAINED" "SHUTDOWN_GRACE_SECONDS" "MEMORY_LIMIT_MB" "ALLOW_HTTP" "POOL" "DEVICE" "JOIN_TOKEN" "JOIN_TOKEN_FILE" "LEADER_URL" "LEADER_CA_FILE" }}
 {{- $fixed := list "SWARMSCRIBE_LEADER_URL" "SWARMSCRIBE_JOIN_TOKEN" "SWARMSCRIBE_JOIN_TOKEN_FILE" "SWARMSCRIBE_LEADER_CA_FILE" "POD_IP" "OMP_NUM_THREADS" }}
 {{- range $name, $_ := .Values.settings }}
 {{- if not (regexMatch "^[A-Z][A-Z0-9_]*$" $name) }}

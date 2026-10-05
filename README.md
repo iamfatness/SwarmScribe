@@ -14,7 +14,7 @@ Design: [`docs/superpowers/specs/2026-10-02-swarmscribe-architecture-design.md`]
 | `swarmscribe-protocol` — leader–follower wire models | Built |
 | `swarmscribe-engine` — single-file transcriber | Built |
 | `swarmscribe-leader` — catalogue, consent, jobs, admin API and `swarmscribe-admin` | Built (local storage); cloud storage and vocabulary next |
-| `swarmscribe-follower` | Not started |
+| `swarmscribe-follower` — the agent: join, claim, transcribe, upload | Agent built; images, Helm chart and service install next |
 | `swarmscribe-console` — fleet console: backend, web app, image and Helm chart (`deploy/helm/swarmscribe-console`) | Built |
 | Helm chart for the leader and followers | Not started |
 
@@ -337,6 +337,132 @@ docker compose -f e2e/compose/docker-compose.yml down -v
 
 Tests use a real Postgres: set `SWARMSCRIBE_TEST_DATABASE_URL`, or leave it
 unset and an embedded one starts automatically in `.pgdata/`.
+
+## Run a follower (development)
+
+A follower takes recordings from a leader, transcribes them and uploads the
+three outputs. It needs the leader's URL and, the first time, a join token (or
+a pool token). With a leader on the same machine (its URL and its file links are
+plain `http` there, which the follower accepts only with the development switch
+`SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1`, loopback included):
+
+```
+uv run swarmscribe-admin tokens create --pool default
+export SWARMSCRIBE_LEADER_URL=http://localhost:8080
+export SWARMSCRIBE_JOIN_TOKEN=<the token>
+export SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1
+uv run swarmscribe-follower doctor
+uv run swarmscribe-follower run
+```
+
+Commands:
+
+- `doctor` checks the settings, folders and device, loads the start-up model
+  and runs it once (the first time that downloads it), asks the leader's
+  `/healthz`, and says whether this machine has joined. It registers nothing
+  and prints no token. Invalid settings, a plain-`http` leader without
+  `ALLOW_HTTP=1` for one, are reported as `NOT READY`, in words. The start-up
+  model is `SWARMSCRIBE_FOLLOWER_STARTUP_MODEL`, by default the device's
+  default (`distil-large-v3` on CPU); the model a job uses is the leader's
+  profile for the device.
+- `run` does the same checks, joins if there is no stored credential, then
+  claims and transcribes until it is stopped.
+- `join [--leader URL] [--token-stdin]` only registers and stores the
+  credential. `--leader` replaces `SWARMSCRIBE_LEADER_URL` (and wins over it);
+  `--token-stdin` reads the token from standard input. A token is never a
+  command-line argument. Joining again while a credential exists does nothing
+  (it would orphan the first registration); run `leave` first.
+- `leave` deregisters with the stored credential and deletes it. It needs no
+  settings: the credential remembers its leader, so `SWARMSCRIBE_LEADER_URL`
+  may be unset; with a state folder other than the default, set
+  `SWARMSCRIBE_FOLLOWER_STATE_DIR` as for `run`. Only a missing credential file
+  means "has not joined" (exit 0); a credential file that cannot be read, or an
+  invalid setting, is an error (exit 2). If the leader cannot be reached the credential is deleted
+  anyway and the leader notices the silence.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SWARMSCRIBE_LEADER_URL` | required (except for `join --leader` and `leave`) | the leader; `https`, or `http` only with `SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1` |
+| `SWARMSCRIBE_JOIN_TOKEN`, `SWARMSCRIBE_JOIN_TOKEN_FILE` | none | a join or pool token, read only when there is no stored credential (the file wins) |
+| `SWARMSCRIBE_LEADER_CA_FILE` | none | PEM certificates trusted in addition to the public roots |
+| `SWARMSCRIBE_FOLLOWER_ALLOW_HTTP` | `0` | `1`: accept a plain `http` leader URL and plain `http` file links (development only) |
+| `SWARMSCRIBE_FOLLOWER_STARTUP_MODEL` | the device default | the model loaded and exercised at start-up, before registering; a model name or `owner/name`, in `ALLOWED_MODELS` when that is set. With `OFFLINE=1` a model that is not in the cache is exit `3`, naming this setting. An image that bakes one model sets it to that model |
+| `SWARMSCRIBE_FOLLOWER_DEVICE` | `auto` | `auto`, `cuda` or `cpu` |
+| `SWARMSCRIBE_FOLLOWER_POOL` | `default` | the pool name it reports; the token decides the real pool |
+| `SWARMSCRIBE_FOLLOWER_STATE_DIR` | the user's data folder | credential and lock file |
+| `SWARMSCRIBE_FOLLOWER_SCRATCH_DIR` | `<state>/scratch` | working files; **everything in it is deleted** |
+| `SWARMSCRIBE_FOLLOWER_MODEL_DIR` | Hugging Face's default | model cache |
+| `SWARMSCRIBE_FOLLOWER_OFFLINE` | `0` | `1`: never download a model |
+| `SWARMSCRIBE_FOLLOWER_ALLOWED_MODELS` | none | comma-separated; only these are loaded |
+| `SWARMSCRIBE_FOLLOWER_SHUTDOWN_GRACE_SECONDS` | `8` | how long a stop may wait for the current job |
+| `SWARMSCRIBE_FOLLOWER_ON_DRAINED` | `exit` | `exit`, or `park` under a supervisor that restarts whatever exits |
+| `SWARMSCRIBE_FOLLOWER_LOG_FORMAT` | `json` | `json` or `text` |
+
+Only one follower may use a state folder at a time (a second one exits `2`).
+It refuses a scratch folder that holds files it did not put there. The
+leader's `SWARMSCRIBE_PUBLIC_URL` must be an address the follower can reach:
+the leader's own file links are built from it.
+
+How it ends:
+
+| Exit code | Meaning | Restart it? |
+|---|---|---|
+| `0` | stopped, or drained with nothing left to do | no |
+| `2` | invalid settings, a state folder another follower holds, a scratch folder that is not its own | after fixing it |
+| `3` | this machine cannot do the work: device, GPU libraries, model (`doctor` says which) | after fixing it |
+| `4` | no or invalid token, or the follower was revoked | no: it needs a new token |
+| `5` | the leader speaks another protocol version | no: upgrade |
+| `1` | a bug in the follower (`error: unexpected ...`); `doctor`: the leader does not answer | report it |
+| `130` | Ctrl+C before `run` started supervising (any other command) | n/a |
+
+**Stopping.** Ctrl+C or `SIGTERM` (on Windows also Ctrl+Break) stops claiming.
+The handlers are installed before anything slow, so a stop also works during
+start-up (against a leader that is down, while registering, or while the model
+loads): the process exits `0` and registers nothing. A model load or download
+itself cannot be interrupted; the stop is seen the moment it ends. As PID 1 in a
+container this is what lets `docker stop` end the follower.
+The current job is finished only if its estimated time left fits the grace
+period, or if it is already uploading or submitting; otherwise it is released
+without counting an attempt and another follower redoes it. The stop takes
+effect at the end of the segment being transcribed. The follower then
+deregisters (the leader shows it `gone`), empties its scratch folder and exits
+`0`; on a short recording that is well under a second, on a long one a second
+or two. A second signal releases at once.
+
+**Drain.** `swarmscribe-admin followers drain <id>` makes the follower exit `0`
+on its next claim. It keeps its credential, so starting it again finds it still
+drained (after loading the model, which takes a few seconds): `leave` it and
+join again to put the machine back to work. **Revoke.** A revoked follower
+notices on its next heartbeat or claim, releases its job, exits `4` and never
+registers again by itself; its credential file stays, so a restart exits `4`
+again.
+
+**Pool tokens.** With a pool token, a follower with no stored credential (a new
+pod, a fresh state folder) takes over the row of a `gone` follower of that
+token. The old credential then stops working: a machine that still holds it is
+answered `401`, logs `registering again`, and takes a row (that one's, if it is
+`gone`) with a new credential. After a hard kill the leader marks the follower
+`gone` once its lease and the leader's `SWARMSCRIBE_FOLLOWER_GONE_AFTER_SECONDS`
+have passed, and requeues its job; the next start deletes what the dead process
+left in the scratch folder.
+
+Logs are one JSON object per line on stderr (`text` for people), with `job_id`
+and `lease_id`. They never hold audio, transcript text, links, tokens or
+credentials.
+
+**Known limits.**
+
+- The credential file is protected by the profile folder it lives in. On
+  Windows nothing else restricts it (no ACL beyond the folder's inherited one);
+  on POSIX it is `0600` in a `0700` folder.
+- A download that is interrupted starts again from the beginning; it does not
+  resume.
+- A stop during the upload can leave outputs in storage that were never
+  submitted. The next attempt at the job overwrites them.
+- A start-up always loads the start-up model, even when the leader's profile
+  names another, and a drained or revoked follower pays that load before it
+  learns it has nothing to do. The cheap checks (settings, folders, a credential
+  or a token) come first, so a follower that cannot register fails at once.
 
 ## Run the fleet console (development)
 

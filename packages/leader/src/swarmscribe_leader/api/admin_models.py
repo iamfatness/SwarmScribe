@@ -14,6 +14,8 @@ from pydantic import (
 )
 from swarmscribe_protocol import (
     DEFAULT_CHANNEL_LABELS,
+    MODEL_NAME_MAX_LENGTH,
+    MODEL_NAME_PATTERN,
     ChannelLabels,
     ChannelMode,
     Device,
@@ -309,9 +311,6 @@ class PoolTokenRevoked(PoolTokenOut):
     followers_revoked: int
 
 
-# A model is named, never located: followers load it by this name, and a path here would
-# make them read their own disks. `owner/name` is a Hugging Face repository.
-MODEL_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(/[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$"
 ComputeType = Literal[
     "int8",
     "int8_float16",
@@ -335,7 +334,7 @@ class ProfileOut(BaseModel):
 class ProfileIn(BaseModel):
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
-    model: str = Field(pattern=MODEL_PATTERN, max_length=100)
+    model: str = Field(pattern=MODEL_NAME_PATTERN, max_length=MODEL_NAME_MAX_LENGTH)
     compute_type: ComputeType
     temperatures: list[float] | None = Field(default=None, min_length=1, max_length=10)
 

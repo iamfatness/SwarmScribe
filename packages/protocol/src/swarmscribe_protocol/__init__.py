@@ -1,6 +1,8 @@
 from .base import Sha256
 from .messages import (
     DIRECTIVE_HEADER,
+    MODEL_NAME_MAX_LENGTH,
+    MODEL_NAME_PATTERN,
     Capabilities,
     ClaimResponse,
     Directive,
@@ -41,6 +43,8 @@ __all__ = [
     "DIRECTIVE_HEADER",
     "MAX_CHANNEL_LABEL_LENGTH",
     "MAX_TEMPERATURE",
+    "MODEL_NAME_MAX_LENGTH",
+    "MODEL_NAME_PATTERN",
     "PROTOCOL_VERSION",
     "AppliedCorrection",
     "Capabilities",

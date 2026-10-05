@@ -7,8 +7,9 @@ import { useDialogAction } from "../../app/useDialogAction";
 import { ActionButton } from "../../components/ActionButton";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { Dialog } from "../../components/Dialog";
+import { BreakPath } from "../../components/BreakPath";
 import { ErrorPanel } from "../../components/ErrorPanel";
-import { formatTime } from "../../lib/format";
+import { formatCount, formatTime } from "../../lib/format";
 import {
   ActionNotice,
   ReadState,
@@ -21,6 +22,14 @@ import { useRowFocus } from "./rowFocus";
 import { leaderUrl } from "./tabs";
 
 export const JOB_STATES: JobState[] = ["queued", "leased", "completed", "failed", "cancelled"];
+/** The filter pills, in the order a person works through them. The address keeps the leader's word. */
+export const STATE_PILLS: { state: JobState; label: string }[] = [
+  { state: "queued", label: "Waiting" },
+  { state: "leased", label: "Being worked on" },
+  { state: "failed", label: "Failed" },
+  { state: "completed", label: "Finished" },
+  { state: "cancelled", label: "Cancelled" },
+];
 /** The leader accepts 1 to 500; the table shows the newest 100. */
 export const JOB_LIMIT = 100;
 /** The leader's PriorityIn range: a strict integer from -1000 to 1000. */
@@ -105,12 +114,45 @@ function PriorityDialog({
   );
 }
 
-function detail(job: JobOut): string {
-  if (job.failure_reason) return job.failure_reason;
-  if (job.cancelled_by) return `Cancelled by ${job.cancelled_by}`;
-  if (job.leased_by) return `Leased by ${shortId(job.leased_by)}`;
-  if (job.no_speech) return "No speech found";
-  return "";
+type StateTone = "plain" | "busy" | "bad" | "quiet";
+
+/** A job's state in the console's words. An unknown state is shown as the leader sent it. */
+export function jobStateText(job: Pick<JobOut, "state" | "leased_by">): {
+  label: string;
+  tone: StateTone;
+} {
+  switch (job.state) {
+    case "queued":
+      return { label: "Waiting", tone: "plain" };
+    case "leased":
+      return {
+        label: job.leased_by ? `With follower ${shortId(job.leased_by)}` : "Being worked on",
+        tone: "busy",
+      };
+    case "completed":
+      return { label: "Finished", tone: "quiet" };
+    case "failed":
+      return { label: "Failed", tone: "bad" };
+    case "cancelled":
+      return { label: "Cancelled", tone: "quiet" };
+    default:
+      return { label: job.state, tone: "plain" };
+  }
+}
+
+/**
+ * The line under a recording: where it came from, then what happened to the job, if anything.
+ * It carries everything the old Detail column did: the failure, who cancelled it, the follower
+ * that held it (a leased job says that in its state instead) and "No speech found".
+ */
+export function jobNote(job: JobOut): string {
+  const parts = [`From ${job.location}`];
+  if (job.failure_reason) parts.push(job.failure_reason);
+  else if (job.cancelled_by) parts.push(`Cancelled by ${job.cancelled_by}`);
+  else if (job.leased_by && job.state !== "leased") {
+    parts.push(`Held by follower ${shortId(job.leased_by)}`);
+  } else if (job.no_speech) parts.push("No speech found");
+  return parts.join(" \u00b7 ");
 }
 
 export function JobsTab({ leader }: TabProps) {
@@ -128,6 +170,11 @@ export function JobsTab({ leader }: TabProps) {
   const rows = useRowFocus(read, setNotice);
   const locations = (leader.snapshot?.status.locations ?? []).map((l) => l.name).sort();
   const filtered = Boolean(state || location);
+  // Counts come from the last check of the leader, so they cover every location and can be
+  // a few seconds behind the list: they are left out while a location filter is on.
+  const counts = location ? null : (leader.snapshot?.status.jobs ?? null);
+  const total = counts === null ? null : Object.values(counts).reduce((sum, n) => sum + n, 0);
+  const known = STATE_PILLS.some((pill) => pill.state === state);
 
   const setFilter = (next: { state?: string | null; location?: string | null }) => {
     const merged = { state, location, ...next };
@@ -137,55 +184,77 @@ export function JobsTab({ leader }: TabProps) {
   const onRetry = async (job: JobOut) => {
     setNotice(null);
     if (await retry.run(() => api.post(leaderPath(leader.name, `jobs/${job.id}/retry`)))) {
-      rows.done(`Job ${shortId(job.id)} is queued again.`);
+      rows.done(`Job ${shortId(job.id)} is waiting again.`);
     }
   };
 
   return (
     <div {...rows.props}>
-      <div className="filters">
-        <label className="field-inline">
-          State
-          <select
-            value={state ?? ""}
-            onChange={(event) => setFilter({ state: event.target.value || null })}
+      <div className="section-head">
+        <div className="pill-group" role="group" aria-label="Show jobs that are">
+          <button
+            type="button"
+            className="pill"
+            aria-pressed={!state}
+            onClick={() => setFilter({ state: null })}
           >
-            <option value="">All states</option>
-            {state && !JOB_STATES.includes(state as JobState) && (
-              <option value={state}>{state}</option>
-            )}
-            {JOB_STATES.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field-inline">
-          Location
-          <select
-            value={location ?? ""}
-            onChange={(event) => setFilter({ location: event.target.value || null })}
-          >
-            <option value="">All locations</option>
-            {location && !locations.includes(location) && (
-              <option value={location}>{location}</option>
-            )}
-            {locations.map((name) => (
-              <option key={name} value={name}>
-                {name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <RefreshButton read={read} />
+            All
+            {total !== null && " "}
+            {total !== null && <span className="pill-count">{formatCount(total)}</span>}
+          </button>
+          {state && !known && (
+            <button
+              type="button"
+              className="pill"
+              aria-pressed="true"
+              onClick={() => setFilter({ state: null })}
+            >
+              {state}
+            </button>
+          )}
+          {STATE_PILLS.map((pill) => (
+            <button
+              key={pill.state}
+              type="button"
+              className="pill"
+              aria-pressed={state === pill.state}
+              onClick={() => setFilter({ state: state === pill.state ? null : pill.state })}
+            >
+              {pill.label}
+              {counts !== null && " "}
+              {counts !== null && (
+                <span className="pill-count">{formatCount(counts[pill.state] ?? 0)}</span>
+              )}
+            </button>
+          ))}
+        </div>
+        <div className="toolbar">
+          <label className="field-inline">
+            Location
+            <select
+              value={location ?? ""}
+              onChange={(event) => setFilter({ location: event.target.value || null })}
+            >
+              <option value="">All locations</option>
+              {location && !locations.includes(location) && (
+                <option value={location}>{location}</option>
+              )}
+              {locations.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <RefreshButton read={read} />
+        </div>
       </div>
       <ActionNotice message={notice} />
       {retry.error !== null && <ErrorPanel error={retry.error} />}
       <ReadState read={read} what="jobs">
         {(jobs) =>
           jobs.length === 0 ? (
-            <p>{filtered ? "No jobs match this filter." : "This leader has no jobs."}</p>
+            <p>{filtered ? "No jobs match." : "This leader has no jobs."}</p>
           ) : (
             <>
               {jobs.length >= JOB_LIMIT && (
@@ -199,10 +268,9 @@ export function JobsTab({ leader }: TabProps) {
                       <th scope="col">State</th>
                       <th scope="col">Recording</th>
                       <th scope="col">Pool</th>
-                      <th scope="col">Priority</th>
-                      <th scope="col">Attempts</th>
-                      <th scope="col">Created</th>
-                      <th scope="col">Detail</th>
+                      <th scope="col" className="num">Priority</th>
+                      <th scope="col" className="num">Tries</th>
+                      <th scope="col">Queued</th>
                       <th scope="col">Actions</th>
                     </tr>
                   </thead>
@@ -212,9 +280,14 @@ export function JobsTab({ leader }: TabProps) {
                         <th scope="row">
                           <code>{shortId(job.id)}</code>
                         </th>
-                        <td className="nowrap">{job.state}</td>
+                        <td className={`job-state job-state-${jobStateText(job).tone}`}>
+                          {jobStateText(job).label}
+                        </td>
                         <td className="long">
-                          {job.location}: <span className="mono">{job.key}</span>
+                          <span className="mono">
+                            <BreakPath text={job.key} />
+                          </span>
+                          <span className="cell-note">{jobNote(job)}</span>
                         </td>
                         <td className="nowrap">{job.pool}</td>
                         <td className="num nowrap">{job.priority}</td>
@@ -222,17 +295,17 @@ export function JobsTab({ leader }: TabProps) {
                           {job.attempts} of {job.max_attempts}
                         </td>
                         <td className="nowrap">{formatTime(job.created_at)}</td>
-                        <td className="long">{detail(job)}</td>
                         <td className="actions">
                           {RETRYABLE.has(job.state) && (
                             <ActionButton
                               held={leader.role}
                               action="jobs.retry"
                               busy={retry.busy}
+                              primary={job.state === "failed"}
                               onClick={() => void onRetry(job)}
-                              name={`Retry job ${shortId(job.id)}`}
+                              name={`Try again: job ${shortId(job.id)}`}
                             >
-                              Retry
+                              Try again
                             </ActionButton>
                           )}
                           {OPEN.has(job.state) && (
@@ -269,7 +342,7 @@ export function JobsTab({ leader }: TabProps) {
       {cancelling !== null && (
         <ConfirmDialog
           title={`Cancel job ${shortId(cancelling.id)}?`}
-          message={`The job for ${cancelling.key} stops and stays stopped unless someone retries it.`}
+          message={`The job for ${cancelling.key} stops, and stays stopped unless someone tries it again.`}
           confirmLabel="Cancel job"
           onClose={() => setCancelling(null)}
           onConfirm={async () => {

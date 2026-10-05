@@ -19,10 +19,10 @@ test("an operator retries a failed job and cancels a queued one with the keyboar
   const failed = page.getByRole("row").filter({ hasText: "the engine stopped" });
   await expect(failed).toBeVisible();
 
-  await tabTo(page, /^Retry job /);
+  await tabTo(page, /^Try again: job /);
   await page.keyboard.press("Enter");
-  await expect(page.getByText(/^Job \w{8} is queued again\.$/)).toBeVisible();
-  // The Retry button went with the row's state; the focus must not fall back to the page top.
+  await expect(page.getByText(/^Job \w{8} is waiting again\.$/)).toBeVisible();
+  // The Try again button went with the row's state; the focus must not fall back to the page top.
   await expect
     .poll(() => page.evaluate(() => document.activeElement?.closest("[role='region']")?.getAttribute("aria-label")))
     .toBe("Job list");
@@ -31,7 +31,7 @@ test("an operator retries a failed job and cancels a queued one with the keyboar
   await page.keyboard.press("Enter");
   const dialog = page.getByRole("alertdialog", { name: /^Cancel job \w{8}\?$/ });
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByRole("button", { name: "Close" })).toBeFocused();
+  await expect(dialog.getByRole("button", { name: "No, go back" })).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(dialog.getByRole("button", { name: "Cancel job" })).toBeFocused();
   await page.keyboard.press("Enter");
@@ -55,16 +55,79 @@ test("a job's priority is set from its dialog by keyboard", async ({ page }) => 
 
 test("the job filter narrows by state and survives a reload", async ({ page }) => {
   await signIn(page, "viewer", "/leaders/eu-1/jobs");
-  await page.getByRole("combobox", { name: "State" }).selectOption("failed");
+  const pills = page.getByRole("group", { name: "Show jobs that are" });
+  // The fake leader: two waiting, one being worked on, one failed, one finished, one cancelled.
+  await expect(pills.getByRole("button")).toHaveText([
+    "All 6",
+    "Waiting 2",
+    "Being worked on 1",
+    "Failed 1",
+    "Finished 1",
+    "Cancelled 1",
+  ]);
+  await expect(page.getByRole("region", { name: "Job list" }).getByRole("row")).toHaveCount(7);
+  await pills.getByRole("button", { name: /^Failed/ }).click();
   await expect(page).toHaveURL("/leaders/eu-1/jobs?state=failed");
   await expect(page.getByRole("region", { name: "Job list" }).getByRole("row")).toHaveCount(2);
   await page.reload();
-  await expect(page.getByRole("combobox", { name: "State" })).toHaveValue("failed");
+  await expect(pills.getByRole("button", { name: /^Failed/ })).toHaveAttribute("aria-pressed", "true");
+  await expect(pills.getByRole("button", { name: /^All/ })).toHaveAttribute("aria-pressed", "false");
+  await expect(page.getByRole("region", { name: "Job list" }).getByRole("row")).toHaveCount(2);
+});
+
+test("each job says its state in words and where its recording came from", async ({ page }) => {
+  await signIn(page, "viewer", "/leaders/eu-1/jobs");
+  const list = page.getByRole("region", { name: "Job list" });
+  await expect(list.getByRole("columnheader")).toHaveText([
+    "Job",
+    "State",
+    "Recording",
+    "Pool",
+    "Priority",
+    "Tries",
+    "Queued",
+    "Actions",
+  ]);
+  const failed = list.getByRole("row").filter({ hasText: "the engine stopped" });
+  await expect(failed.getByRole("cell").nth(0)).toHaveText("Failed");
+  await expect(failed.getByRole("cell").nth(1)).toHaveText(
+    "incoming/meeting-5.wavFrom intake · the engine stopped: out of memory",
+  );
+  await expect(failed.getByRole("cell").nth(4)).toHaveText("3 of 3");
+  await expect(list.getByRole("cell", { name: /^With follower \w{8}$/ })).toHaveCount(1);
+  await expect(list.getByRole("cell", { name: "Waiting", exact: true })).toHaveCount(2);
+  await expect(list.getByRole("row").filter({ hasText: "Cancelled by someone@example.org" })).toHaveCount(1);
+  await expect(page.getByText(/^Loaded at /)).toBeVisible();
+});
+
+test("a viewer's switched-off actions stay readable at tablet width", async ({ page }) => {
+  await page.setViewportSize({ width: 768, height: 1024 });
+  await signIn(page, "viewer", "/leaders/eu-1/jobs");
+  const region = page.getByRole("region", { name: "Job list" });
+  const button = region.getByRole("button", { name: /^Cancel job / }).first();
+  await expect(button).toBeDisabled();
+  const widest = await region.evaluate((el) => el.scrollWidth - el.clientWidth);
+  for (const left of [0, widest]) {
+    await region.evaluate((el, x) => {
+      el.scrollLeft = x;
+    }, left);
+    const frame = await region.boundingBox();
+    const box = await button.boundingBox();
+    // The note that says which role is needed sits under its button, inside the pinned cell.
+    const note = await region.getByText("needs operator").first().boundingBox();
+    if (frame === null || box === null || note === null) throw new Error("nothing to measure");
+    for (const part of [box, note]) {
+      expect(part.x).toBeGreaterThanOrEqual(frame.x);
+      expect(part.x + part.width).toBeLessThanOrEqual(frame.x + frame.width + 1);
+    }
+  }
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
 });
 
 test("a viewer sees actions disabled with the role they need", async ({ page }) => {
   await signIn(page, "viewer", "/leaders/eu-1/jobs");
-  const retry = page.getByRole("button", { name: /^Retry job / }).first();
+  const retry = page.getByRole("button", { name: /^Try again: job / }).first();
   await expect(retry).toBeDisabled();
   await expect(retry).toHaveAccessibleDescription("needs operator");
   await page.getByRole("link", { name: "Join tokens" }).click();
@@ -77,10 +140,15 @@ test("an operator drains a follower but cannot revoke one", async ({ page }) => 
     page.getByRole("region", { name: "Pools" }).getByRole("rowheader", { name: "gpu" }),
   ).toBeVisible();
   await page
-    .getByRole("button", { name: /^Drain follower / })
+    .getByRole("button", { name: /^Wind down follower / })
     .first()
     .click();
-  await expect(page.getByText(/^Follower \w{8} is draining\.$/)).toBeVisible();
+  await expect(
+    page.getByText(/^Follower \w{8} is winding down: it finishes what it has and takes nothing new\.$/),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Followers" }).getByRole("cell", { name: "Winding down" }),
+  ).toHaveCount(2);
   await expect(page.getByRole("button", { name: /^Revoke follower / }).first()).toBeDisabled();
 });
 
@@ -93,7 +161,7 @@ test("an admin revokes a follower and its leased job goes back to the queue", as
     .first();
   await row.getByRole("button", { name: /^Revoke follower / }).click();
   await page.getByRole("alertdialog").getByRole("button", { name: "Revoke follower" }).click();
-  await expect(page.getByText(/is revoked; 1 leased jobs went back to the queue\./)).toBeVisible();
+  await expect(page.getByText(/is revoked\. 1 job went back to waiting\./)).toBeVisible();
 });
 
 test("an admin adds, disables, enables and scans locations", async ({ page }) => {
@@ -108,25 +176,30 @@ test("an admin adds, disables, enables and scans locations", async ({ page }) =>
   await dialog.getByRole("textbox", { name: "Right channel label" }).fill("Caller");
   await dialog.getByRole("button", { name: "Add location" }).click();
   await expect(page.getByText("Location calls is added.")).toBeVisible();
-  await expect(page.getByRole("row", { name: /calls/ })).toContainText("stereo_split (Agent, Caller)");
+  await expect(page.getByRole("row", { name: /^calls/ })).toContainText(
+    "Stereo, one speaker per side: Agent, Caller",
+  );
 
-  await page.getByRole("button", { name: "Disable archive" }).click();
-  await page.getByRole("alertdialog").getByRole("button", { name: "Disable location" }).click();
-  await expect(page.getByText("archive is disabled.")).toBeVisible();
-  await page.getByRole("button", { name: "Enable archive" }).click();
-  await expect(page.getByText("archive is enabled.")).toBeVisible();
+  await page.getByRole("button", { name: "Switch off archive" }).click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "Switch it off" }).click();
+  await expect(page.getByText("archive is switched off.")).toBeVisible();
+  await expect(page.getByRole("row", { name: /^archive/ }).getByRole("cell").nth(2)).toHaveText(
+    "Switched offEvery 15 min",
+  );
+  await page.getByRole("button", { name: "Switch on archive" }).click();
+  await expect(page.getByText("archive is switched on.")).toBeVisible();
   await page.getByRole("button", { name: "Scan now intake" }).click();
-  await expect(page.getByText("A scan of intake is requested.")).toBeVisible();
-  await expect(page.getByRole("row", { name: /intake/ })).toContainText("Scan requested");
+  await expect(page.getByText("A scan of intake is asked for.")).toBeVisible();
+  await expect(page.getByRole("row", { name: /^intake/ })).toContainText("A scan is asked for");
 });
 
 test("a leader's own refusal is shown and focus stays in the dialog: us-1 caps the console at operator", async ({
   page,
 }) => {
   await signIn(page, "admin", "/leaders/us-1/locations");
-  await page.getByRole("button", { name: "Disable intake" }).click();
+  await page.getByRole("button", { name: "Switch off intake" }).click();
   const dialog = page.getByRole("alertdialog");
-  const confirm = dialog.getByRole("button", { name: "Disable location" });
+  const confirm = dialog.getByRole("button", { name: "Switch it off" });
   await confirm.click();
   await expect(dialog.getByRole("alert")).toContainText("Your role does not allow this.");
   await expect(dialog.getByRole("alert")).toContainText("this needs the admin role");
@@ -152,11 +225,11 @@ test("with one leader down its tabs report it, and the other leader stays operab
   await signIn(page, "operator", "/leaders/us-1/jobs");
   await setLeaderMode(request, "us-1", "down");
   await page.getByRole("button", { name: "Refresh" }).click();
-  await expect(page.getByRole("alert")).toContainText("The leader cannot be reached right now.");
+  await expect(page.getByRole("alert")).toContainText("The leader is not answering right now.");
   await expect(page.getByRole("link", { name: "Locations" })).toBeVisible();
 
-  await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Fleet" }).click();
-  await page.getByRole("link", { name: "eu-1" }).click();
+  await page.getByRole("navigation", { name: "Console" }).getByRole("link", { name: "Fleet" }).click();
+  await page.getByRole("main").getByRole("link", { name: "eu-1", exact: true }).click();
   await page.getByRole("link", { name: "Jobs" }).click();
   await page
     .getByRole("button", { name: /^Cancel job / })
@@ -174,6 +247,33 @@ test("a drill-down address survives a reload and a leader name without a tab red
   await page.getByRole("link", { name: "Consent report" }).click();
   await page.reload();
   await expect(page.getByRole("heading", { level: 2, name: "Consent report" })).toBeVisible();
+});
+
+test("a leader's page says who the person is here and what its labels are", async ({ page }) => {
+  await signIn(page, "operator", "/leaders/eu-1/pools");
+  const main = page.getByRole("main");
+  await expect(main.getByText(/^You are an operator here\./)).toHaveText(
+    "You are an operator here. What needs an admin is shown, but switched off.",
+  );
+  await expect(main.getByRole("list", { name: "Labels" }).getByRole("listitem")).toHaveText([
+    "env=prod",
+    "region=eu",
+  ]);
+  await expect(main.getByText("Answering", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("navigation", { name: "Console" }).getByRole("link", { name: "eu-1", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+});
+
+test("the role line of a viewer, the longest, sits on one line at 1280", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await signIn(page, "viewer", "/leaders/eu-1/pools");
+  const line = page.getByRole("main").getByText(/^You are a viewer here\./);
+  await expect(line).toHaveText(
+    "You are a viewer here. What needs an operator or an admin is shown, but switched off.",
+  );
+  const lines = await line.evaluate((el) => Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight)));
+  expect(lines).toBe(1);
 });
 
 test("switching tabs keeps focus on the tab link", async ({ page }) => {

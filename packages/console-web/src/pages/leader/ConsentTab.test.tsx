@@ -27,9 +27,11 @@ describe("consent tab", () => {
     expect(within(byLocation).getByRole("row", { name: /intake/ })).toHaveTextContent(
       "intake10120",
     );
-    expect(screen.getByText("intake: transcripts/b.json")).toBeInTheDocument();
+    expect(
+      screen.getByText((_, el) => el?.matches("li") === true && el.textContent === "intake: transcripts/b.json"),
+    ).toBeInTheDocument();
     // Above the tables, where it is seen first, and below them.
-    expect(screen.getAllByText(/The report is cut short/)).toHaveLength(2);
+    expect(screen.getAllByText(/This list is cut short/)).toHaveLength(2);
     // Only the report was read, once, with no query the console does not need.
     expect(mock.callsTo(REPORT)).toHaveLength(1);
   });
@@ -44,7 +46,7 @@ describe("consent tab", () => {
         "No transcript was made from a recording that is no longer consented.",
       ),
     ).toBeInTheDocument();
-    expect(screen.getByText("This leader has no locations.")).toBeInTheDocument();
+    expect(screen.getByText("This leader has no locations yet.")).toBeInTheDocument();
     expect(screen.queryByText(/cut short/)).not.toBeInTheDocument();
   });
 

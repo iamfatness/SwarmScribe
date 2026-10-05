@@ -6,7 +6,7 @@ import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { ErrorPanel } from "../../components/ErrorPanel";
 import { formatTime } from "../../lib/format";
 import { ActionNotice, ReadState } from "../leader/common";
-import { AdminFrame, useAdminList } from "./AdminFrame";
+import { useAdminList } from "./AdminFrame";
 import { PrincipalFields } from "./PrincipalFields";
 import { useRowFocus } from "../leader/rowFocus";
 
@@ -35,8 +35,8 @@ function AddGrantForm({ onDone }: { onDone: (grant: GrantOut) => void }) {
     });
   };
   return (
-    <form className="form-grid form-panel" aria-label="Add a grant" onSubmit={submit}>
-      <h2>Add a grant</h2>
+    <form className="form-grid form-panel" aria-label="Give a role" onSubmit={submit}>
+      <h2>Give a role</h2>
       <label className="field">
         Role
         <select value={role} onChange={(e) => setRole(e.target.value as Role)}>
@@ -47,7 +47,7 @@ function AddGrantForm({ onDone }: { onDone: (grant: GrantOut) => void }) {
       </label>
       <div className="field">
         <label className="field">
-          Scope
+          On which leaders
           <input
             required
             autoComplete="off"
@@ -58,7 +58,7 @@ function AddGrantForm({ onDone }: { onDone: (grant: GrantOut) => void }) {
           />
         </label>
         <span id={scopeHelp} className="field-help">
-          all, leader:&lt;name&gt; or label:&lt;key&gt;=&lt;value&gt;
+          Write all, leader:&lt;name&gt; or label:&lt;key&gt;=&lt;value&gt;.
         </span>
       </div>
       <PrincipalFields
@@ -74,14 +74,15 @@ function AddGrantForm({ onDone }: { onDone: (grant: GrantOut) => void }) {
           className="button button-primary"
           aria-disabled={action.busy || undefined}
         >
-          Add grant
+          Give the role
         </button>
       </div>
     </form>
   );
 }
 
-function GrantsContent() {
+/** The "Who can do what" section of Administration (pages/admin/AdminPage.tsx frames it). */
+export function AdminGrantsSection() {
   const read = useAdminList<GrantOut>("/api/admin/grants");
   const [removing, setRemoving] = useState<GrantOut | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -89,36 +90,52 @@ function GrantsContent() {
 
   return (
     <div {...rows.props}>
-      <p className="muted">
-        A person's role on a leader is the highest grant whose scope matches it. Adding or removing a
-        grant applies at once. A person's group membership is read at sign-in, so a change to it
-        applies at their next sign-in.
+      <div className="section-head">
+        <h2>Who can do what</h2>
+      </div>
+      <p className="page-sub">
+        A person's role on a leader is the highest one given to them that covers it. Giving or
+        removing a role takes effect at once. Group membership is read when a person signs in, so
+        a change to a group shows the next time they do.
       </p>
+      <div className="explain">
+        <p>
+          A viewer can look. An operator can also try jobs again, cancel them, scan a location and
+          wind followers down. An admin can also add and switch locations, revoke followers and
+          make join tokens.
+        </p>
+        <p>
+          A role covers leaders in one of three ways: <code>all</code> for every leader,{" "}
+          <code>leader:eu-1</code> for one leader by name, or <code>label:region=eu</code> for every
+          leader with that label. It is given to an Entra ID group, a Google group, one person by
+          email, or everyone at a domain.
+        </p>
+      </div>
       <ActionNotice message={notice} />
-      <ReadState read={read} what="grants">
+      <ReadState read={read} what="the roles">
         {(grants) =>
           grants.length === 0 ? (
-            <p>No grants.</p>
+            <p>Nobody has been given a role yet.</p>
           ) : (
             <div className="table-scroll" role="region" aria-label="Grants" tabIndex={0}>
               <table className="medium">
                 <thead>
                   <tr>
-                    <th scope="col">Principal</th>
+                    <th scope="col">Who</th>
                     <th scope="col">Role</th>
-                    <th scope="col">Scope</th>
-                    <th scope="col">Added</th>
+                    <th scope="col">On which leaders</th>
+                    <th scope="col">Given</th>
                     <th scope="col">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {grants.map((grant) => (
                     <tr key={grant.id} data-row={grant.id}>
-                      <th scope="row" className="mono long">
+                      <th scope="row" className="mono long ident">
                         {grant.principal_kind}:{grant.principal}
                       </th>
                       <td className="nowrap">{grant.role}</td>
-                      <td className="mono long">{grant.scope}</td>
+                      <td className="mono long ident">{grant.scope}</td>
                       <td>
                         {formatTime(grant.created_at)} by {grant.created_by}
                       </td>
@@ -127,7 +144,7 @@ function GrantsContent() {
                           type="button"
                           className="button button-danger"
                           onClick={() => setRemoving(grant)}
-                          aria-label={`Remove grant: ${grant.role} on ${grant.scope} for ${grant.principal_kind}:${grant.principal}`}
+                          aria-label={`Remove ${grant.role} on ${grant.scope} from ${grant.principal_kind}:${grant.principal}`}
                         >
                           Remove
                         </button>
@@ -143,20 +160,20 @@ function GrantsContent() {
       <AddGrantForm
         onDone={(grant) => {
           setNotice(
-            `Grant added: ${grant.role} on ${grant.scope} for ${grant.principal_kind}:${grant.principal}.`,
+            `${grant.principal_kind}:${grant.principal} is now ${grant.role} on ${grant.scope}.`,
           );
           read.refresh();
         }}
       />
       {removing !== null && (
         <ConfirmDialog
-          title="Remove this grant?"
-          message={`${removing.principal_kind}:${removing.principal} loses ${removing.role} on ${removing.scope} at once. Group membership is read at sign-in.`}
-          confirmLabel="Remove grant"
+          title="Remove this role?"
+          message={`${removing.principal_kind}:${removing.principal} stops being ${removing.role} on ${removing.scope} at once.`}
+          confirmLabel="Remove the role"
           onClose={() => setRemoving(null)}
           onConfirm={async () => {
             await api.del(`/api/admin/grants/${encodeURIComponent(removing.id)}`);
-            rows.done("Grant removed.");
+            rows.done("The role is removed.");
           }}
         />
       )}
@@ -164,10 +181,3 @@ function GrantsContent() {
   );
 }
 
-export function AdminGrantsPage() {
-  return (
-    <AdminFrame title="Grants">
-      <GrantsContent />
-    </AdminFrame>
-  );
-}

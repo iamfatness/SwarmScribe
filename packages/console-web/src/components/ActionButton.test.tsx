@@ -64,7 +64,7 @@ describe("ConfirmDialog", () => {
       />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("The leader cannot be reached right now.");
+    expect(await screen.findByRole("alert")).toHaveTextContent("The leader is not answering right now.");
     expect(onClose).not.toHaveBeenCalled();
   });
 });
@@ -73,12 +73,12 @@ describe("Dialog accessibility", () => {
     render(<ConfirmDialog title="Cancel job?" message="m" confirmLabel="Cancel job" onConfirm={vi.fn()} onClose={vi.fn()} />);
     const dialog = screen.getByRole("alertdialog", { name: "Cancel job?" });
     expect(dialog).toHaveAttribute("aria-modal", "true");
-    expect(screen.getByRole("button", { name: "Close" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "No, go back" })).toHaveFocus();
   });
 
   it("wraps Tab and Shift+Tab inside the dialog", async () => {
     render(<ConfirmDialog title="T" message="m" confirmLabel="Go" onConfirm={vi.fn()} onClose={vi.fn()} />);
-    const close = screen.getByRole("button", { name: "Close" });
+    const close = screen.getByRole("button", { name: "No, go back" });
     const go = screen.getByRole("button", { name: "Go" });
     await userEvent.tab();
     expect(go).toHaveFocus();
@@ -155,7 +155,7 @@ describe("Dialog accessibility", () => {
     const first = screen.getByRole("alertdialog", { name: "First", hidden: true });
     expect(first).toHaveAttribute("inert");
     expect(screen.getByRole("alertdialog", { name: "Second" })).not.toHaveAttribute("inert");
-    expect(screen.getAllByRole("button", { name: "Close" }).at(-1)).toHaveFocus();
+    expect(screen.getAllByRole("button", { name: "No, go back" }).at(-1)).toHaveFocus();
   });
 });
 

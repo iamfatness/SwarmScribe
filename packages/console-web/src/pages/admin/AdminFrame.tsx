@@ -7,7 +7,7 @@ import { usePoll, type PollState } from "../../app/usePoll";
 
 export const ADMIN_PAGES = [
   { path: "/admin/leaders", label: "Leaders" },
-  { path: "/admin/grants", label: "Grants" },
+  { path: "/admin/grants", label: "Who can do what" },
   { path: "/admin/admins", label: "Console administrators" },
 ] as const;
 
@@ -18,19 +18,26 @@ export function useAdminList<T>(path: string): PollState<T[]> {
 }
 
 /**
- * The administration pages' frame: their own navigation, and a plain refusal for a person
- * who is not a console administrator (the API would answer 403 anyway). The children are
- * rendered only for an administrator, so nothing is requested for anyone else.
+ * The frame of Administration: one page with three sections, each its own address. It has
+ * one heading, what console administrators are for, the sections' navigation, and a plain
+ * refusal for a person who is not a console administrator (the API would answer 403
+ * anyway). The children are rendered only for an administrator, so nothing is requested
+ * for anyone else. `title` names the section in the browser tab.
+ * Mockup: docs/superpowers/design/AdminLeaders.dc.html.
  */
 export function AdminFrame({ title, children }: { title: string; children: ReactNode }) {
   const { session } = useSession();
   const { pathname } = useLocation();
-  usePageTitle(title);
+  usePageTitle(`Administration: ${title}`);
   return (
     <>
-      <h1>{title}</h1>
+      <h1>Administration</h1>
       {session.console_admin ? (
         <>
+          <p className="page-sub">
+            Console administrators decide which leaders this console talks to and who may use
+            them. Being one gives you no role on any leader by itself.
+          </p>
           <nav aria-label="Administration">
             <ul className="tab-list">
               {ADMIN_PAGES.map((page) => (
@@ -49,7 +56,7 @@ export function AdminFrame({ title, children }: { title: string; children: React
           {children}
         </>
       ) : (
-        <p>Console administration needs a console administrator. Ask one to add you.</p>
+        <p>Administration is for console administrators. Ask one to add you.</p>
       )}
     </>
   );

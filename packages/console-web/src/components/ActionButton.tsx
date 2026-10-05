@@ -13,6 +13,7 @@ export function ActionButton({
   action,
   onClick,
   danger = false,
+  primary = false,
   busy = false,
   name,
   children,
@@ -22,8 +23,13 @@ export function ActionButton({
   action: LeaderAction;
   onClick: () => void;
   danger?: boolean;
+  /** The one action a row is there for (Try again on a failed job). */
+  primary?: boolean;
   busy?: boolean;
-  /** The full accessible name when the visible text needs its row for context ("Retry job 1a2b3c4d"). */
+  /**
+   * The full accessible name when the visible text needs its row for context ("Cancel job
+   * 1a2b3c4d"). It must contain the visible text, word for word, so speech input finds it.
+   */
   name?: string;
   children: ReactNode;
 }) {
@@ -33,7 +39,7 @@ export function ActionButton({
     <span className="action">
       <button
         type="button"
-        className={danger ? "button button-danger" : "button"}
+        className={danger ? "button button-danger" : primary ? "button button-primary" : "button"}
         disabled={!allowed}
         aria-disabled={busy || undefined}
         aria-label={name}

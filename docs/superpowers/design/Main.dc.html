@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fleet overview, Ledger direction</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+a{color:#f5b83d}a:hover{color:#ffd27a}
+</style>
+</helmet>
+<div style="min-height: 900px; box-sizing: border-box; background: #14110d; color: #f3ead9; font-family: 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', sans-serif; font-size: 16px; line-height: 1.5">
+
+<header style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; max-width: 1180px; margin: 0 auto; padding: 20px 32px; border-bottom: 1px solid rgba(243,234,217,0.14)">
+  <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px 36px">
+    <a href="#fleet" style="display: inline-flex; align-items: center; gap: 11px; color: #f3ead9; text-decoration: none">
+      <svg width="34" height="34" viewBox="0 0 64 64" aria-hidden="true"><path d="M32 4 56.25 18v28L32 60 7.75 46V18z" fill="#f5b83d" stroke="#f5b83d" stroke-width="4" stroke-linejoin="round"></path><path d="M32 51 21 30l4-14h14l4 14z" fill="#14110d" stroke="#14110d" stroke-width="2" stroke-linejoin="round"></path><path d="M32 51V33" stroke="#f5b83d" stroke-width="2.4" stroke-linecap="round"></path><circle cx="32" cy="30.5" r="3" fill="#f5b83d"></circle></svg>
+      <span style="font-size: 23px; font-weight: 700; letter-spacing: -0.02em">Swarm<em style="font-family: Georgia, 'Times New Roman', serif; font-weight: 400; color: #f5b83d">Scribe</em></span>
+    </a>
+    <nav aria-label="Console" style="display: flex; gap: 28px; font-size: 15px">
+      <a href="#fleet" style="color: #f3ead9; text-decoration: none; padding: 12px 0; border-bottom: 2px solid #f5b83d">Fleet</a>
+      <a href="#administration" style="color: #b5a993; text-decoration: none; padding: 12px 0; border-bottom: 2px solid transparent">Administration</a>
+    </nav>
+  </div>
+  <div style="display: flex; align-items: center; gap: 18px; font-size: 15px; color: #b5a993">
+    <span>mira@example.org</span>
+    <button type="button" style="min-height: 44px; padding: 0 16px; background: transparent; color: #f3ead9; border: 1px solid rgba(243,234,217,0.3); border-radius: 6px; font: inherit; cursor: pointer">Sign out</button>
+  </div>
+</header>
+
+<main id="fleet" style="max-width: 1180px; margin: 0 auto; padding: 44px 32px 72px">
+
+  <div style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px 32px; margin-bottom: 36px">
+    <div>
+      <h1 style="margin: 0 0 10px; font-family: 'Iowan Old Style', 'Palatino Linotype', Palatino, 'Book Antiqua', Georgia, serif; font-weight: 400; font-size: 46px; line-height: 1.08; letter-spacing: -0.015em">The fleet</h1>
+      <p style="margin: 0; max-width: 58ch; color: #b5a993; font-size: 17px">Three leaders. Two are answering, and one has not answered since 09:31.</p>
+    </div>
+    <div style="display: flex; align-items: center; gap: 10px">
+      <label for="label-filter" style="font-size: 14px; color: #b5a993">Show</label>
+      <select id="label-filter" style="min-height: 44px; padding: 0 12px; background: #1c1813; color: #f3ead9; border: 1px solid rgba(243,234,217,0.3); border-radius: 6px; font: inherit">
+        <option>All leaders</option>
+        <option>env = prod</option>
+        <option>region = eu</option>
+      </select>
+    </div>
+  </div>
+
+  <dl style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 32px; margin: 0 0 44px">
+    <div style="border-top: 1px solid #f5b83d; padding-top: 14px">
+      <dt style="font-size: 14px; color: #b5a993">Waiting now</dt>
+      <dd style="margin: 4px 0 0; font-family: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif; font-size: 40px; line-height: 1.1">4</dd>
+    </div>
+    <div style="border-top: 1px solid #f5b83d; padding-top: 14px">
+      <dt style="font-size: 14px; color: #b5a993">Finished in the last hour</dt>
+      <dd style="margin: 4px 0 0; font-family: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif; font-size: 40px; line-height: 1.1">10</dd>
+    </div>
+    <div style="border-top: 1px solid #f5b83d; padding-top: 14px">
+      <dt style="font-size: 14px; color: #b5a993">Finished in the last day</dt>
+      <dd style="margin: 4px 0 0; font-family: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif; font-size: 40px; line-height: 1.1">42</dd>
+    </div>
+    <div style="border-top: 1px solid #f5b83d; padding-top: 14px">
+      <dt style="font-size: 14px; color: #b5a993">Failed attempts, last day</dt>
+      <dd style="margin: 4px 0 0; font-family: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif; font-size: 40px; line-height: 1.1">2</dd>
+    </div>
+  </dl>
+
+  <section aria-label="Leaders" style="background: #f3ead9; color: #1c1712; border-radius: 6px; box-shadow: 0 30px 60px -30px rgba(0,0,0,0.8), 8px 8px 0 #f5b83d; overflow-x: auto">
+    <div style="display: flex; justify-content: space-between; gap: 12px; padding: 14px 22px; border-bottom: 2px solid #1c1712; font-size: 15px">
+      <span style="font-weight: 600">Leaders</span>
+      <span style="color: #5c5243">Checked at 09:36:07</span>
+    </div>
+
+    <table style="width: 100%; min-width: 860px; border-collapse: collapse; font-size: 15px">
+      <thead>
+        <tr style="text-align: left; color: #5c5243; font-size: 13px">
+          <th scope="col" style="padding: 10px 22px; font-weight: 600">Leader</th>
+          <th scope="col" style="padding: 10px 12px; font-weight: 600">Health</th>
+          <th scope="col" style="padding: 10px 12px; font-weight: 600; text-align: right">Waiting</th>
+          <th scope="col" style="padding: 10px 12px; font-weight: 600; text-align: right">Last hour</th>
+          <th scope="col" style="padding: 10px 12px; font-weight: 600; text-align: right">Last day</th>
+          <th scope="col" style="padding: 10px 12px; font-weight: 600">Followers at work</th>
+          <th scope="col" style="padding: 10px 22px 10px 12px; font-weight: 600">Finished, 24 hours</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr style="border-top: 1px solid rgba(28,23,18,0.16); vertical-align: top">
+          <th scope="row" style="padding: 14px 22px; text-align: left; font-weight: 400">
+            <a href="#eu-1" style="font-family: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif; font-size: 19px; color: #1c1712; text-decoration-color: #855400">eu-1</a>
+            <div style="margin-top: 2px; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 12.5px; color: #5c5243">env=prod · region=eu</div>
+          </th>
+          <td style="padding: 14px 12px; white-space: nowrap"><span style="display: inline-block; width: 10px; height: 11px; margin-right: 8px; background: #855400; clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%)"></span><span style="font-weight: 600">Answering</span></td>
+          <td style="padding: 14px 12px; text-align: right; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace">2</td>
+          <td style="padding: 14px 12px; text-align: right; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace">7</td>
+          <td style="padding: 14px 12px; text-align: right; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace">30</td>
+          <td style="padding: 14px 12px; color: #1c1712">2 <span style="color: #5c5243">(default 1, gpu 1)</span></td>
+          <td style="padding: 14px 22px 14px 12px">
+            <svg width="170" height="34" viewBox="0 0 170 34" role="img" aria-label="Finished per hour over 24 hours, latest 7, highest 9"><polyline points="0,26 14,22 28,24 42,16 56,18 70,10 84,14 98,8 112,12 126,6 140,11 154,9 170,12" fill="none" stroke="#855400" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"></polyline><line x1="0" y1="33" x2="170" y2="33" stroke="rgba(28,23,18,0.25)" stroke-width="1"></line></svg>
+          </td>
+        </tr>
+        <tr style="border-top: 1px solid rgba(28,23,18,0.16); vertical-align: top">
+          <th scope="row" style="padding: 14px 22px; text-align: left; font-weight: 400">
+            <a href="#us-1" style="font-family: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif; font-size: 19px; color: #1c1712; text-decoration-color: #855400">us-1</a>
+            <div style="margin-top: 2px; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 12.5px; color: #5c5243">env=prod · region=us</div>
+          </th>
+          <td style="padding: 14px 12px; white-space: nowrap"><span style="display: inline-block; width: 10px; height: 11px; margin-right: 8px; background: #855400; clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%)"></span><span style="font-weight: 600">Answering</span></td>
+          <td style="padding: 14px 12px; text-align: right; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace">2</td>
+          <td style="padding: 14px 12px; text-align: right; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace">3</td>
+          <td style="padding: 14px 12px; text-align: right; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace">12</td>
+          <td style="padding: 14px 12px; color: #1c1712">2 <span style="color: #5c5243">(default 1, gpu 1)</span></td>
+          <td style="padding: 14px 22px 14px 12px">
+            <svg width="170" height="34" viewBox="0 0 170 34" role="img" aria-label="Finished per hour over 24 hours, latest 3, highest 5"><polyline points="0,28 14,27 28,24 42,26 56,20 70,22 84,18 98,21 112,16 126,19 140,15 154,20 170,18" fill="none" stroke="#855400" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"></polyline><line x1="0" y1="33" x2="170" y2="33" stroke="rgba(28,23,18,0.25)" stroke-width="1"></line></svg>
+          </td>
+        </tr>
+        <tr style="border-top: 1px solid rgba(28,23,18,0.16); vertical-align: top; background: #e7dcc6">
+          <th scope="row" style="padding: 14px 22px; text-align: left; font-weight: 400">
+            <a href="#ap-1" style="font-family: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif; font-size: 19px; color: #5c5243; text-decoration-color: #5c5243">ap-1</a>
+            <div style="margin-top: 2px; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 12.5px; color: #5c5243">env=staging · region=ap</div>
+          </th>
+          <td style="padding: 14px 12px"><span style="display: inline-block; width: 9px; height: 9px; margin-right: 8px; border: 2px solid #8a1c14; border-radius: 50%; vertical-align: 0"></span><span style="font-weight: 600; color: #8a1c14">Not answering</span><div style="font-size: 13px; color: #5c5243">since 09:31, three tries</div></td>
+          <td colspan="3" style="padding: 14px 12px; color: #5c5243; font-size: 14px">Figures below are from 09:30, the last time it answered.</td>
+          <td style="padding: 14px 12px; color: #5c5243">1 <span>(default 1)</span></td>
+          <td style="padding: 14px 22px 14px 12px">
+            <svg width="170" height="34" viewBox="0 0 170 34" role="img" aria-label="Finished per hour over 24 hours, no answers for the last 6 minutes"><polyline points="0,26 14,24 28,25 42,22 56,23 70,20 84,22 98,19 112,21 126,20 140,22" fill="none" stroke="#5c5243" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"></polyline><rect x="142" y="28" width="28" height="5" fill="#8a1c14"></rect><line x1="0" y1="33" x2="170" y2="33" stroke="rgba(28,23,18,0.25)" stroke-width="1"></line></svg>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p style="margin: 0; padding: 12px 22px 14px; border-top: 1px solid rgba(28,23,18,0.16); font-size: 13px; color: #5c5243">Sample figures, for the design only.</p>
+  </section>
+
+  <section aria-label="Needs a look" style="margin-top: 52px; display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.4fr); gap: 48px">
+    <h2 style="margin: 0; font-family: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif; font-weight: 400; font-size: 30px; line-height: 1.15">Needs a look</h2>
+    <ul style="list-style: none; margin: 0; padding: 0">
+      <li style="position: relative; padding: 14px 0 14px 24px; border-top: 1px solid rgba(243,234,217,0.14)">
+        <span style="position: absolute; left: 0; top: 21px; width: 9px; height: 10px; background: #f5b83d; clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%)"></span>
+        <strong style="font-weight: 600">eu-1 could not read a folder.</strong> <span style="color: #b5a993">The archive location's root folder is not readable. Nothing new from it will be queued until it is.</span>
+      </li>
+      <li style="position: relative; padding: 14px 0 14px 24px; border-top: 1px solid rgba(243,234,217,0.14)">
+        <span style="position: absolute; left: 0; top: 21px; width: 9px; height: 10px; background: #f5b83d; clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%)"></span>
+        <strong style="font-weight: 600">The oldest recording on us-1 has waited 15 minutes.</strong> <span style="color: #b5a993">Two followers are working, so it should start soon.</span>
+      </li>
+    </ul>
+  </section>
+
+</main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":900}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,114 @@
+/* A leader's own pages and Administration: the toolbar above a list, job states, the
+   one-time join token.
+   Mockups: docs/superpowers/design/LeaderJobs.dc.html, TokenDialog.dc.html, AdminLeaders.dc.html */
+
+/* ---- The bar above a list: filters on the left, "Loaded at" and Refresh on the right ---- */
+
+.toolbar,
+.refresh {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-3);
+}
+
+.refresh-time {
+  font-size: var(--fs-fine);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* ---- A job's state: words first, weight and colour second ---- */
+
+.job-state {
+  font-weight: 600;
+}
+
+.job-state-busy {
+  color: var(--accent-text);
+}
+
+.job-state-bad {
+  color: var(--bad);
+}
+
+.job-state-quiet {
+  color: var(--muted);
+}
+
+/* ---- The join token, shown once ---- */
+
+.token-row {
+  display: flex;
+  gap: var(--s-2);
+  margin-top: 6px;
+}
+
+.token-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 48px;
+  border: 2px solid var(--text);
+  border-radius: var(--r-sm);
+  font-size: var(--fs-body);
+}
+
+.token-row .button {
+  min-height: 48px;
+}
+
+.token-status {
+  min-height: 1.4rem;
+  margin: 10px 0 0;
+  font-size: var(--fs-small);
+  font-weight: 600;
+  color: var(--accent-text);
+}
+
+/* An empty status line stays in the page (a live region that appears from nothing is not
+   read out reliably); it just takes no room. */
+.token-status:empty {
+  min-height: 0;
+  margin: 0;
+}
+
+.fact-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s-5);
+  margin: var(--s-6) 0 0;
+  padding-top: var(--s-5);
+  border-top: 1px solid var(--line);
+}
+
+.fact-row dt {
+  font-size: var(--fs-fine);
+  color: var(--muted);
+}
+
+.fact-row dd {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 480px) {
+  .fact-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--s-2);
+  }
+
+  .token-row {
+    flex-direction: column;
+  }
+}
+
+/* Plain-words explanation under a section heading (Who can do what). */
+.explain {
+  max-width: 72ch;
+  color: var(--muted);
+}
+
+.explain p {
+  margin: var(--s-2) 0;
+}

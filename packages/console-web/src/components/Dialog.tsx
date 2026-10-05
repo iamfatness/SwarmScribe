@@ -7,7 +7,7 @@ import { createPortal } from "react-dom";
  *
  * The browser's showModal() provides the modality: the rest of the page, and any dialog
  * beneath this one, is inert; Tab stays inside; Escape fires `cancel`, which is the one path
- * to `onClose`; focus moves to the first control (a confirmation's safe "Close" comes first).
+ * to `onClose`; focus moves to the first control (a confirmation's safe "No, go back" comes first).
  * What the browser does not give us, this adds: on close or unmount, focus returns to what
  * had it on open, or to the main region when that is no longer in the page.
  */
@@ -69,7 +69,7 @@ export function Dialog({
   return createPortal(
     <dialog
       ref={ref}
-      className="dialog"
+      className="dialog sheet sheet-lifted"
       role={role}
       aria-modal="true"
       aria-labelledby={titleId}

@@ -7,7 +7,7 @@ import { ActionButton } from "../../components/ActionButton";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { Dialog } from "../../components/Dialog";
 import { ErrorPanel } from "../../components/ErrorPanel";
-import { formatTime } from "../../lib/format";
+import { formatCount, formatTime, withUnit } from "../../lib/format";
 import {
   ActionNotice,
   ReadState,
@@ -152,19 +152,19 @@ function CreateTokenDialog({
     >
       <form ref={formRef} className="form-grid" noValidate onSubmit={submit}>
         <div>
-          <label className="field" htmlFor={poolId}>
-            Pool
-          </label>
-          <input
-            id={poolId}
-            name="pool"
-            value={pool}
-            aria-required
-            aria-invalid={errors.pool === undefined ? undefined : true}
-            aria-describedby={errors.pool === undefined ? undefined : poolErrorId}
-            onKeyDown={ignoreRepeatedEnter}
-            onChange={(event) => setPool(event.target.value)}
-          />
+          <div className="field">
+            <label htmlFor={poolId}>Pool</label>
+            <input
+              id={poolId}
+              name="pool"
+              value={pool}
+              aria-required
+              aria-invalid={errors.pool === undefined ? undefined : true}
+              aria-describedby={errors.pool === undefined ? undefined : poolErrorId}
+              onKeyDown={ignoreRepeatedEnter}
+              onChange={(event) => setPool(event.target.value)}
+            />
+          </div>
           {errors.pool !== undefined && (
             <p id={poolErrorId} className="error-text" role="alert">
               {errors.pool}
@@ -217,6 +217,7 @@ function CreateTokenDialog({
  * drops it when the dialog closes, and nothing writes it to the URL, storage, the title or a
  * log. It cannot be dismissed by accident: until the token is copied, Escape and "I have
  * stored it" both ask first and close on the second go; focus starts on the token itself.
+ * Layout: docs/superpowers/design/TokenDialog.dc.html.
  */
 export function TokenCreatedDialog({
   created,
@@ -229,6 +230,7 @@ export function TokenCreatedDialog({
   const [asked, setAsked] = useState(false);
   const tokenRef = useRef<HTMLInputElement>(null);
   const warningId = useId();
+  const tokenId = useId();
 
   // Focus starts on the token, selected: a stray Enter then does nothing, and a copy by hand
   // is one keystroke. (Dialog focuses its first control; this runs after it.)
@@ -254,9 +256,9 @@ export function TokenCreatedDialog({
     else setAsked(true);
   };
 
-  let status = "";
-  if (copied === "yes") status = "Copied to the clipboard.";
-  else if (copied === "failed") status = "Copying failed: select the token and copy it.";
+  let status = "Not copied yet.";
+  if (copied === "yes") status = "Copied.";
+  else if (copied === "failed") status = "Copying did not work. Select the token and copy it yourself.";
   // The question is its own announcement, shown beside a failure text, never replaced by it.
   const question = asked
     ? "The token is not shown again. To close without copying it, press Escape again or " +
@@ -264,35 +266,55 @@ export function TokenCreatedDialog({
     : "";
 
   return (
-    <Dialog title="Join token created" onClose={requestClose} describedBy={warningId}>
-      <p id={warningId}>
-        <strong>This is the only time the token is shown.</strong> Copy it now and give it to
-        whoever starts the follower. Pool {created.pool}; up to {created.max_uses}{" "}
-        {created.max_uses === 1 ? "use" : "uses"}; expires {formatTime(created.expires_at)}.
+    <Dialog
+      title="Here is the join token. It is shown once."
+      onClose={requestClose}
+      describedBy={warningId}
+    >
+      <p id={warningId} className="muted">
+        Copy it now and give it to the machine that will join the <strong>{created.pool}</strong>{" "}
+        pool. After you close this, nobody can read it again, including you.
       </p>
-      <label className="field">
+      <label className="field" htmlFor={tokenId}>
         Join token
+      </label>
+      <div className="token-row">
         <input
+          id={tokenId}
           ref={tokenRef}
-          className="mono"
+          className="mono token-field"
           readOnly
           autoComplete="off"
           spellCheck={false}
           value={created.token}
           onFocus={(event) => event.target.select()}
         />
-      </label>
-      <p className="action-notice" role="status">
+        <button type="button" className="button button-primary" onClick={() => void copy()}>
+          Copy
+        </button>
+      </div>
+      <p className="token-status" role="status">
         {status}
       </p>
-      <p className="action-notice" role="status">
+      <p className="token-status" role="status">
         {question}
       </p>
+      <dl className="fact-row">
+        <div>
+          <dt>Pool</dt>
+          <dd>{created.pool}</dd>
+        </div>
+        <div>
+          <dt>Can be used</dt>
+          <dd>{created.max_uses === 1 ? "once" : withUnit(formatCount(created.max_uses), "times")}</dd>
+        </div>
+        <div>
+          <dt>Expires</dt>
+          <dd>{formatTime(created.expires_at)}</dd>
+        </div>
+      </dl>
       <div className="dialog-buttons">
-        <button type="button" className="button" onClick={() => void copy()}>
-          Copy token
-        </button>
-        <button type="button" className="button button-primary" onClick={requestClose}>
+        <button type="button" className="button" onClick={requestClose}>
           I have stored it
         </button>
       </div>
@@ -321,7 +343,7 @@ function tokenState(token: TokenOut, now: number): string {
   if (token.revoked) return "Revoked";
   if (Date.parse(token.expires_at) <= now) return "Expired";
   if (token.uses >= token.max_uses) return "Used up";
-  return "Usable";
+  return "Can be used";
 }
 
 function TokenList({ leader }: TabProps) {
@@ -337,7 +359,7 @@ function TokenList({ leader }: TabProps) {
   return (
     <div {...rows.props}>
       <div className="section-head">
-        <ActionButton held={leader.role} action="tokens.create" onClick={() => setCreating(true)}>
+        <ActionButton held={leader.role} action="tokens.create" primary onClick={() => setCreating(true)}>
           Create join token
         </ActionButton>
         <RefreshButton read={read} />
@@ -349,7 +371,7 @@ function TokenList({ leader }: TabProps) {
           // describes the list as the leader returned it.
           const now = read.updatedAt ?? 0;
           return tokens.length === 0 ? (
-            <p>No join tokens.</p>
+            <p>No join tokens yet.</p>
           ) : (
             <div className="table-scroll" role="region" aria-label="Join token list" tabIndex={0}>
               <table className="medium">
@@ -358,9 +380,9 @@ function TokenList({ leader }: TabProps) {
                     <th scope="col">Token</th>
                     <th scope="col">Pool</th>
                     <th scope="col">State</th>
-                    <th scope="col">Uses</th>
+                    <th scope="col" className="num">Used</th>
                     <th scope="col">Expires</th>
-                    <th scope="col">Created by</th>
+                    <th scope="col">Made by</th>
                     <th scope="col">Actions</th>
                   </tr>
                 </thead>
@@ -423,7 +445,7 @@ function TokenList({ leader }: TabProps) {
       {revoking !== null && (
         <ConfirmDialog
           title={`Revoke join token ${shortId(revoking.id)}?`}
-          message="No new follower can join with it. Followers that already joined are not affected."
+          message="No new follower can join with it. Followers that already joined carry on."
           confirmLabel="Revoke token"
           onClose={() => setRevoking(null)}
           onConfirm={async () => {

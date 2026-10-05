@@ -60,7 +60,7 @@ async function createToken(user: ReturnType<typeof userEvent.setup>) {
   await user.clear(uses);
   await user.type(uses, "2");
   await user.click(within(form).getByRole("button", { name: "Create token" }));
-  return screen.findByRole("dialog", { name: "Join token created" });
+  return screen.findByRole("dialog", { name: "Here is the join token. It is shown once." });
 }
 
 describe("join tokens tab: role", () => {
@@ -82,7 +82,7 @@ describe("join tokens tab: list and revoke", () => {
   it("lists tokens by state without any plaintext, and offers revoke only for a live one", async () => {
     renderApp("/leaders/eu-1/tokens", ADMIN).on(LIST, reply(200, [TOKEN, REVOKED, EXPIRED, USED]));
     const table = await screen.findByRole("region", { name: "Join token list" });
-    expect(within(table).getByRole("row", { name: /44444444/ })).toHaveTextContent("Usable");
+    expect(within(table).getByRole("row", { name: /44444444/ })).toHaveTextContent("Can be used");
     expect(within(table).getByRole("row", { name: /55550000/ })).toHaveTextContent("Revoked");
     expect(within(table).getByRole("row", { name: /66660000/ })).toHaveTextContent("Expired");
     expect(within(table).getByRole("row", { name: /77770000/ })).toHaveTextContent("Used up");
@@ -164,11 +164,50 @@ describe("join tokens tab: create", () => {
     await user.click(await screen.findByRole("button", { name: "Create join token" }));
     await user.click(screen.getByRole("button", { name: "Create token" }));
     expect(await within(screen.getByRole("dialog")).findByRole("alert")).toBeInTheDocument();
-    expect(screen.queryByRole("dialog", { name: "Join token created" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Here is the join token. It is shown once." })).not.toBeInTheDocument();
   });
 });
 
 describe("join tokens tab: the plaintext is shown once", () => {
+  it("says what the token is for, that it is not copied yet, and its pool, uses and expiry", async () => {
+    const user = userEvent.setup();
+    renderApp("/leaders/eu-1/tokens", ADMIN)
+      .on(LIST, reply(200, [TOKEN]))
+      .on(CREATE, reply(201, CREATED));
+    const shown = await createToken(user);
+    expect(within(shown).getByRole("heading", { level: 2 })).toHaveTextContent(
+      "Here is the join token. It is shown once.",
+    );
+    expect(shown).toHaveAccessibleDescription(
+      "Copy it now and give it to the machine that will join the gpu pool. After you close this, nobody can read it again, including you.",
+    );
+    expect(within(shown).getByText("Not copied yet.")).toHaveAttribute("role", "status");
+    const facts: Record<string, string> = {};
+    for (const term of within(shown).getAllByRole("term")) {
+      facts[term.textContent ?? ""] = term.nextElementSibling?.textContent ?? "";
+    }
+    expect(Object.keys(facts)).toEqual(["Pool", "Can be used", "Expires"]);
+    expect(facts.Pool).toBe("gpu");
+    expect(facts["Can be used"]).toBe("2"+String.fromCharCode(0xa0)+"times");
+    expect(facts.Expires).toMatch(/2026/);
+    // The token, then Copy, then the way out: Copy is the dialog's one primary button.
+    expect(within(shown).getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "Copy",
+      "I have stored it",
+    ]);
+    expect(within(shown).getByRole("button", { name: "Copy" })).toHaveClass("button-primary");
+    expect(shown.querySelector("[style]")).toBeNull();
+  });
+
+  it("says once, not 1 times, for a token that can be used a single time", async () => {
+    const user = userEvent.setup();
+    renderApp("/leaders/eu-1/tokens", ADMIN)
+      .on(LIST, reply(200, [TOKEN]))
+      .on(CREATE, reply(201, { ...CREATED, max_uses: 1 }));
+    const shown = await createToken(user);
+    expect(within(shown).getByText("Can be used").nextElementSibling).toHaveTextContent(/^once$/);
+  });
+
   it("shows it in a dialog with the copy button, focus on the selected token", async () => {
     const user = userEvent.setup();
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
@@ -182,10 +221,10 @@ describe("join tokens tab: the plaintext is shown once", () => {
     expect(field).toHaveFocus();
     const input = field as HTMLInputElement;
     expect([input.selectionStart, input.selectionEnd]).toEqual([0, SECRET.length]);
-    expect(shown).toHaveAccessibleDescription(/only time the token is shown/);
-    await user.click(within(shown).getByRole("button", { name: "Copy token" }));
+    expect(shown).toHaveAccessibleDescription(/nobody can read it again, including you/);
+    await user.click(within(shown).getByRole("button", { name: "Copy" }));
     expect(writeText).toHaveBeenCalledExactlyOnceWith(SECRET);
-    expect(within(shown).getByText("Copied to the clipboard.")).toBeInTheDocument();
+    expect(within(shown).getByText("Copied.")).toBeInTheDocument();
   });
 
   it("is gone from the page, React state, URL, storage, title and logs once closed", async () => {
@@ -206,7 +245,7 @@ describe("join tokens tab: the plaintext is shown once", () => {
     expect(window.location.href).not.toContain("sst_plaintext");
     expect(document.title).not.toContain("sst_plaintext");
 
-    await user.click(within(shown).getByRole("button", { name: "Copy token" }));
+    await user.click(within(shown).getByRole("button", { name: "Copy" }));
     await user.click(within(shown).getByRole("button", { name: "I have stored it" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(await screen.findByText("Join token 55555555 is created.")).toBeInTheDocument();
@@ -235,7 +274,7 @@ describe("join tokens tab: the plaintext is shown once", () => {
       .on(CREATE, reply(201, CREATED));
     const shown = await createToken(user);
     await user.keyboard("{Escape}");
-    expect(screen.getByRole("dialog", { name: "Join token created" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Here is the join token. It is shown once." })).toBeInTheDocument();
     expect(
       within(shown).getByText(
         /The token is not shown again\. To close without copying it, press Escape again/,
@@ -254,7 +293,7 @@ describe("join tokens tab: the plaintext is shown once", () => {
       .on(LIST, reply(200, []))
       .on(CREATE, reply(201, CREATED));
     const shown = await createToken(user);
-    await user.click(within(shown).getByRole("button", { name: "Copy token" }));
+    await user.click(within(shown).getByRole("button", { name: "Copy" }));
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
@@ -290,8 +329,8 @@ describe("join tokens tab: the plaintext is shown once", () => {
       .on(CREATE, reply(201, CREATED));
     const shown = await createToken(user);
     arrange();
-    await user.click(within(shown).getByRole("button", { name: "Copy token" }));
-    const status = await within(shown).findByText("Copying failed: select the token and copy it.");
+    await user.click(within(shown).getByRole("button", { name: "Copy" }));
+    const status = await within(shown).findByText("Copying did not work. Select the token and copy it yourself.");
     expect(status.closest("[role=status]")).not.toBeNull();
     const field = within(shown).getByRole("textbox", { name: "Join token" }) as HTMLInputElement;
     expect(field).toHaveValue(SECRET);
@@ -310,12 +349,12 @@ describe("join tokens tab: the plaintext is shown once", () => {
     const form = screen.getByRole("dialog");
     await user.click(within(form).getByRole("textbox", { name: "Pool" }));
     await user.keyboard("{Enter}");
-    const shown = await screen.findByRole("dialog", { name: "Join token created" });
+    const shown = await screen.findByRole("dialog", { name: "Here is the join token. It is shown once." });
     await user.keyboard("{Enter}");
-    expect(screen.getByRole("dialog", { name: "Join token created" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Here is the join token. It is shown once." })).toBeInTheDocument();
     expect(mock.callsTo(CREATE)).toHaveLength(1);
     await user.click(within(shown).getByRole("button", { name: "I have stored it" }));
-    expect(screen.getByRole("dialog", { name: "Join token created" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Here is the join token. It is shown once." })).toBeInTheDocument();
     expect(within(shown).getByText(/not shown again/)).toBeInTheDocument();
     await user.click(within(shown).getByRole("button", { name: "I have stored it" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -332,7 +371,7 @@ describe("join tokens tab: the plaintext is shown once", () => {
     await user.click(await screen.findByRole("button", { name: "Create join token" }));
     await user.click(within(screen.getByRole("dialog")).getByRole("textbox", { name: "Pool" }));
     await user.keyboard("{Enter>5}");
-    await screen.findByRole("dialog", { name: "Join token created" });
+    await screen.findByRole("dialog", { name: "Here is the join token. It is shown once." });
     await user.keyboard("{/Enter}");
     expect(mock.callsTo(CREATE)).toHaveLength(1);
   });
@@ -344,11 +383,11 @@ describe("join tokens tab: the plaintext is shown once", () => {
       .on(CREATE, reply(201, CREATED));
     const shown = await createToken(user);
     vi.spyOn(navigator.clipboard, "writeText").mockRejectedValue(new Error("no"));
-    await user.click(within(shown).getByRole("button", { name: "Copy token" }));
-    await within(shown).findByText("Copying failed: select the token and copy it.");
+    await user.click(within(shown).getByRole("button", { name: "Copy" }));
+    await within(shown).findByText("Copying did not work. Select the token and copy it yourself.");
     await user.keyboard("{Escape}");
-    expect(screen.getByRole("dialog", { name: "Join token created" })).toBeInTheDocument();
-    expect(within(shown).getByText("Copying failed: select the token and copy it.")).toBeVisible();
+    expect(screen.getByRole("dialog", { name: "Here is the join token. It is shown once." })).toBeInTheDocument();
+    expect(within(shown).getByText("Copying did not work. Select the token and copy it yourself.")).toBeVisible();
     const question = within(shown).getByText(/not shown again/);
     expect(question.closest("[role=status]")).not.toBeNull();
     await user.keyboard("{Escape}");
@@ -378,7 +417,7 @@ describe("join tokens tab: the plaintext is shown once", () => {
       screen.getByRole("dialog", { name: "Create a join token for eu-1" }),
     ).toBeInTheDocument();
     release();
-    const shown = await screen.findByRole("dialog", { name: "Join token created" });
+    const shown = await screen.findByRole("dialog", { name: "Here is the join token. It is shown once." });
     expect(within(shown).getByRole("textbox", { name: "Join token" })).toHaveValue(SECRET);
   });
 
@@ -399,17 +438,17 @@ describe("join tokens tab: the plaintext is shown once", () => {
       );
     }
     render(<Harness />);
-    const first = await screen.findByRole("dialog", { name: "Join token created" });
-    await user.click(within(first).getByRole("button", { name: "Copy token" }));
-    expect(within(first).getByText("Copied to the clipboard.")).toBeInTheDocument();
+    const first = await screen.findByRole("dialog", { name: "Here is the join token. It is shown once." });
+    await user.click(within(first).getByRole("button", { name: "Copy" }));
+    expect(within(first).getByText("Copied.")).toBeInTheDocument();
     // A second token arrives while the first is showing: the first stays.
     act(() => setQueue((q) => [...q, second]));
     expect(within(first).getByRole("textbox", { name: "Join token" })).toHaveValue(SECRET);
     expect(reactStateHolds("sst_second")).toBe(true);
     await user.click(within(first).getByRole("button", { name: "I have stored it" }));
-    const next = await screen.findByRole("dialog", { name: "Join token created" });
+    const next = await screen.findByRole("dialog", { name: "Here is the join token. It is shown once." });
     expect(within(next).getByRole("textbox", { name: "Join token" })).toHaveValue("sst_second");
-    expect(within(next).queryByText("Copied to the clipboard.")).not.toBeInTheDocument();
+    expect(within(next).queryByText("Copied.")).not.toBeInTheDocument();
     expect(document.body.innerHTML).not.toContain(SECRET);
     await user.click(within(next).getByRole("button", { name: "I have stored it" }));
     expect(screen.getByText(/not shown again/)).toBeInTheDocument();

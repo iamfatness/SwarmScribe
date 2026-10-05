@@ -3,6 +3,7 @@ import { api, leaderPath } from "../../api/client";
 import type { FleetLeader } from "../../api/types";
 import { usePoll, type PollState } from "../../app/usePoll";
 import { ErrorPanel } from "../../components/ErrorPanel";
+import { formatTime } from "../../lib/format";
 
 /** What every drill-down tab gets. */
 export interface TabProps {
@@ -53,11 +54,20 @@ export function ReadState<T>({
   );
 }
 
+/**
+ * Reads the list again, and says when it was last read: a leader's lists are not on a timer,
+ * so the person should see how old they are. The time is not in a live region.
+ */
 export function RefreshButton({ read }: { read: PollState<unknown> }) {
   return (
-    <button type="button" className="button" onClick={read.refresh} disabled={read.loading}>
-      Refresh
-    </button>
+    <span className="refresh">
+      {read.updatedAt !== null && (
+        <span className="refresh-time">Loaded at {formatTime(new Date(read.updatedAt).toISOString())}</span>
+      )}
+      <button type="button" className="button" onClick={read.refresh} disabled={read.loading}>
+        Refresh
+      </button>
+    </span>
   );
 }
 

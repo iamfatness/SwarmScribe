@@ -4,6 +4,7 @@ import type { ChannelMode, LocationOut, RequiredDevice } from "../../api/types";
 import { useAction } from "../../app/useAction";
 import { useDialogAction } from "../../app/useDialogAction";
 import { ActionButton } from "../../components/ActionButton";
+import { BreakPath } from "../../components/BreakPath";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { Dialog } from "../../components/Dialog";
 import { ErrorPanel } from "../../components/ErrorPanel";
@@ -172,9 +173,9 @@ function AddLocationDialog({
               set({ required_device: event.target.value as RequiredDevice | "" })
             }
           >
-            <option value="">Any (default)</option>
-            <option value="cuda">CUDA GPU</option>
-            <option value="cpu">CPU</option>
+            <option value="">Any device (the default)</option>
+            <option value="cuda">GPU (CUDA) only</option>
+            <option value="cpu">CPU only</option>
           </select>
         </label>
         <TextField
@@ -192,7 +193,7 @@ function AddLocationDialog({
             onChange={(event) => set({ channel_mode: event.target.value as ChannelMode })}
           >
             <option value="mono">Mono</option>
-            <option value="stereo_split">Stereo, one speaker per channel</option>
+            <option value="stereo_split">Stereo, one speaker per side</option>
             <option value="auto">Automatic</option>
           </select>
         </label>
@@ -243,9 +244,28 @@ function AddLocationDialog({
   );
 }
 
-function channels(location: LocationOut): string {
-  if (location.channel_mode === "mono") return "mono";
-  return `${location.channel_mode} (${location.channel_labels.join(", ")})`;
+const CHANNEL_MODES: Record<string, string> = {
+  mono: "Mono",
+  stereo_split: "Stereo, one speaker per side",
+  auto: "Automatic",
+};
+
+const DEVICES: Record<string, string> = {
+  any: "Any device",
+  cuda: "GPU (CUDA) only",
+  cpu: "CPU only",
+};
+
+/** Which followers may take a location's recordings; an unknown device as the leader sent it. */
+export function deviceText(device: string): string {
+  return DEVICES[device] ?? device;
+}
+
+/** "Mono", "Stereo, one speaker per side: Agent, Caller"; an unknown mode as the leader sent it. */
+export function channels(location: Pick<LocationOut, "channel_mode" | "channel_labels">): string {
+  const mode = CHANNEL_MODES[location.channel_mode] ?? location.channel_mode;
+  if (location.channel_mode === "mono") return mode;
+  return `${mode}: ${location.channel_labels.join(", ")}`;
 }
 
 export function LocationsTab({ leader }: TabProps) {
@@ -269,7 +289,7 @@ export function LocationsTab({ leader }: TabProps) {
   return (
     <div {...rows.props}>
       <div className="section-head">
-        <ActionButton held={leader.role} action="locations.add" onClick={() => setAdding(true)}>
+        <ActionButton held={leader.role} action="locations.add" primary onClick={() => setAdding(true)}>
           Add location
         </ActionButton>
         <RefreshButton read={read} />
@@ -279,19 +299,16 @@ export function LocationsTab({ leader }: TabProps) {
       <ReadState read={read} what="locations">
         {(locations) =>
           locations.length === 0 ? (
-            <p>This leader has no locations.</p>
+            <p>This leader has no locations yet.</p>
           ) : (
             <div className="table-scroll" role="region" aria-label="Location list" tabIndex={0}>
-              <table className="wide">
+              <table className="medium">
                 <thead>
                   <tr>
                     <th scope="col">Location</th>
                     <th scope="col">Folder</th>
                     <th scope="col">Pool</th>
-                    <th scope="col">Device</th>
-                    <th scope="col">Channels</th>
-                    <th scope="col">Scan every</th>
-                    <th scope="col">Enabled</th>
+                    <th scope="col">Scanning</th>
                     <th scope="col">Last scan</th>
                     <th scope="col">Actions</th>
                   </tr>
@@ -301,20 +318,30 @@ export function LocationsTab({ leader }: TabProps) {
                     <tr key={location.id} data-row={location.id}>
                       <th scope="row">{location.name}</th>
                       <td className="long">
-                        <span className="mono">{location.root ?? "–"}</span>
+                        <span className="mono">
+                          {location.root === null ? "–" : <BreakPath text={location.root} />}
+                        </span>
                         {location.input_prefix !== "" && (
-                          <span className="cell-note">Input prefix {location.input_prefix}</span>
+                          <span className="cell-note">
+                            Looks in <BreakPath text={location.input_prefix} />
+                          </span>
                         )}
+                        <span className="cell-note">{channels(location)}</span>
                       </td>
-                      <td className="nowrap">{location.pool}</td>
-                      <td className="nowrap">{location.required_device}</td>
-                      <td>{channels(location)}</td>
-                      <td>{formatDuration(location.scan_interval_s)}</td>
-                      <td className="nowrap">{location.enabled ? "Yes" : "No"}</td>
+                      <td>
+                        <span className="nowrap">{location.pool}</span>
+                        <span className="cell-note nowrap">{deviceText(location.required_device)}</span>
+                      </td>
+                      <td>
+                        <span className="nowrap">{location.enabled ? "On" : "Switched off"}</span>
+                        <span className="cell-note nowrap">
+                          Every {formatDuration(location.scan_interval_s)}
+                        </span>
+                      </td>
                       <td className="long">
-                        {location.last_scan_at ? formatTime(location.last_scan_at) : "Never"}
+                        {location.last_scan_at ? formatTime(location.last_scan_at) : "Not yet"}
                         {location.scan_requested && (
-                          <span className="cell-note">Scan requested</span>
+                          <span className="cell-note">A scan is asked for</span>
                         )}
                         {location.last_scan_error && (
                           <span className="cell-note error-text">{location.last_scan_error}</span>
@@ -330,7 +357,7 @@ export function LocationsTab({ leader }: TabProps) {
                               void post(
                                 location,
                                 "ingest",
-                                `A scan of ${location.name} is requested.`,
+                                `A scan of ${location.name} is asked for.`,
                               )
                             }
                             name={`Scan now ${location.name}`}
@@ -344,9 +371,9 @@ export function LocationsTab({ leader }: TabProps) {
                             action="locations.disable"
                             danger
                             onClick={() => setDisabling(location)}
-                            name={`Disable ${location.name}`}
+                            name={`Switch off ${location.name}`}
                           >
-                            Disable
+                            Switch off
                           </ActionButton>
                         ) : (
                           <ActionButton
@@ -354,11 +381,11 @@ export function LocationsTab({ leader }: TabProps) {
                             action="locations.enable"
                             busy={action.busy}
                             onClick={() =>
-                              void post(location, "enable", `${location.name} is enabled.`)
+                              void post(location, "enable", `${location.name} is switched on.`)
                             }
-                            name={`Enable ${location.name}`}
+                            name={`Switch on ${location.name}`}
                           >
-                            Enable
+                            Switch on
                           </ActionButton>
                         )}
                       </td>
@@ -382,17 +409,17 @@ export function LocationsTab({ leader }: TabProps) {
       )}
       {disabling !== null && (
         <ConfirmDialog
-          title={`Disable ${disabling.name}?`}
+          title={`Switch off ${disabling.name}?`}
           message={
-            "The leader stops scanning this location for new recordings until it is enabled " +
-            "again. Jobs already made are not affected."
+            "The leader stops looking in this location for new recordings until it is switched " +
+            "on again. Jobs already made carry on."
           }
-          confirmLabel="Disable location"
+          confirmLabel="Switch it off"
           onClose={() => setDisabling(null)}
           onConfirm={async () => {
             setNotice(null);
             await api.post(path(disabling, "disable"));
-            rows.done(`${disabling.name} is disabled.`);
+            rows.done(`${disabling.name} is switched off.`);
           }}
         />
       )}

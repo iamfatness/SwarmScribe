@@ -1,0 +1,415 @@
+/* The frame around every signed-in page: the rail (a top bar with a menu on narrow
+   screens), the main column, the page header and the tab strip. */
+
+.app {
+  display: grid;
+  grid-template-columns: var(--rail-width) minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.app-main {
+  min-width: 0;
+}
+
+main {
+  display: block;
+  max-width: min(100%, 1400px);
+  padding: 30px var(--s-9) var(--s-10);
+}
+
+/* ---- Rail ---- */
+
+.rail {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-8);
+  height: 100vh;
+  height: 100dvh;
+  padding: 22px 18px;
+  overflow: hidden;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.rail-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.brand:hover {
+  color: var(--text);
+}
+
+.brand-mark {
+  display: block;
+  flex: none;
+}
+
+.wordmark {
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.wordmark em {
+  font-family: var(--wordmark-serif);
+  font-weight: 400;
+  color: var(--amber);
+  letter-spacing: -0.01em;
+}
+
+.menu-button {
+  display: none;
+}
+
+.rail-panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--s-8);
+  min-height: 0;
+}
+
+/* With many leaders only the list of leaders scrolls inside the rail: Fleet stays above it,
+   Administration below it, and the person, the theme and Sign out below those, all in view.
+   The small padding and matching negative margin keep a focus ring from being clipped by
+   the scroller. */
+.rail-panel nav {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.nav-list {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.nav-fleet {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.rail-foot {
+  flex: none;
+}
+
+.nav-list,
+.nav-sublist {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Beside the scrolling list, not inside it: Administration never moves out of reach. */
+.nav-gap {
+  flex: none;
+  margin-top: var(--s-3);
+}
+
+.nav-sublist {
+  flex: 0 1 auto;
+  min-height: 0;
+  margin: var(--s-1) -4px -4px;
+  padding: 4px;
+  overflow-y: auto;
+}
+
+.nav-fleet > .nav-link {
+  flex: none;
+}
+
+.nav-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--h-control);
+  padding: 0 var(--s-3);
+  border-radius: var(--r);
+  color: var(--muted);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.nav-link:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.nav-sublist .nav-link {
+  padding-left: 31px;
+}
+
+.nav-link[aria-current="page"] {
+  background: var(--accent-wash);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.nav-flag {
+  margin-left: auto;
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--bad);
+  white-space: nowrap;
+}
+
+.nav-flag-quiet {
+  color: var(--muted);
+}
+
+.rail-foot {
+  display: grid;
+  gap: var(--s-3);
+  margin-top: auto;
+  padding-top: var(--s-5);
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-small);
+  color: var(--muted);
+}
+
+.who {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.who-name {
+  display: block;
+  color: var(--text);
+}
+
+.theme-select {
+  justify-content: space-between;
+}
+
+/* ---- Page header ---- */
+
+.page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3) var(--s-7);
+}
+
+.page-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s-1) var(--s-4);
+  min-width: 0;
+}
+
+.page-sub {
+  max-width: 64ch;
+  margin: 6px 0 0;
+  color: var(--muted);
+  overflow-wrap: break-word;
+}
+
+/* The role line is one sentence of about 90 characters: on one line where the page is wide
+   enough, wrapping (balanced by the global rule) where it is not. */
+.page-sub.role-line {
+  max-width: 96ch;
+}
+
+.page-sub strong {
+  color: var(--text);
+}
+
+.page-message {
+  padding: var(--s-9);
+}
+
+.breadcrumb {
+  margin: 0 0 6px;
+  font-size: var(--fs-small);
+  color: var(--muted);
+  overflow-wrap: break-word;
+}
+
+/* ---- Tabs (links, each its own address) ---- */
+
+.tab-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 26px;
+  margin: 18px 0 var(--s-7);
+  padding: 0;
+  border-bottom: 1px solid var(--line);
+  list-style: none;
+}
+
+.tab-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--h-control);
+  padding: 0 2px;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.tab-link:hover {
+  color: var(--text);
+}
+
+.tab-link[aria-current="page"] {
+  border-bottom-color: var(--accent);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.tab-panel > h2:first-child {
+  margin-top: 0;
+}
+
+.section-head,
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3) var(--s-5);
+  margin: var(--s-4) 0 var(--s-1);
+}
+
+.filters {
+  justify-content: flex-start;
+}
+
+.section-head h2,
+.section-head h3,
+.section-head p {
+  margin: 0;
+}
+
+/* ---- Narrow screens (a tablet held upright is 768px): the rail becomes a top bar ---- */
+
+@media (max-width: 900px) {
+  .app {
+    display: block;
+  }
+
+  /* The bar stays at the top as the page scrolls. Open, its menu may be taller than a short
+     window: the bar then scrolls on its own, and the page behind does not scroll. */
+  .rail {
+    z-index: 10;
+    height: auto;
+    max-height: 100vh;
+    max-height: 100dvh;
+    gap: 0;
+    padding: var(--s-3) var(--s-5);
+    overflow-y: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  /* The whole open menu scrolls in the bar here, not the list alone. */
+  .rail-panel nav {
+    flex: none;
+  }
+
+  .nav-sublist {
+    margin: var(--s-1) 0 0;
+    padding: 0;
+    overflow: visible;
+  }
+
+  html {
+    scroll-padding-top: 72px;
+  }
+
+  html.menu-open {
+    overflow: hidden;
+  }
+
+  .menu-button {
+    display: inline-flex;
+  }
+
+  .rail-panel {
+    gap: var(--s-6);
+    padding: var(--s-5) 0 var(--s-2);
+  }
+
+  .rail-panel[data-open="false"] {
+    display: none;
+  }
+
+  main {
+    padding: var(--s-7) var(--s-5) var(--s-10);
+  }
+
+  .page-message {
+    padding: var(--s-7) var(--s-5);
+  }
+}
+
+/* ---- The mark (components/Brand.tsx). Brand constants: the same in both themes. ---- */
+
+.brand-hex {
+  fill: var(--amber);
+  stroke: var(--amber);
+  stroke-width: 4;
+  stroke-linejoin: round;
+}
+
+.brand-nib {
+  fill: #14110d;
+  stroke: #14110d;
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+
+.brand-slit {
+  fill: none;
+  stroke: var(--amber);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+}
+
+.brand-eye {
+  fill: var(--amber);
+}
+
+.who-line {
+  display: block;
+}
+
+.idle-notice {
+  margin: var(--s-5) var(--s-9) 0;
+}
+
+@media (max-width: 900px) {
+  .idle-notice {
+    margin: var(--s-3) var(--s-5) 0;
+  }
+}
+
+/* Windows high contrast: the current page in the rail is shown in the selected colours too. */
+@media (forced-colors: active) {
+  .nav-link[aria-current="page"] {
+    forced-color-adjust: none;
+    background: Highlight;
+    color: HighlightText;
+  }
+}

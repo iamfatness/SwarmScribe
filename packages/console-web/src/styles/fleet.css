@@ -1,0 +1,284 @@
+/* The fleet overview: totals, the "Needs a look" sheet, one card per leader and its chart.
+   Mockup: docs/superpowers/design/InkConsole.dc.html */
+
+.fleet-head {
+  margin-bottom: 26px;
+}
+
+/* The page's one rhythm is 26px between its parts, a notice included. */
+.fleet-notice {
+  margin: 0 0 26px;
+}
+
+.fleet-loading {
+  margin: 0 0 var(--s-4);
+}
+
+/* ---- Loading: empty shapes where the totals and cards will be (still, so nothing moves) ---- */
+
+.placeholder {
+  display: grid;
+  gap: var(--s-3);
+  align-content: start;
+}
+
+.stat-tile.placeholder {
+  min-height: 90px;
+}
+
+.leader-card.placeholder {
+  min-height: 210px;
+}
+
+.placeholder-bar {
+  display: block;
+  height: 12px;
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+}
+
+.placeholder-bar-short {
+  width: 45%;
+}
+
+.placeholder-bar-figure {
+  width: 30%;
+  height: 26px;
+}
+
+.placeholder-bar-chart {
+  height: 64px;
+}
+
+/* ---- Totals ---- */
+
+.stat-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--s-4);
+  margin: 0;
+}
+
+.stat-tile {
+  padding: var(--s-5) 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+}
+
+.stat-tile dt {
+  font-size: var(--fs-fine);
+  color: var(--muted);
+}
+
+.stat-tile dd {
+  margin: 2px 0 0;
+  font-family: var(--mono);
+  font-size: var(--fs-figure);
+  line-height: 1.2;
+}
+
+.stat-note {
+  overflow-wrap: break-word;
+  margin: var(--s-2) 0 0;
+  font-size: var(--fs-fine);
+  color: var(--muted);
+}
+
+/* ---- Nothing to show: no role on any leader, or a label nobody has ---- */
+
+.empty-state {
+  max-width: 640px;
+  margin-top: 26px;
+  overflow-wrap: break-word;
+}
+
+.empty-state p {
+  margin: 0;
+}
+
+/* ---- The grid of cards ---- */
+
+.fleet-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-4);
+  margin-top: 26px;
+}
+
+/* A band of its own across the grid, as tall as what it lists and no taller, above the
+   leaders' cards. Its items run in two columns when there is room, one when there is not. */
+.needs-look {
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow-wrap: break-word;
+  padding: var(--s-6) 22px;
+  border-radius: var(--r-lg);
+}
+
+.needs-look .sheet-title {
+  margin-bottom: 10px;
+}
+
+.needs-look-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.needs-look-list li {
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+  break-inside: avoid;
+}
+
+.needs-look-toggle {
+  margin-top: var(--s-3);
+}
+
+/* Two columns that flow, so an item of any length never leaves a gap beside it. */
+@media (min-width: 1100px) {
+  .needs-look-list {
+    column-count: 2;
+    column-gap: var(--s-9);
+  }
+}
+
+/* A name or a label longer than the card breaks inside it; ordinary words never do. */
+.leader-card {
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.leader-card-bad {
+  border-color: var(--bad);
+}
+
+.leader-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s-2) var(--s-3);
+}
+
+.leader-card-title {
+  min-width: 0;
+}
+
+.leader-card-name {
+  margin: 0;
+  font-size: var(--fs-h2);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.leader-card-name a {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.leader-card-name a:hover {
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+}
+
+.leader-card-chart {
+  min-height: 64px;
+  margin: var(--s-5) 0 var(--s-4);
+  color: var(--muted);
+}
+
+.figure-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.figure-row dt {
+  font-size: var(--fs-mono-fine);
+  color: var(--muted);
+}
+
+.figure-row dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: var(--fs-figure-small);
+}
+
+.leader-card-foot {
+  margin: var(--s-4) 0 0;
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-small);
+  color: var(--muted);
+}
+
+.leader-card-foot strong {
+  font-weight: 400;
+  color: var(--text);
+}
+
+.leader-card-what {
+  margin: var(--s-5) 0 0;
+}
+
+.leader-card-more {
+  margin: 6px 0 0;
+  font-size: var(--fs-small);
+  color: var(--muted);
+}
+
+.leader-card-link {
+  margin: var(--s-4) 0 0;
+  font-weight: 600;
+}
+
+/* ---- Throughput chart: one wide line, stretched to the card ---- */
+
+.sparkline {
+  display: block;
+  width: 100%;
+  height: 64px;
+}
+
+.sparkline-axis {
+  stroke: var(--edge);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.sparkline-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+/* A lone point: a zero-length stroke with round caps stays round however the chart is
+   stretched (a <circle> would become an ellipse). */
+.sparkline-dot {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 5;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.sparkline-down {
+  fill: var(--bad);
+}
+
+@media (max-width: 640px) {
+  .fleet-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .stat-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

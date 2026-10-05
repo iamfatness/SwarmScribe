@@ -60,7 +60,7 @@ export async function signIn(page: Page, persona: Persona, path = "/"): Promise<
   });
   await page.goto(path);
   await expect(page).toHaveURL(/\/sign-in/);
-  await page.getByRole("link", { name: "Sign in with Microsoft Entra ID" }).click();
+  await page.getByRole("link", { name: "Continue with Microsoft" }).click();
   await expect(page.getByText("Microsoft sign-in")).toBeVisible();
   expect(redirect.status).toBe(302);
   expect(redirect.location.startsWith(ENTRA)).toBe(true);
@@ -69,7 +69,9 @@ export async function signIn(page: Page, persona: Persona, path = "/"): Promise<
   expect(answer.ok()).toBe(true);
   const { callback } = (await answer.json()) as { callback: string };
   await page.goto(callback);
-  await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
+  // The brand link is in the signed-in frame at every width (Sign out is behind the Menu
+  // button on a narrow screen), and nowhere on the sign-in page.
+  await expect(page.getByRole("link", { name: "SwarmScribe console" })).toBeVisible();
 }
 
 /** Zero WCAG 2.1 A/AA violations on the page as it is now. */

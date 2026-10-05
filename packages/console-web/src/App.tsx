@@ -3,35 +3,23 @@ import { startActivityTracking } from "./app/activity";
 import { FleetProvider } from "./app/fleet";
 import { RouterProvider, matchPath, useLocation, useNavigate } from "./app/router";
 import { isRouted } from "./app/routes";
-import { SessionProvider, useSession } from "./app/session";
-import { Layout, type NavItem } from "./components/Layout";
-import { AdminAdminsPage } from "./pages/admin/AdminAdminsPage";
-import { AdminGrantsPage } from "./pages/admin/AdminGrantsPage";
-import { AdminLeadersPage } from "./pages/admin/AdminLeadersPage";
+import { SessionProvider } from "./app/session";
+import { Layout } from "./components/Layout";
+import { AdminPage } from "./pages/admin/AdminPage";
 import { FleetPage } from "./pages/FleetPage";
 import { LeaderPage } from "./pages/leader/LeaderPage";
 import { leaderUrl } from "./pages/leader/tabs";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { SignInPage } from "./pages/SignInPage";
 
-const FLEET: NavItem = {
-  to: "/",
-  label: "Fleet",
-  match: (pathname) => pathname === "/" || pathname.startsWith("/leaders/"),
-};
-
-const ADMIN: NavItem = {
-  to: "/admin/leaders",
-  label: "Administration",
-  match: (pathname) => pathname.startsWith("/admin"),
-};
-
 /**
  * The page a path belongs to, for moving focus: switching tabs inside one leader's
- * drill-down stays on the page (focus stays on the tab link that was activated); going
- * from the fleet to a leader, or from one leader to another, changes the page.
+ * drill-down, or between the sections of Administration, stays on the page (focus stays on
+ * the tab link that was activated); going from the fleet to a leader, or from one leader to
+ * another, changes the page.
  */
-function pageOf(pathname: string): string {
+export function pageOf(pathname: string): string {
+  if (pathname === "/admin" || pathname.startsWith("/admin/")) return "/admin";
   const leader = matchPath("/leaders/:name/:tab", pathname) ?? matchPath("/leaders/:name", pathname);
   return leader === null ? pathname : `/leaders/${leader.name as string}`;
 }
@@ -52,18 +40,17 @@ function SignedInPage() {
   const bare = matchPath("/leaders/:name", pathname);
   if (bare !== null) return <Redirect to={leaderUrl(bare.name as string)} />;
   if (pathname === "/admin") return <Redirect to="/admin/leaders" />;
-  if (pathname === "/admin/leaders") return <AdminLeadersPage />;
-  if (pathname === "/admin/grants") return <AdminGrantsPage />;
-  if (pathname === "/admin/admins") return <AdminAdminsPage />;
+  // One component for all three, so its frame is not rebuilt when the section changes.
+  if (pathname === "/admin/leaders") return <AdminPage section="leaders" />;
+  if (pathname === "/admin/grants") return <AdminPage section="grants" />;
+  if (pathname === "/admin/admins") return <AdminPage section="admins" />;
   return <NotFoundPage />;
 }
 
 function SignedIn() {
-  const { session } = useSession();
-  const nav = session.console_admin ? [FLEET, ADMIN] : [FLEET];
   return (
     <FleetProvider>
-      <Layout nav={nav} pageOf={pageOf}>
+      <Layout pageOf={pageOf}>
         <SignedInPage />
       </Layout>
     </FleetProvider>

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sign in</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+a{color:#f5b83d}a:hover{color:#ffd27a}
+</style>
+</helmet>
+<div style="min-height: 900px; box-sizing: border-box; display: flex; flex-wrap: wrap; background: #14110d; color: #f3ead9; font-family: 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', sans-serif; font-size: 15px; line-height: 1.5; position: relative">
+<main style="flex: 1 1 100%; box-sizing: border-box; min-height: 900px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0">
+  <section style="box-sizing: border-box; padding: 56px 64px; display: flex; flex-direction: column; justify-content: space-between; gap: 40px; border-right: 1px solid rgba(243,234,217,0.14)">
+    <a href="#home" style="display: inline-flex; align-items: center; gap: 12px; color: #f3ead9; text-decoration: none"><svg width="40" height="40" viewBox="0 0 64 64" aria-hidden="true"><path d="M32 4 56.25 18v28L32 60 7.75 46V18z" fill="#f5b83d" stroke="#f5b83d" stroke-width="4" stroke-linejoin="round"></path><path d="M32 51 21 30l4-14h14l4 14z" fill="#14110d" stroke="#14110d" stroke-width="2" stroke-linejoin="round"></path><path d="M32 51V33" stroke="#f5b83d" stroke-width="2.4" stroke-linecap="round"></path><circle cx="32" cy="30.5" r="3" fill="#f5b83d"></circle></svg><span style="font-size: 26px; font-weight: 700; letter-spacing: -0.02em">Swarm<em style="font-family: Georgia, 'Times New Roman', serif; font-weight: 400; color: #f5b83d">Scribe</em></span></a>
+    <div>
+      <h1 style="margin: 0 0 18px; font-family: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif; font-weight: 400; font-size: 48px; line-height: 1.08; letter-spacing: -0.015em">Every leader you look after, in one place.</h1>
+      <p style="margin: 0; max-width: 46ch; color: #b5a993; font-size: 17px">See what is waiting, what finished and what needs a look. Everything you change here is recorded under your name, on the leader as well as here.</p>
+    </div>
+    <p style="margin: 0; display: flex; align-items: center; gap: 10px; font-size: 14px; color: #b5a993"><span style="width: 10px; height: 11px; background: #f5b83d; clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%)"></span>console.example.org</p>
+  </section>
+  <section style="box-sizing: border-box; padding: 56px 64px; display: flex; align-items: center; justify-content: center; background: #1c1813">
+    <div style="width: min(400px, 100%); box-sizing: border-box; padding: 32px 32px 28px; background: #f3ead9; color: #1c1712; border-radius: 6px; box-shadow: 0 30px 60px -30px rgba(0,0,0,0.8), 8px 8px 0 #f5b83d">
+      <h2 style="margin: 0 0 6px; font-family: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif; font-weight: 400; font-size: 28px">Sign in</h2>
+      <p style="margin: 0 0 22px; color: #5c5243">Use the account your organisation gave you.</p>
+      <a href="#entra" style="display: flex; align-items: center; justify-content: center; min-height: 48px; margin-bottom: 10px; background: #14110d; color: #f3ead9; border-radius: 6px; text-decoration: none; font-weight: 600">Continue with Microsoft</a>
+      <a href="#google" style="display: flex; align-items: center; justify-content: center; min-height: 48px; background: transparent; color: #1c1712; border: 1px solid #1c1712; border-radius: 6px; text-decoration: none; font-weight: 600">Continue with Google</a>
+      <p style="margin: 22px 0 0; padding-top: 16px; border-top: 1px solid rgba(28,23,18,0.16); font-size: 14px; color: #5c5243">You stay signed in for 8 hours, or until an hour passes without you doing anything.</p>
+    </div>
+  </section>
+</main></div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":900}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

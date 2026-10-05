@@ -16,6 +16,7 @@ repository's pgserver in .pgdata."""
 
 import asyncio
 import logging
+import math
 import os
 import sys
 from datetime import UTC, datetime, timedelta
@@ -155,10 +156,13 @@ class Harness:
         async with self.sessionmaker() as session:
             for row in (await session.scalars(select(Leader))).all():
                 status = self.fakes.leaders[row.name].status()
+                offset = 0.0 if row.name == "eu-1" else 1.3
                 for i in range(288, 0, -1):
                     taken = now - timedelta(minutes=5 * i)
                     down = row.name == "us-1" and 100 <= i < 104
-                    point = dict(status, completed_last_hour=(i % 12) + 1)
+                    # A smooth day with a busy spell, so the chart is drawn as designed.
+                    busy = 6 + 5 * math.sin((288 - i) / 288 * math.tau * 1.4 + offset) + math.sin(i / 5)
+                    point = dict(status, completed_last_hour=max(1, round(busy)))
                     session.add(
                         Snapshot(
                             leader_id=row.id,

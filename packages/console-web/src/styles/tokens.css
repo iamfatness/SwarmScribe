@@ -1,0 +1,163 @@
+/* SwarmScribe console: design tokens.
+   Spec: docs/superpowers/specs/2026-10-04-console-redesign.md, section 3.
+
+   There are two colour sets. "Ink" is the dark ground of the brand (honey amber on warm
+   ink); "paper" is its light counterpart. A surface picks a set and everything inside it
+   reads the same token names:
+
+     dark theme (the designed default)   page = ink,   .sheet = paper
+     light theme                         page = paper, .sheet = ink
+     .on-ink (the rail, the sign-in brand panel)        always ink
+
+   Each set is written twice (once for the plain selector, once inside the
+   prefers-color-scheme block); src/styles/tokens.test.ts fails when the copies differ and
+   when a text pair drops below 4.5:1 or a control edge, mark or focus ring below 3:1.
+   Washes are solid colours, not alpha, so that test can measure them. */
+
+:root {
+  /* Not themed: brand constants, type, space, shape. */
+  --amber: #f5b83d;
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+  --sans: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace;
+  --wordmark-serif: Georgia, "Times New Roman", serif;
+
+  --fs-display: clamp(2rem, 4.2vw, 3rem);
+  --fs-h1: 2.125rem;
+  --fs-sheet-title: 1.75rem;
+  --fs-callout-title: 1.5rem;
+  --fs-h2: 1.25rem;
+  --fs-h3: 1.125rem;
+  --fs-body: 0.9375rem;
+  --fs-small: 0.875rem;
+  --fs-fine: 0.8125rem;
+  --fs-mono-fine: 0.78125rem;
+  --fs-figure: 1.875rem;
+  --fs-figure-small: 1.125rem;
+
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 14px;
+  --s-5: 16px;
+  --s-6: 20px;
+  --s-7: 24px;
+  --s-8: 28px;
+  --s-9: 36px;
+  --s-10: 56px;
+
+  --r-sm: 4px;
+  --r: 6px;
+  --r-lg: 8px;
+  --r-pill: 999px;
+
+  --h-control: 44px;
+  --h-row: 36px;
+  --rail-width: 248px;
+
+  --shadow-offset: 8px 8px 0 var(--amber);
+  --shadow-drop: 0 30px 60px -30px rgb(0 0 0 / 0.8);
+
+  /* The same in both themes: text on amber, and what a modal dialog dims the page with. */
+  --ink: #14110d;
+  --backdrop: rgb(10 8 6 / 0.65);
+  --shadow-edge: rgb(0 0 0 / 0.45);
+}
+
+/* token-set: ink */
+:root,
+.on-ink,
+:root[data-theme="light"] .sheet {
+  color-scheme: dark;
+  --ground: #14110d;
+  --panel: #1c1813;
+  --panel-2: #26211a;
+  --text: #f3ead9;
+  --muted: #b5a993;
+  --line: rgb(243 234 217 / 0.14);
+  --edge: #7d7566;
+  --accent: #f5b83d;
+  --accent-text: #f5b83d;
+  --accent-hover: #ffd27a;
+  --accent-wash: #3a2e19;
+  --primary-bg: #f5b83d;
+  --primary-fg: #14110d;
+  --bad: #ff9d8f;
+  --bad-wash: #372822;
+  --field-bg: #100d0a;
+  --mark-quiet: #5c5243;
+  --focus: #f5b83d;
+}
+
+/* token-set: paper */
+.sheet,
+:root[data-theme="light"] {
+  color-scheme: light;
+  --ground: #f3ead9;
+  --panel: #fffaf0;
+  --panel-2: #e7dcc6;
+  --text: #1c1712;
+  --muted: #5c5243;
+  --line: rgb(28 23 18 / 0.16);
+  --edge: #5c5243;
+  --accent: #855400;
+  --accent-text: #6b4300;
+  --accent-hover: #3f2800;
+  --accent-wash: #e6d8bf;
+  --primary-bg: #14110d;
+  --primary-fg: #f3ead9;
+  --bad: #8a1c14;
+  --bad-wash: #ebdac9;
+  --field-bg: #fffaf0;
+  --mark-quiet: #b5a993;
+  --focus: #855400;
+}
+
+@media (prefers-color-scheme: light) {
+  /* token-set: paper */
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --ground: #f3ead9;
+    --panel: #fffaf0;
+    --panel-2: #e7dcc6;
+    --text: #1c1712;
+    --muted: #5c5243;
+    --line: rgb(28 23 18 / 0.16);
+    --edge: #5c5243;
+    --accent: #855400;
+    --accent-text: #6b4300;
+    --accent-hover: #3f2800;
+    --accent-wash: #e6d8bf;
+    --primary-bg: #14110d;
+    --primary-fg: #f3ead9;
+    --bad: #8a1c14;
+    --bad-wash: #ebdac9;
+    --field-bg: #fffaf0;
+    --mark-quiet: #b5a993;
+    --focus: #855400;
+  }
+
+  /* token-set: ink */
+  :root:not([data-theme="dark"]) .on-ink,
+  :root:not([data-theme="dark"]) .sheet {
+    color-scheme: dark;
+    --ground: #14110d;
+    --panel: #1c1813;
+    --panel-2: #26211a;
+    --text: #f3ead9;
+    --muted: #b5a993;
+    --line: rgb(243 234 217 / 0.14);
+    --edge: #7d7566;
+    --accent: #f5b83d;
+    --accent-text: #f5b83d;
+    --accent-hover: #ffd27a;
+    --accent-wash: #3a2e19;
+    --primary-bg: #f5b83d;
+    --primary-fg: #14110d;
+    --bad: #ff9d8f;
+    --bad-wash: #372822;
+    --field-bg: #100d0a;
+    --mark-quiet: #5c5243;
+    --focus: #f5b83d;
+  }
+}

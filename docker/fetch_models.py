@@ -1,6 +1,6 @@
 """Bake Whisper models into the follower image, from a pinned source (follower spec 5.10).
 
-    python fetch_models.py --lock models.lock.json --into /models tiny.en,large-v3
+    python fetch_models.py --lock models.lock.json --into /models -- tiny.en,large-v3
     python fetch_models.py --pin large-v3-turbo --lock models.lock.json
         # prints a lock entry to add or refresh, and on stderr what it changes in the lock
 
@@ -43,9 +43,20 @@ def sha256(path: Path) -> str:
 
 
 def names(text: str) -> list[str]:
-    """`tiny.en, large-v3` -> ["tiny.en", "large-v3"]; commas or spaces, order kept."""
+    """`tiny.en,large-v3` -> ["tiny.en", "large-v3"]: commas only, order kept, a repeat
+    dropped; the empty text is no model. White space or an empty item is refused (ValueError):
+    the Dockerfile makes the text before the first comma the start-up model
+    (`${MODELS%%,*}`), so the two must read MODELS the same way, or an image is built whose
+    start-up model it does not hold."""
+    if text == "":
+        return []
     found: list[str] = []
-    for name in text.replace(",", " ").split():
+    for name in text.split(","):
+        if not name or any(character.isspace() for character in name):
+            raise ValueError(
+                f"MODELS must be model names separated by commas, with no spaces and no"
+                f" empty item, for example `tiny.en,large-v3`; it is {text!r}"
+            )
         if name not in found:
             found.append(name)
     return found
@@ -133,7 +144,9 @@ def changes(name: str, old: dict | None, new: dict) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("models", nargs="?", default="", help="names, comma-separated")
+    parser.add_argument(
+        "models", nargs="?", default="", help="names separated by commas, without spaces"
+    )
     parser.add_argument("--lock", type=Path, help="the lock file (models.lock.json)")
     parser.add_argument("--into", type=Path, help="the cache folder to fill")
     parser.add_argument(
@@ -154,8 +167,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.lock is None or args.into is None:
         parser.error("--lock and --into are required")
+    try:
+        wanted = names(args.models)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
     args.into.mkdir(parents=True, exist_ok=True)
-    wanted = names(args.models)
     lock = json.loads(args.lock.read_text(encoding="utf-8"))
     unknown = [name for name in wanted if name not in lock]
     if unknown:

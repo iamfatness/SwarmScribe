@@ -107,6 +107,94 @@ def test_registrations_are_read_from_the_json_lines_of_a_log(driver, monkeypatch
     assert driver.registrations("follower-1") == ["id-1", "id-2"]
 
 
+# --- a follower that will never register is named at once, not after the timeout ---------
+
+NO_MODEL = (
+    "error: this machine cannot transcribe with its start-up model tiny.en"
+    " (SWARMSCRIBE_FOLLOWER_OFFLINE=1: it must be in the model cache): not cached. Set"
+    " SWARMSCRIBE_FOLLOWER_STARTUP_MODEL to a model this machine holds, or run"
+    " `swarmscribe-follower doctor`."
+)
+
+
+def stand_in(driver, monkeypatch, states: dict, said: dict) -> None:
+    monkeypatch.setattr(driver, "container", lambda service: states.get(service))
+    monkeypatch.setattr(driver, "logs", lambda service: said.get(service, ""))
+
+
+def test_a_follower_that_is_running_and_has_said_nothing_wrong_has_not_given_up(
+    driver, monkeypatch
+):
+    running = driver.Container("running", 0, "0001-01-01T00:00:00Z")
+    log = json.dumps({"level": "info", "message": "model tiny.en (int8) loaded on cpu"})
+    stand_in(driver, monkeypatch, {"follower-1": running}, {"follower-1": log})
+    assert driver.gave_up("follower-1") is None
+    assert driver.gave_up("follower-2") is None  # not created yet
+    assert driver.a_follower_gave_up() is None
+
+
+def test_a_follower_that_exited_for_want_of_a_model_is_named_with_the_cause(
+    driver, monkeypatch
+):
+    exited = driver.Container("exited", 3, "2026-10-05T10:00:00Z")
+    stand_in(driver, monkeypatch, {"follower-2": exited}, {"follower-2": NO_MODEL + "\n"})
+    why = driver.gave_up("follower-2")
+    assert why.startswith("follower-2 exited 3")
+    assert "cannot transcribe with its start-up model tiny.en" in why
+    assert "MODELS=tiny.en" in why  # what to do: build the image with the model baked in
+    assert driver.a_follower_gave_up() == why
+
+
+def test_a_follower_that_keeps_restarting_is_caught_by_what_it_logged(driver, monkeypatch):
+    restarting = driver.Container("restarting", 3, "2026-10-05T10:00:00Z")
+    stand_in(driver, monkeypatch, {"follower-1": restarting}, {"follower-1": NO_MODEL})
+    why = driver.gave_up("follower-1")
+    assert "follower-1 cannot load its model" in why and "MODELS=tiny.en" in why
+
+
+@pytest.mark.parametrize(
+    ("code", "hint"),
+    [(2, "configuration"), (4, "join token"), (137, "killed"), (1, "unexpected")],
+)
+def test_any_other_exit_is_named_with_its_code_and_its_last_line(
+    driver, monkeypatch, code, hint
+):
+    exited = driver.Container("exited", code, "2026-10-05T10:00:00Z")
+    stand_in(driver, monkeypatch, {"follower-1": exited}, {"follower-1": "one\n\nthe last\n"})
+    why = driver.gave_up("follower-1")
+    assert f"follower-1 exited {code}" in why and hint in why and why.endswith("the last")
+
+
+def test_a_wait_ends_at_once_with_the_cause_when_a_follower_has_given_up(driver):
+    import asyncio
+    import time
+
+    async def never() -> bool:
+        return False
+
+    began = time.monotonic()
+    with pytest.raises(AssertionError, match="follower-1 exited 3: no model") as failed:
+        asyncio.run(
+            driver.until(
+                never, "both followers to register", 60.0,
+                unless=lambda: "follower-1 exited 3: no model",
+            )
+        )
+    assert time.monotonic() - began < 5
+    assert "timed out" not in str(failed.value)
+    assert "waiting for both followers to register" in str(failed.value)
+
+
+def test_the_scenario_watches_the_followers_while_it_waits_for_them_to_register(loaded):
+    import inspect
+
+    text = inspect.getsource(loaded.scenario)
+    assert (
+        'await until(both_registered, "both followers to register", unless=a_follower_gave_up)'
+        in text
+    )
+
+
 def split_transcript(model="tiny.en", device="cpu", swap=False) -> Transcript:
     def segment(start, text, channel):
         word = Word(start=start, end=start + 1, word=" " + text, probability=0.9)

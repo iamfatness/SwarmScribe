@@ -342,8 +342,9 @@ def test_the_console_script_is_declared_and_points_at_run():
     from importlib.metadata import entry_points
 
     (script,) = entry_points(group="console_scripts", name="swarmscribe-follower")
-    assert script.value == "swarmscribe_follower.main:run"
-    assert script.load() is cli.run
+    # entry.py, not main.py: it installs the stop-signal handlers before main is imported.
+    assert script.value == "swarmscribe_follower.entry:run"
+    assert script.load() is cli.run  # the old name is the same function
 
 
 def test_doctor_prints_a_line_per_check_and_a_plain_verdict(

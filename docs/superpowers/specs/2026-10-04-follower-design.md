@@ -247,6 +247,15 @@ the admin CLI does. Windows: the folder is created under the service
 account's profile and inherits its permissions; the Windows service runs as
 a dedicated account.
 
+The folder's part of that rule is applied **before registering** as well
+(`run`, `join`, and reported by `doctor`): a state folder the credential
+would be refused in at the next start is refused at once with exit `2`,
+naming the folder, its owner and its mode, and no join token is spent
+(F2a final review, I2: a root-owned, world-writable folder, which is what a
+bind mount from Windows and a default `emptyDir` are, let the follower
+register and then refuse its own credential at every restart). The chart
+(8.2) must therefore make the state `emptyDir` the follower's own.
+
 - **File present and for this leader and device:** use it. No join
   token is needed, and none is read.
 - **File absent, or for another leader or device:** register with the
@@ -629,9 +638,17 @@ libraries on a smaller base, and the same extra serves a native install
 
 Both images: user `10001:10001`; `VOLUME` for the state folder; writable
 paths only `/var/lib/swarmscribe-follower`, `/scratch` and `/models`;
-`HOME` pointed at the state folder; `ENTRYPOINT ["swarmscribe-follower"]`,
-`CMD ["run"]`; `HEALTHCHECK` on `http://127.0.0.1:9108/healthz`. The image
-has no build tools, no `uv`, no leader package, and no `fastapi`.
+`HOME` pointed at the state folder; `ENTRYPOINT ["/usr/bin/tini", "--",
+"swarmscribe-follower"]`, `CMD ["run"]`; `HEALTHCHECK` on
+`http://127.0.0.1:9108/healthz`. The image has no build tools, no `uv`, no
+leader package, and no `fastapi`.
+
+The init (`tini`, Debian's package) is there because the kernel drops a
+signal that PID 1 has no handler for: a `SIGTERM` in the moment before the
+follower had installed its handlers was lost, and the container was killed
+at the end of the stop window (F2a final review, I1). The follower installs
+its handlers before it imports anything; the init covers the time the
+interpreter itself needs to start, and reaps the health check's children.
 
 `docker/check-follower-image.sh`, run in CI, checks without a GPU: the
 user; that the engine and faster-whisper import; that the leader package

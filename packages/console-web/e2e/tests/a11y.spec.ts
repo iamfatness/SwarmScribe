@@ -121,7 +121,7 @@ for (const theme of THEMES) {
       await page.getByRole("button", { name: "Create join token" }).click();
       await expectAccessible(page, `create token dialog (${theme})`);
       await page.getByRole("dialog").getByRole("button", { name: "Create token" }).click();
-      const shown = page.getByRole("dialog", { name: "Join token created" });
+      const shown = page.getByRole("dialog", { name: "Here is the join token. It is shown once." });
       await expect(shown).toBeVisible();
       await expectAccessible(page, `token created dialog (${theme})`);
       await shown.getByRole("button", { name: "I have stored it" }).click();

@@ -264,13 +264,13 @@ test("the longest leader name and a very long label never push the page sideways
 });
 
 // Every table with row actions: its page, the name of its scrolling region, and whether it
-// has been folded to fit at every width (the leader's own tabs have; Administration and the
-// join tokens are folded in their own tasks and until then scroll at tablet width).
+// has been folded to fit at every width (the leader's tabs and the join tokens have; the
+// Administration tables are folded in their own task and until then scroll at tablet width).
 const ACTION_TABLES: [path: string, region: string, fits: boolean][] = [
   ["/leaders/eu-1/jobs", "Job list", true],
   ["/leaders/eu-1/pools", "Followers", true],
   ["/leaders/eu-1/locations", "Location list", true],
-  ["/leaders/eu-1/tokens", "Join token list", false],
+  ["/leaders/eu-1/tokens", "Join token list", true],
   ["/admin/leaders", "Registered leaders", false],
   ["/admin/grants", "Grants", false],
   ["/admin/admins", "Console administrators", false],

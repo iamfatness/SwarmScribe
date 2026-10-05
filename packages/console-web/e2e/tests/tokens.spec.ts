@@ -44,7 +44,7 @@ test("a join token's plaintext is shown once, copied, and gone when the dialog c
   await page.keyboard.type("gpu");
   await page.keyboard.press("Enter");
 
-  const shown = page.getByRole("dialog", { name: "Join token created" });
+  const shown = page.getByRole("dialog", { name: "Here is the join token. It is shown once." });
   const field = shown.getByRole("textbox", { name: "Join token" });
   await expect(field).toHaveValue(/^sst_/);
   // Focus starts on the token itself, selected: Enter, even twice, dismisses nothing.
@@ -54,9 +54,15 @@ test("a join token's plaintext is shown once, copied, and gone when the dialog c
   await expect(shown).toBeVisible();
   expect(posts.count()).toBe(1);
 
+  // Not copied yet, and what the token is good for, before anything is pressed.
+  await expect(shown.getByText("Not copied yet.")).toBeVisible();
+  await expect(shown.getByRole("term")).toHaveText(["Pool", "Can be used", "Expires"]);
+  await expect(shown.getByRole("definition").nth(0)).toHaveText("gpu");
+  await expect(shown.getByRole("definition").nth(1)).toHaveText("once");
+
   const plaintext = await field.inputValue();
-  await shown.getByRole("button", { name: "Copy token" }).click();
-  await expect(shown.getByText("Copied to the clipboard.")).toBeVisible();
+  await shown.getByRole("button", { name: "Copy", exact: true }).click();
+  await expect(shown.getByText("Copied.")).toBeVisible();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(plaintext);
 
   // Copied: one "I have stored it" closes it.
@@ -68,6 +74,35 @@ test("a join token's plaintext is shown once, copied, and gone when the dialog c
   await expect(page.getByRole("button", { name: "Create join token" })).toBeFocused();
 });
 
+test("on a phone the one-time token dialog fits: nothing is cut off and every button is in reach", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await signIn(page, "admin", "/leaders/eu-1/tokens");
+  await openCreate(page);
+  await page.keyboard.press("Enter");
+  const shown = page.getByRole("dialog", { name: "Here is the join token. It is shown once." });
+  await expect(shown.getByRole("textbox", { name: "Join token" })).toHaveValue(/^sst_/);
+  const frame = await shown.boundingBox();
+  if (frame === null) throw new Error("the dialog is not on the page");
+  expect(frame.x).toBeGreaterThanOrEqual(0);
+  expect(frame.x + frame.width).toBeLessThanOrEqual(390);
+  for (const part of [
+    shown.getByRole("textbox", { name: "Join token" }),
+    shown.getByRole("button", { name: "Copy", exact: true }),
+    shown.getByRole("button", { name: "I have stored it" }),
+  ]) {
+    await part.scrollIntoViewIfNeeded();
+    const box = await part.boundingBox();
+    if (box === null) throw new Error("a control is not on the page");
+    expect(box.x).toBeGreaterThanOrEqual(frame.x);
+    expect(box.x + box.width).toBeLessThanOrEqual(frame.x + frame.width);
+    await expect(part).toBeInViewport();
+  }
+  // Nothing inside the dialog scrolls sideways either.
+  expect(await shown.evaluate((el) => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(0);
+});
+
 test("a held Enter creates exactly one token", async ({ page }) => {
   await signIn(page, "admin", "/leaders/eu-1/tokens");
   const posts = countPosts(page);
@@ -75,7 +110,7 @@ test("a held Enter creates exactly one token", async ({ page }) => {
   await expect(form.getByRole("textbox", { name: "Pool" })).toBeFocused();
   for (let i = 0; i < 7; i += 1) await page.keyboard.down("Enter");
   await page.keyboard.up("Enter");
-  const shown = page.getByRole("dialog", { name: "Join token created" });
+  const shown = page.getByRole("dialog", { name: "Here is the join token. It is shown once." });
   await expect(shown).toBeVisible();
   // More repeats after the one-time dialog is up: it must stay.
   await page.keyboard.down("Enter");
@@ -93,7 +128,7 @@ test("Escape before the token is copied asks first, and the second Escape closes
   await signIn(page, "admin", "/leaders/eu-1/tokens");
   await openCreate(page);
   await page.keyboard.press("Enter");
-  const shown = page.getByRole("dialog", { name: "Join token created" });
+  const shown = page.getByRole("dialog", { name: "Here is the join token. It is shown once." });
   const plaintext = await shown.getByRole("textbox", { name: "Join token" }).inputValue();
   await page.keyboard.press("Escape");
   await expect(shown).toBeVisible();
@@ -107,7 +142,7 @@ test("'I have stored it' asks before the token is copied, and closes on the seco
   await signIn(page, "admin", "/leaders/eu-1/tokens");
   await openCreate(page);
   await page.keyboard.press("Enter");
-  const shown = page.getByRole("dialog", { name: "Join token created" });
+  const shown = page.getByRole("dialog", { name: "Here is the join token. It is shown once." });
   await expect(shown).toBeVisible();
   const stored = shown.getByRole("button", { name: "I have stored it" });
   await stored.click();
@@ -121,7 +156,7 @@ test("Escape after a failed copy still asks", async ({ page }) => {
   await signIn(page, "admin", "/leaders/eu-1/tokens");
   await openCreate(page);
   await page.keyboard.press("Enter");
-  const shown = page.getByRole("dialog", { name: "Join token created" });
+  const shown = page.getByRole("dialog", { name: "Here is the join token. It is shown once." });
   await expect(shown).toBeVisible();
   await page.evaluate(() => {
     Object.defineProperty(navigator.clipboard, "writeText", {
@@ -129,8 +164,8 @@ test("Escape after a failed copy still asks", async ({ page }) => {
       value: () => Promise.reject(new Error("denied")),
     });
   });
-  await shown.getByRole("button", { name: "Copy token" }).click();
-  await expect(shown.getByText("Copying failed: select the token and copy it.")).toBeVisible();
+  await shown.getByRole("button", { name: "Copy", exact: true }).click();
+  await expect(shown.getByText("Copying did not work. Select the token and copy it yourself.")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(shown).toBeVisible();
   await expect(shown.getByText(/The token is not shown again/)).toBeVisible();
@@ -161,7 +196,7 @@ test("the create dialog cannot be dismissed while its request is in flight, and 
   await expect(form).toBeVisible();
 
   release();
-  const shown = page.getByRole("dialog", { name: "Join token created" });
+  const shown = page.getByRole("dialog", { name: "Here is the join token. It is shown once." });
   await expect(shown.getByRole("textbox", { name: "Join token" })).toHaveValue(/^sst_/);
   await expect(form).toHaveCount(0);
 });
@@ -188,7 +223,7 @@ test("Escape pressed again and again cannot close the create dialog mid-request"
   await expect(form).toBeVisible();
 
   release();
-  const shown = page.getByRole("dialog", { name: "Join token created" });
+  const shown = page.getByRole("dialog", { name: "Here is the join token. It is shown once." });
   await expect(shown.getByRole("textbox", { name: "Join token" })).toHaveValue(/^sst_/);
   await expect(form).toHaveCount(0);
 });
@@ -220,7 +255,7 @@ test("a slow create that fails shows its error and Create works again", async ({
 
   fail = false;
   await form.getByRole("button", { name: "Create token" }).click();
-  const shown = page.getByRole("dialog", { name: "Join token created" });
+  const shown = page.getByRole("dialog", { name: "Here is the join token. It is shown once." });
   await expect(shown.getByRole("textbox", { name: "Join token" })).toHaveValue(/^sst_/);
 });
 

@@ -572,7 +572,16 @@ def _no_gpu_checks() -> None:
         return found["metadata"]["name"] if ended.get("exitCode") == 3 else None
 
     name = until(exited_3, "the cuda image without a GPU to exit 3")
-    said = kubectl("logs", name, "--previous").strip().splitlines()[-1]
+
+    def last_line() -> str | None:
+        # Right after the exit the kubelet may not yet serve the log: kubectl then prints
+        # "unable to retrieve container logs" and exits 0. Wait until there is a log to read.
+        lines = kubectl("logs", name, "--previous", check=False).strip().splitlines()
+        if not lines or lines[-1].startswith("unable to retrieve container logs"):
+            return None
+        return lines[-1]
+
+    said = until(last_line, "the exited container's log to be readable", 30.0)
     expect("no CUDA GPU is available" in said, f"its last line does not say why: {said[:200]}")
 
     def unschedulable() -> str | None:

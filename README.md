@@ -1620,7 +1620,7 @@ follower uses one GPU, whole, so a node with four GPUs runs four pods.
   finishes the recording in hand if its estimated time left fits in
   `terminationGracePeriodSeconds` less 30 s, and otherwise hands it back at the end of the
   segment it is on, without a counted attempt; another follower redoes it from the start.
-  On the kind cluster a pod deleted in the middle of a recording was gone in 2.7 s of its 60 s grace.
+  On the kind cluster a pod deleted in the middle of a recording was gone in 2.1 s of its 60 s grace (the second, timed run).
   What is lost is the compute already spent, so there is no PodDisruptionBudget by default:
   it would protect nothing else and make every node drain wait.
 - **A crash or a kill** (out of memory, a node that dies): the container restarts and is
@@ -1702,18 +1702,25 @@ what must hold (`deploy/helm/swarmscribe-follower/ci/check_render.py`), for a CP
 GPU pool. On 2026-10-05 the chart was also installed on a local kind cluster (kind v0.30.0,
 Kubernetes 1.34.0) against a real leader with Postgres, with the `cpu` image and `tiny.en`
 (`e2e/follower-kind/`; the record is
-`docs/superpowers/plans/2026-10-05-follower-f3-outcomes.md`): two pods became ready and
-registered with a pool token from the Secret; recordings were transcribed; a killed
-follower came back as itself; a pod deleted mid-recording handed it back; a replacement
-pod took over a gone row; an hour-long recording was refused under a 2500Mi limit; a
-drained pod parked and took none of the eight recordings submitted after the drain; the NetworkPolicy kept another pod out of `/metrics` and let a named
-one in; and revoked pods exited `4` until a new token and a rollout restart. A second
-scenario shows a `cuda` image exiting `3` on a node without a GPU, and a GPU pool's pod
-staying `Pending` there. In the recorded run, `up` took 111 s on a new cluster, `run` passed
-once in 116 s and `no-gpu` took 79 s. That the listener drops a slow client after five
-seconds and turns away a ninth connection, and that a pod with `models.volume: emptyDir`
-downloads its model through the NetworkPolicy, were observed in the planner's run only
-(same document), not in the recorded one.
+`docs/superpowers/plans/2026-10-05-follower-f3-outcomes.md`). The scenario's driver,
+`e2e/follower-kind/run_e2e.py`, checks each of the following and the scenario has passed
+twice (the figures are those of the second, timed run): two pods became ready (in 3 s) and
+registered (in 3 s) with a pool token from the Secret, and the state mount, folder,
+credential and token file have the owners and modes the guide states; recordings were
+transcribed; a killed follower came back as itself and its recording was redone; a pod
+deleted mid-recording handed it back and was gone in 2.1 s of its 60 s grace; a replacement
+pod took over the row of one that had gone; an hour-long recording was refused under a
+2500Mi limit; a drained pod parked and took none of the eight recordings submitted after
+the drain; another pod was kept out of `/metrics` until `networkPolicy.ingress.from` named
+it; and revoked pods exited `4` until a new token and a rollout restart. A second
+scenario, `no-gpu`, checks that a `cuda` image exits `3` on a node without a GPU and a GPU
+pool's pod stays `Pending` there. In the second run `up` took 1 min 51 s on a new
+cluster, `run` 1 min 52 s and `no-gpu` 1 min 26 s. The first run exposed a race in the
+test driver's reading of an exited container's log (fixed; the chart and the follower were
+not at fault; the outcomes document has the detail). That the listener drops a slow client
+after five seconds and turns away a ninth connection, and that a pod with
+`models.volume: emptyDir` downloads its model through the NetworkPolicy, were observed in
+the planner's run only (same document), not in either recorded run.
 
 Not run:
 

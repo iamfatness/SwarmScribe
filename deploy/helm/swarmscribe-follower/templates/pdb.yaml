@@ -1,0 +1,16 @@
+{{- if and .Values.podDisruptionBudget.enabled (gt (int .Values.replicaCount) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "swarmscribe-follower.fullname" . }}
+  labels:
+    {{- include "swarmscribe-follower.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  # A pod that keeps restarting (revoked, or on a node without its GPU) must not hold up a
+  # node drain (Kubernetes 1.27 and later).
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      {{- include "swarmscribe-follower.selectorLabels" . | nindent 6 }}
+{{- end }}

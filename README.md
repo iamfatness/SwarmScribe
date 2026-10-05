@@ -1583,7 +1583,7 @@ A pod is Ready about 3 seconds after it starts, before its model has loaded (exi
 cannot) and before it has registered (exit `4` if its token was revoked). Without a pause, a
 new pod would count as available at once, and again after each restart, so an upgrade to an
 image that cannot work would walk through every old pod and `helm upgrade --wait` would
-report success. `minReadySeconds` (default 60, rendered as the Deployment's own) is that
+report success. `minReadySeconds` (default 60, the Deployment's `spec.minReadySeconds`) is that
 pause: a pod counts as available only after it has stayed up that long, so a rollout of pods
 that cannot work stalls on its first batch instead of replacing the pool. It costs that long
 per batch on every rollout.

@@ -541,7 +541,7 @@ What each kind of mount needs:
 | a folder of a Linux host (`-v /srv/follower:...`) | `sudo chown 10001:10001 /srv/follower && sudo chmod 700 /srv/follower` before the first start |
 | a `tmpfs` | its owner and mode said: `--tmpfs /var/lib/swarmscribe-follower:uid=10001,gid=10001,mode=0700`. A plain tmpfs belongs to root and is writable by all |
 | a folder of a Windows or macOS host under Docker Desktop (`-v C:\follower:...`) | not usable: inside the container it is seen as root's and writable by all (measured). Use a named volume |
-| a Kubernetes `emptyDir` | it is root's and mode `0777` by default, and `fsGroup` changes its group, not its owner: refused as the state folder itself. Point `SWARMSCRIBE_FOLLOWER_STATE_DIR` at a folder inside the mount (`/var/lib/swarmscribe-follower/state`): the follower creates it as its own, `0700`. The chart does exactly this ("Deploy a follower pool"); on a kind cluster the mount was `0:10001` mode `3777` and the folder `10001:10001` mode `2700` |
+| a Kubernetes `emptyDir` | it is root's and mode `0777` by default, and `fsGroup` changes its group, not its owner: refused as the state folder itself. Point `SWARMSCRIBE_FOLLOWER_STATE_DIR` at a folder inside the mount (`/var/lib/swarmscribe-follower/state`): the follower creates it as its own, `0700`. The chart does exactly this ("Deploy a follower pool"); on a kind cluster the mount was `0:10001` mode `3777` (read by hand in the first run: the kind driver asserts only that the mount is root's, and the folder's owner and mode `10001:2700`) and the folder `10001:10001` mode `2700` |
 
 The follower never changes a folder that is not its own; one of its own that is looser than
 `0700` it tightens itself.
@@ -1544,7 +1544,7 @@ What the chart installs:
 
 | Object | What it is |
 |---|---|
-| Deployment | `replicaCount` followers running `run` under the image's init: non-root (10001, `fsGroup` 10001), read-only root filesystem, no capabilities, no service-account token. Startup and liveness probes on `/healthz`; no readiness probe and no Service, because nothing connects to a follower. Rollouts replace a quarter of the pool at a time, with a surge pod on a CPU pool and none on a GPU pool |
+| Deployment | `replicaCount` followers running `run` under the image's init: non-root (10001, `fsGroup` 10001), read-only root filesystem, no capabilities, no service-account token. Startup and liveness probes on `/healthz`; no readiness probe and no Service, because nothing connects to a follower. Rollouts replace a quarter of the pool at a time, with a surge pod on a CPU pool and none on a GPU pool, and count a new pod as available only after `minReadySeconds` (60) |
 | NetworkPolicy | egress to DNS and to anywhere on port 443 and the port of `leader.url`, except loopback, link-local (cloud metadata) and reserved ranges; ingress to nobody but the peers in `networkPolicy.ingress.from` |
 | ServiceAccount | one with no token mounted; a follower never calls the Kubernetes API |
 | PodDisruptionBudget | only with `podDisruptionBudget.enabled` and more than one replica |
@@ -1564,6 +1564,7 @@ Values:
 | `models.volume` | `none` (baked, the default), `emptyDir` (every new pod downloads its model) or `persistentVolumeClaim` with `models.existingClaim` |
 | `scratch.sizeLimit` | room for the recording being transcribed (20Gi) |
 | `terminationGracePeriodSeconds` | 900; the follower is told 30 s less |
+| `minReadySeconds` | 60: how long a new pod must stay up before a rollout counts it as available (see below) |
 | `settings` | any other `SWARMSCRIBE_FOLLOWER_*` setting, without the prefix: `ALLOWED_MODELS`, `STARTUP_MODEL`, `LOG_FORMAT`, ... |
 | `extraEnv` | other environment, such as `HTTPS_PROXY` |
 | `healthPort`, `metrics.scrapeAnnotations`, `networkPolicy.*`, `podDisruptionBudget.*` | described in `values.yaml`. `podDisruptionBudget.maxUnavailable` is an integer of at least 1 or a percentage such as `25%`; `0` and `0%` are refused (a budget that allows no eviction would stop every node drain) |
@@ -1573,8 +1574,36 @@ missing; when `leader.url` is not `http(s)://host[:port][/path]`, or is `http` w
 `leader.allowHttp`; when a value has the wrong type or a name the chart does not know
 (`replicas` for `replicaCount`: `values.schema.json` allows no unknown value); when
 `settings` or `extraEnv` names something the chart sets itself (the state folder, the
-listener, the memory limit, the device, the token ...); and when a claim is not named for a
+listener, the memory limit, the device, the leader's address, the token ...); and when a claim is not named for a
 `persistentVolumeClaim` model volume.
+
+### Rollouts and nodes
+
+A pod is Ready about 3 seconds after it starts, before its model has loaded (exit `3` if it
+cannot) and before it has registered (exit `4` if its token was revoked). Without a pause, a
+new pod would count as available at once, and again after each restart, so an upgrade to an
+image that cannot work would walk through every old pod and `helm upgrade --wait` would
+report success. `minReadySeconds` (default 60, rendered as the Deployment's own) is that
+pause: a pod counts as available only after it has stayed up that long, so a rollout of pods
+that cannot work stalls on its first batch instead of replacing the pool. It costs that long
+per batch on every rollout.
+
+- A rollout replaces about a quarter of the pool per batch, and each batch takes at least
+  `minReadySeconds` plus the pod's start (the model load): a pool of four takes four batches,
+  more than Helm's 5-minute `--wait` default once the model load is added. Pass `--timeout`
+  longer than the rollout. A scale-down or node drain waits up to
+  `terminationGracePeriodSeconds` for each pod.
+- Spot or preemptible nodes give 30 to 120 seconds of notice: set
+  `terminationGracePeriodSeconds` to the notice (the follower is told 30 s less). Otherwise a
+  follower that judged its job fits in the default grace is killed first, the attempt is
+  counted and the lease must expire.
+- The cluster autoscaler does not scale down a node whose pods use an `emptyDir` (these do)
+  unless the pod carries `cluster-autoscaler.kubernetes.io/safe-to-evict: "true"`; set it with
+  `podAnnotations`.
+- `models.volume: persistentVolumeClaim` with more than one replica needs a `ReadWriteMany`
+  claim (a `ReadWriteOnce` claim can be mounted from one node only).
+- With `resources.limits` removed, the memory guard and the thread count take the node's
+  allocatable memory and CPU, not a figure sized for the pool.
 
 ### Sizing a pool
 
@@ -1585,10 +1614,10 @@ a recording that cannot fit is failed `out_of_resources` with its length and the
 the reason, three times, and parked. Size the limit as:
 
 ```
-what the model holds once loaded  +  0.4 GiB  +  3.6 GiB x hours of the longest recording
+what the model holds once loaded  +  0.4 GiB  +  3600 MiB x hours of the longest recording
 ```
 
-(3.9 GiB per hour where recordings are split into channels.) The 0.4 GiB is the 100 MiB a
+(3900 MiB per hour where recordings are split into channels; 3600 MiB is about 3.5 GiB and 3900 MiB about 3.8 GiB.) The 0.4 GiB is the 100 MiB a
 job of any length adds and 300 MiB for what the process keeps after long recordings (the
 planner's measurement, 2026-10-05, in a pod: a follower held 230 MiB with `tiny.en` loaded
 and 432 to 472 MiB after each of four hour-long recordings, so up to 242 MiB kept, rounded
@@ -1623,12 +1652,15 @@ follower uses one GPU, whole, so a node with four GPUs runs four pods.
   On the kind cluster a pod deleted in the middle of a recording was gone in 2.1 s of its 60 s grace (the second, timed run).
   What is lost is the compute already spent, so there is no PodDisruptionBudget by default:
   it would protect nothing else and make every node drain wait.
-- **A crash or a kill** (out of memory, a node that dies): the container restarts and is
-  the same follower, because its credential lives in a memory-backed `emptyDir` that
-  outlives the container. The recording it held is redone when its lease expires, and that
-  attempt is counted.
-- **A new pod** registers with the pool token and takes over the row of a pod of the same
-  token that has gone, so the leader's list stays the size of the pool at its largest.
+- **A crash or a kill of the container** (out of memory, a killed process): the container
+  restarts in the same pod and is the same follower, because its credential lives in a
+  memory-backed `emptyDir` that outlives the container, not the pod. The recording it held
+  is redone when its lease expires, and that attempt is counted.
+- **A new pod** (a deleted or evicted pod, a rollout, or a node that dies and takes its pod
+  and the memory-backed credential with it) registers again with the pool token and takes
+  over the row of a pod of the same token that has gone, so the leader's list stays the
+  size of the pool at its largest. A recording the old pod held is redone when its lease
+  expires, and that attempt is counted, unless the pod handed it back while stopping.
 - **Drain** (`uv run swarmscribe-admin followers drain <id>`): the pod finishes its recording and
   parks. It stays `Running`, is not restarted, and takes nothing more
   (`swarmscribe_follower_state{state="draining"}` is 1). Delete the pod to replace it: its
@@ -1660,7 +1692,10 @@ the pod's own node, which the policy does not cut off. If the pods' probes fail 
 policy on (the startup probe fails and every pod restarts), your plugin applies ingress
 policy to node traffic too: add the nodes' address range to `networkPolicy.ingress.from` (an
 `ipBlock`; the port is already limited to `healthPort`), or set `networkPolicy.enabled:
-false`. To scrape, name your Prometheus:
+false`. The same limit applies to that advice on network plugins whose CIDR rules do not match
+cluster-managed nodes or pods (Cilium, and GKE Dataplane V2, which inherits it): there an
+`ipBlock` of the nodes' range does not let the probes in, so set `networkPolicy.enabled:
+false` or use the plugin's own policy for node (host) traffic. Not run here. To scrape, name your Prometheus:
 
 ```yaml
 networkPolicy:
@@ -1674,7 +1709,8 @@ metrics:
 Name only peers you trust. The kubelet's probe shares the listener's eight connections with
 every other client, so a named peer that opens eight slow connections every five seconds
 (each is held for five seconds) can make `/healthz` unanswerable, and the kubelet then
-restarts the pod. That is why nobody is allowed by default.
+restarts the pod. That is why nobody is allowed by default. Where the network plugin does not enforce
+NetworkPolicy at all, every pod in the cluster is such a peer.
 
 The listener answers one request per connection and drops a connection after five seconds
 in all, however slowly its bytes arrive, and holds at most eight at once: a slow or silent
@@ -1695,6 +1731,23 @@ its pod's, so add it to `networkPolicy.egress.https.ports` if it differs from th
 `leader.url`. Object storage that serves its signed links on a port other than 443 (MinIO
 on 9000, for example) is blocked until that port is added to the same list. A NetworkPolicy needs a network plugin that enforces it.
 
+A leader or an object store that runs in the same cluster is reached through these `ipBlock`
+rules, and on some network plugins (Cilium, and GKE Dataplane V2, which inherits it) a CIDR
+rule does not match cluster-managed pods: the followers would be cut off from it, with pods
+Ready that never register. This was not run here. Name the peer by selector instead, in
+`networkPolicy.egress.extra` (raw `NetworkPolicyEgressRule` objects, added to the policy as
+they are):
+
+```yaml
+networkPolicy:
+  egress:
+    extra:
+      - to:
+          - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: swarmscribe}}
+            podSelector: {matchLabels: {app.kubernetes.io/name: swarmscribe-leader}}
+        ports: [{protocol: TCP, port: 8080}]    # the pod's port, not the Service's
+```
+
 ### What has been run, and what has not
 
 CI lints the chart, validates what it renders against the Kubernetes schemas and checks
@@ -1705,8 +1758,10 @@ Kubernetes 1.34.0) against a real leader with Postgres, with the `cpu` image and
 `docs/superpowers/plans/2026-10-05-follower-f3-outcomes.md`). The scenario's driver,
 `e2e/follower-kind/run_e2e.py`, checks each of the following and the scenario has passed
 twice (the figures are those of the second, timed run): two pods became ready (in 3 s) and
-registered (in 3 s) with a pool token from the Secret, and the state mount, folder,
-credential and token file have the owners and modes the guide states; recordings were
+registered (in 3 s) with a pool token from the Secret, and the state mount is root's and the
+folder, credential and token file have the owners and modes the guide states (`10001:2700`,
+`10001:600`, `0:440`; the mount's `3777` is from a hand inspection in the first run, not
+asserted by the driver); recordings were
 transcribed; a killed follower came back as itself and its recording was redone; a pod
 deleted mid-recording handed it back and was gone in 2.1 s of its 60 s grace; a replacement
 pod took over the row of one that had gone; an hour-long recording was refused under a

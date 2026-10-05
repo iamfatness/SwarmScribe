@@ -1309,9 +1309,9 @@ follower chart (F3) and the outside-machine install (F4).
   (`[$(POD_IP)]:9108`), not to loopback. Everywhere it answers one request per connection,
   gives a connection five seconds in all and holds at most eight; what `/healthz` and
   `/metrics` answer is unchanged.
-- **Sizing (5.7, 8.2).** A follower keeps up to 240 MiB after a long recording (measured),
+- **Sizing (5.7, 8.2).** A follower keeps up to 242 MiB after a long recording (measured),
   and the guard counts what the process holds, so the guidance becomes: the model's host
-  memory plus 0.4 GiB plus 3.6 GiB per hour of the longest recording (3.9 GiB split). The
+  memory plus 0.4 GiB plus 3600 MiB per hour of the longest recording (3900 MiB split). The
   chart's default is 6Gi for requests and limits (one hour with `distil-large-v3` on a CPU).
 - **Revocation on Kubernetes (6.5, 8.2).** After `pool-tokens revoke --revoke-followers`
   the pods exit 4 at every restart; a new token in the Secret brings the pool back only

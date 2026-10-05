@@ -12,9 +12,10 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
+from swarmscribe_protocol import Device
 
-from .. import audit, reports
-from ..auth import consoles, followers
+from .. import audit, profiles, reports
+from ..auth import consoles, followers, pool_tokens
 from ..auth.followers import create_join_token
 from ..auth.oidc import login_providers
 from ..clock import utcnow
@@ -34,7 +35,14 @@ from .admin_models import (
     LocationIn,
     LocationOut,
     LoginConfig,
+    PoolTokenCreated,
+    PoolTokenIn,
+    PoolTokenOut,
+    PoolTokenRevoked,
+    PoolTokenRevokeIn,
     PriorityIn,
+    ProfileIn,
+    ProfileOut,
     ScanRequested,
     Status,
     TokenCreated,
@@ -51,6 +59,8 @@ Operator = Annotated[Admin, Depends(require("operator"))]
 Administrator = Annotated[Admin, Depends(require("admin"))]
 # Console credentials are managed by people only: a console cannot mint or revoke them.
 PersonAdministrator = Annotated[Admin, Depends(require("admin", consoles_allowed=False))]
+# Read by people only, because the fleet console has no page for it yet (follower spec 12.4).
+PersonViewer = Annotated[Admin, Depends(require("viewer", consoles_allowed=False))]
 Session = Annotated[AsyncSession, Depends(db_session)]
 
 
@@ -291,3 +301,71 @@ async def revoke_console_credential(
     view = reports.console_view(console)
     await session.commit()
     return ConsoleOut.model_validate(view)
+
+
+@router.get("/pool-tokens", response_model=list[PoolTokenOut])
+async def list_pool_tokens(admin: PersonAdministrator, session: Session) -> list[PoolTokenOut]:
+    rows = await reports.list_pool_tokens(session)
+    await _viewed(session, admin, "pool_tokens.view")
+    return [PoolTokenOut.model_validate(row) for row in rows]
+
+
+@router.post("/pool-tokens", response_model=PoolTokenCreated, status_code=201)
+async def create_pool_token(
+    body: PoolTokenIn, admin: PersonAdministrator, session: Session
+) -> PoolTokenCreated:
+    """The only response that carries a pool token. Nothing logs response bodies."""
+    try:
+        token, plaintext = await pool_tokens.create_pool_token(
+            session, name=body.name, pool=body.pool, actor=admin.actor
+        )
+    except pool_tokens.InvalidPoolTokenName as exc:
+        # The request model refuses bad names first; this keeps one code if it ever does not.
+        raise pool_tokens.InvalidPoolTokenName(exc.message, code="invalid_request") from exc
+    await session.commit()
+    return PoolTokenCreated(id=str(token.id), name=token.name, pool=token.pool, token=plaintext)
+
+
+@router.post("/pool-tokens/{name}/revoke", response_model=PoolTokenRevoked)
+async def revoke_pool_token(
+    name: str,
+    admin: PersonAdministrator,
+    session: Session,
+    body: PoolTokenRevokeIn | None = None,
+) -> PoolTokenRevoked:
+    """A malformed name is answered 404 like any unknown one (the store decides)."""
+    token, revoked = await pool_tokens.revoke_pool_token(
+        session,
+        name,
+        now=utcnow(),
+        actor=admin.actor,
+        revoke_followers=body.revoke_followers if body is not None else False,
+    )
+    view = reports.pool_token_view(token)
+    await session.commit()
+    return PoolTokenRevoked.model_validate({**view, "followers_revoked": revoked})
+
+
+@router.get("/profiles", response_model=list[ProfileOut])
+async def list_profiles(admin: PersonViewer, session: Session) -> list[ProfileOut]:
+    rows = await profiles.list_profiles(session)
+    await _viewed(session, admin, "profiles.view")
+    return [ProfileOut.model_validate(row) for row in rows]
+
+
+@router.post("/profiles/{device}", response_model=ProfileOut)
+async def set_profile(
+    device: Device, body: ProfileIn, admin: PersonAdministrator, session: Session
+) -> ProfileOut:
+    """Applies to every job claimed from now on; a job already leased keeps what it has."""
+    profile = await profiles.set_profile(
+        session,
+        device,
+        model=body.model,
+        compute_type=body.compute_type,
+        temperatures=body.temperatures,
+        actor=admin.actor,
+    )
+    view = profiles.profile_view(profile)
+    await session.commit()
+    return ProfileOut.model_validate(view)

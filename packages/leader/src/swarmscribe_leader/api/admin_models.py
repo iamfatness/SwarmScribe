@@ -4,8 +4,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from swarmscribe_protocol import DEFAULT_CHANNEL_LABELS, ChannelLabels, ChannelMode
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
+from swarmscribe_protocol import (
+    DEFAULT_CHANNEL_LABELS,
+    ChannelLabels,
+    ChannelMode,
+    Device,
+    JobSettings,
+)
 
 from ..storage.base import StorageError
 from ..storage.local import validate_key
@@ -256,3 +269,89 @@ class ConsoleOut(BaseModel):
     revoked_by: str | None
     created_by: str
     created_at: datetime
+
+
+class PoolTokenIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=NAME_PATTERN)
+    pool: str = Field(default="default", pattern=NAME_PATTERN)
+
+
+class PoolTokenCreated(BaseModel):
+    id: str
+    name: str
+    pool: str
+    token: str
+
+
+class PoolTokenOut(BaseModel):
+    id: str
+    name: str
+    pool: str
+    registrations: int
+    last_used_at: datetime | None
+    revoked: bool
+    revoked_at: datetime | None
+    revoked_by: str | None
+    created_by: str
+    created_at: datetime
+
+
+class PoolTokenRevokeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Also revoke every follower the token registered (for a token that has leaked).
+    revoke_followers: bool = Field(default=False, strict=True)
+
+
+class PoolTokenRevoked(PoolTokenOut):
+    followers_revoked: int
+
+
+# A model is named, never located: followers load it by this name, and a path here would
+# make them read their own disks. `owner/name` is a Hugging Face repository.
+MODEL_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(/[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$"
+ComputeType = Literal[
+    "int8",
+    "int8_float16",
+    "int8_float32",
+    "int8_bfloat16",
+    "int16",
+    "float16",
+    "bfloat16",
+    "float32",
+]
+
+
+class ProfileOut(BaseModel):
+    device: Device
+    name: str
+    model: str
+    compute_type: str
+    temperatures: list[float]
+
+
+class ProfileIn(BaseModel):
+    model_config = ConfigDict(extra="forbid", protected_namespaces=())
+
+    model: str = Field(pattern=MODEL_PATTERN, max_length=100)
+    compute_type: ComputeType
+    temperatures: list[float] | None = Field(default=None, min_length=1, max_length=10)
+
+    @model_validator(mode="after")
+    def _the_protocols_own_settings_accept_it(self) -> "ProfileIn":
+        # What a claim carries is the protocol's JobSettings, so its rules (the ladder is
+        # never empty and stays within 0.0 to MAX_TEMPERATURE, the engine's fixed ceiling)
+        # are the ones applied here, not a copy of them.
+        if self.temperatures is not None:
+            try:
+                JobSettings(
+                    model=self.model,
+                    compute_type=self.compute_type,
+                    temperatures=tuple(self.temperatures),
+                )
+            except ValidationError as exc:
+                # Only the rule, never the value.
+                raise ValueError(exc.errors()[0]["msg"]) from None
+        return self

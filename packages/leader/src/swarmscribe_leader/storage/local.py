@@ -197,8 +197,12 @@ class LocalBackend:
         )
         return Link(url=f"{self.public_url}/v1/files/{self.signer.sign(claims)}", method=method)
 
-    def download_link(self, key: str, version: str, ttl: timedelta) -> Link:
-        return self._link(key, "GET", version, ttl)
+    def download_link(
+        self, key: str, version: str, ttl: timedelta, *, job_id: str = "", lease_id: str = ""
+    ) -> Link:
+        """A GET link. With a job and lease, the file route serves it only while that
+        lease is the job's current one."""
+        return self._link(key, "GET", version, ttl, job_id=job_id, lease_id=lease_id)
 
     def upload_link(
         self, key: str, ttl: timedelta, *, job_id: str = "", lease_id: str = ""

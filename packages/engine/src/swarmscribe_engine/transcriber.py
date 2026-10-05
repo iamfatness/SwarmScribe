@@ -1,3 +1,4 @@
+import gc
 import hashlib
 from collections.abc import Callable, Sequence
 from dataclasses import replace
@@ -25,6 +26,26 @@ from .vocabulary import (
 ModelFactory = Callable[[TranscribeSettings], Any]
 ChannelCounter = Callable[[Path], int]
 StereoDecoder = Callable[[Path], tuple[Any, Any]]
+Progress = Callable[[float], None]
+"""Called after every segment with the fraction of the recording done, 0.0 to 1.0. Whatever
+it raises stops the transcription and reaches the caller unchanged."""
+
+
+class _FromProgress(BaseException):
+    """Carries what a progress callback raised past the decoder's error handling, so that it
+    is never mistaken for undecodable audio."""
+
+    def __init__(self, error: BaseException) -> None:
+        super().__init__()
+        self.error = error
+
+
+def _report(progress: Progress, fraction: float) -> None:
+    try:
+        progress(min(1.0, max(0.0, fraction)))
+    except BaseException as exc:
+        raise _FromProgress(exc) from None
+
 
 SAMPLE_RATE = 16000  # what Whisper models take, and what faster-whisper resamples to
 _CHUNK = 1024 * 1024
@@ -126,6 +147,7 @@ class Transcriber:
         self._decode_errors = _default_decode_errors() if decode_errors is None else decode_errors
         self._channel_count = channel_count
         self._decode_stereo = decode_stereo
+        self._running = False
         self._model = model_factory(settings)
 
     def _select_terms(self, terms: Sequence[str]) -> tuple[str, ...]:
@@ -159,16 +181,71 @@ class Transcriber:
         return True
 
     def _pass(
-        self, audio: Any, settings: TranscribeSettings, hotwords: str | None
+        self,
+        audio: Any,
+        settings: TranscribeSettings,
+        hotwords: str | None,
+        progress: Progress | None = None,
+        *,
+        start: float = 0.0,
+        share: float = 1.0,
     ) -> tuple[list[Segment], float]:
-        raw_segments, info = self._model.transcribe(
+        """One run of the model. Progress is reported as `start` plus this run's `share` of
+        the whole (a split recording is two runs of half each)."""
+        raw_segments, info = self._model_or_closed().transcribe(
             audio,
             **FIXED_SETTINGS,
             temperature=list(settings.temperatures),
             hotwords=hotwords,
         )
-        segments = [segment for segment in (_convert(raw) for raw in raw_segments) if segment.text]
-        return segments, float(info.duration)
+        duration = float(info.duration)
+        segments: list[Segment] = []
+        try:
+            for raw in raw_segments:
+                segment = _convert(raw)
+                if segment.text:
+                    segments.append(segment)
+                if progress is not None:
+                    done = segment.end / duration if duration > 0 else 0.0
+                    _report(progress, start + share * min(1.0, max(0.0, done)))
+        finally:
+            # A stopped pass abandons the generator: release what it holds now.
+            closer = getattr(raw_segments, "close", None)
+            if closer is not None:
+                closer()
+        return segments, duration
+
+    def _model_or_closed(self) -> Any:
+        if self._model is None:
+            raise RuntimeError("this transcriber is closed")
+        return self._model
+
+    def warm_up(self) -> None:
+        """Run one second of silence through the model, with the VAD filter off so that the
+        model really runs. GPU libraries are loaded at the first inference, not when the
+        model is loaded: this is where a missing one shows."""
+        import numpy
+
+        silence = numpy.zeros(SAMPLE_RATE, dtype=numpy.float32)
+        segments, _info = self._model_or_closed().transcribe(
+            silence,
+            language=FIXED_SETTINGS["language"],
+            condition_on_previous_text=False,
+            vad_filter=False,
+            word_timestamps=False,
+            temperature=0.0,
+        )
+        for _segment in segments:
+            pass
+
+    def close(self) -> None:
+        """Drop the model so that its memory is returned before another one is loaded.
+        The transcriber cannot be used afterwards. The caller closes between jobs: closing
+        while `transcribe` runs raises RuntimeError and changes nothing."""
+        if self._running:
+            raise RuntimeError("cannot close a transcriber while it is transcribing")
+        self._model = None
+        gc.collect()
 
     def transcribe(
         self,
@@ -176,9 +253,26 @@ class Transcriber:
         vocabulary: Vocabulary = EMPTY_VOCABULARY,
         *,
         settings: TranscribeSettings | None = None,
+        progress: Progress | None = None,
     ) -> Transcript:
         """Transcribe one file. `settings` may set this call's channel handling and temperature
-        ladder; its model, compute type and device must be the loaded ones."""
+        ladder; its model, compute type and device must be the loaded ones. `progress` is
+        called after every segment with the fraction done; raising from it stops the
+        transcription, and the exception reaches the caller as it was raised."""
+        self._model_or_closed()
+        self._running = True
+        try:
+            return self._transcribe(path, vocabulary, settings, progress)
+        finally:
+            self._running = False
+
+    def _transcribe(
+        self,
+        path: Path,
+        vocabulary: Vocabulary,
+        settings: TranscribeSettings | None,
+        progress: Progress | None,
+    ) -> Transcript:
         path = Path(path)
         if not path.is_file():
             raise FileNotFoundError(f"recording not found: {path}")
@@ -189,12 +283,20 @@ class Transcriber:
         try:
             if self._splits(path, settings):
                 left, right = self._decode_stereo(path)
-                left_segments, duration = self._pass(left, settings, hotwords)
-                right_segments, _ = self._pass(right, settings, hotwords)
+                left_segments, duration = self._pass(
+                    left, settings, hotwords, progress, share=0.5
+                )
+                right_segments, _ = self._pass(
+                    right, settings, hotwords, progress, start=0.5, share=0.5
+                )
                 segments = _merge(left_segments, right_segments)
                 labels = settings.channel_labels
             else:
-                segments, duration = self._pass(str(path), settings, hotwords)
+                segments, duration = self._pass(str(path), settings, hotwords, progress)
+            if progress is not None:
+                _report(progress, 1.0)
+        except _FromProgress as stopped:
+            raise stopped.error from stopped.error.__cause__
         except self._decode_errors as exc:
             raise UndecodableAudioError(f"cannot decode {path.name}: {exc}") from exc
         # Corrections never span a segment, so one pass over the merged list equals one per

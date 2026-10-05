@@ -102,8 +102,28 @@ class JoinToken(_Row, Base):
     created_by: Mapped[str] = mapped_column(Text)
 
 
+class PoolToken(_Row, Base):
+    """A token that registers followers of one pool for as long as it is not revoked: no
+    expiry, no limit on uses. Stored as its SHA-256. For pools whose machines come and go
+    by themselves (Kubernetes); a join token is for a machine a person sets up."""
+
+    __tablename__ = "pool_tokens"
+    __table_args__ = (Index("uq_pool_tokens_name_lower", func.lower(text("name")), unique=True),)
+
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    pool: Mapped[str] = mapped_column(String(100))
+    created_by: Mapped[str] = mapped_column(Text)
+    registrations: Mapped[int] = mapped_column(default=0)
+    last_used_at: Mapped[datetime | None]
+    revoked_at: Mapped[datetime | None]
+    revoked_by: Mapped[str | None] = mapped_column(Text)
+
+
 class Follower(_Row, Base):
     __tablename__ = "followers"
+    # Serves registration with a pool token: that token's `gone` followers, to reuse one.
+    __table_args__ = (Index("ix_followers_pool_token", "pool_token_id", "state"),)
 
     pool: Mapped[str] = mapped_column(String(100))
     capabilities: Mapped[dict[str, Any]] = mapped_column(default=dict)
@@ -111,6 +131,8 @@ class Follower(_Row, Base):
     state: Mapped[str] = mapped_column(String(16), default="active")
     last_seen_at: Mapped[datetime]
     join_token_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("join_tokens.id"))
+    # Set when the follower registered with a pool token.
+    pool_token_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("pool_tokens.id"))
 
 
 class ConsoleCredential(_Row, Base):
@@ -169,6 +191,8 @@ class Job(_Row, Base):
     outputs_flagged_for_deletion: Mapped[bool] = mapped_column(default=False)
     # Not before: a job whose claim could not be built is pushed back so others are reached.
     available_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    # When this lease's links were last issued (at the claim, then at each refresh).
+    links_issued_at: Mapped[datetime | None]
 
 
 # Serves the claim query: queued jobs of a pool, highest priority first, then oldest.

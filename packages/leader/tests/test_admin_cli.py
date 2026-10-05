@@ -884,3 +884,114 @@ async def test_a_console_answer_of_the_wrong_shape_is_a_one_line_error(store, id
     code, out, err = await run_cli(store, lambda request: httpx.Response(200, json=answer), *argv)
     assert (code, out) == (1, "")
     assert err.startswith("error: ") and err.count("\n") == 1, err
+
+
+# --- pool tokens (follower spec 12.1) ----------------------------------------------------
+
+
+async def test_pool_tokens_create_shows_the_token_once_and_list_never_does(
+    cli, store, idp, sessionmaker
+):
+    from swarmscribe_leader.db.models import PoolToken
+
+    sign_in_as(store, idp, "admin")
+    code, out, err = await cli("pool-tokens", "create", "--name", "gpu-pods", "--pool", "gpu")
+    assert code == 0, err
+    async with sessionmaker() as session:
+        row = (await session.scalars(select(PoolToken))).one()
+    shown = out.splitlines()[0].rsplit(" ", 1)[1]
+    assert out.startswith("pool token (store this now; it will not be shown again): ")
+    assert hash_secret(shown) == row.token_hash
+    assert out.count(shown) == 1 and shown not in err
+    code, listed, _err = await cli("pool-tokens", "list")
+    assert code == 0 and "gpu-pods" in listed and shown not in listed
+    code, out, err = await cli("pool-tokens", "revoke", "gpu-pods", "--revoke-followers")
+    assert code == 0, err
+    assert "followers_revoked: 0" in out and "revoked: yes" in out
+    assert shown not in out + err
+
+
+async def test_pool_tokens_revoke_reports_how_many_followers_it_revoked(
+    cli, store, idp, admin_client
+):
+    sign_in_as(store, idp, "admin")
+    code, out, err = await cli("pool-tokens", "create", "--name", "cpu-pods")
+    assert code == 0, err
+    shown = out.splitlines()[0].rsplit(" ", 1)[1]
+    capabilities = {
+        "device": "cpu",
+        "models": ["distil-large-v3"],
+        "engine_version": "0.1.0",
+        "pool": "default",
+    }
+    register = {"join_token": shown, "protocol_version": 1, "capabilities": capabilities}
+    for _ in range(2):
+        assert (await admin_client.post("/v1/followers/register", json=register)).status_code == 200
+    code, out, err = await cli("pool-tokens", "revoke", "cpu-pods", "--revoke-followers")
+    assert code == 0, err
+    assert "followers_revoked: 2" in out
+    code, out, err = await cli("pool-tokens", "revoke", "cpu-pods")
+    assert code == 0 and "followers_revoked: 0" in out
+
+
+async def test_pool_tokens_are_refused_below_admin(cli, store, idp):
+    sign_in_as(store, idp, "operator")
+    code, out, err = await cli("pool-tokens", "create", "--name", "gpu-pods")
+    assert (code, out) == (1, "")
+    assert err.startswith("error: ")
+
+
+# --- settings profiles (follower spec 12.4) ----------------------------------------------
+
+
+async def test_profiles_list_and_set(cli, store, idp, sessionmaker):
+    from swarmscribe_leader.db.models import SettingsProfile
+
+    sign_in_as(store, idp, "admin")
+    code, out, err = await cli("profiles", "list")
+    assert code == 0, err
+    assert "distil-large-v3" in out and "large-v3" in out
+    try:
+        change = ("profiles", "set", "cpu", "--compute-type", "int8")
+        code, out, err = await cli(*change, "--model", "tiny.en", "--temperatures", "0,0.2")
+        assert code == 0, err
+        assert "model: tiny.en" in out and "temperatures: 0.0, 0.2" in out
+        code, _out, err = await cli(*change, "--model", "../x")
+        assert code == 1
+        code, _out, err = await cli(*change, "--model", "tiny.en", "--temperatures", "0,0.9")
+        assert code == 1 and err.startswith("error: ")
+    finally:
+        async with sessionmaker() as session:
+            row = await session.scalar(
+                select(SettingsProfile).where(SettingsProfile.device == "cpu")
+            )
+            row.model, row.compute_type = "distil-large-v3", "int8"
+            row.temperatures = [0.0, 0.2, 0.4]
+            await session.commit()
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "0,-inf", "0,nan,0.4", "abc", "", "0,,0.2"])
+async def test_profiles_set_rejects_non_finite_or_unparseable_temperatures(
+    cli, store, idp, capsys, bad
+):
+    sign_in_as(store, idp, "admin")
+    with pytest.raises(SystemExit) as excinfo:
+        await cli(
+            "profiles", "set", "cpu", "--model", "tiny.en", "--compute-type", "int8",
+            "--temperatures", bad,
+        )
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err.strip().splitlines()
+    assert err[-1].startswith("swarmscribe-admin profiles set: error:")
+    assert "Traceback" not in "".join(err)
+
+
+async def test_profiles_set_is_refused_below_admin(cli, store, idp):
+    sign_in_as(store, idp, "operator")
+    code, out, err = await cli(
+        "profiles", "set", "cpu", "--model", "tiny.en", "--compute-type", "int8"
+    )
+    assert (code, out) == (1, "")
+    assert err.startswith("error: ")
+    code, out, _err = await cli("profiles", "list")
+    assert code == 0 and "distil-large-v3" in out

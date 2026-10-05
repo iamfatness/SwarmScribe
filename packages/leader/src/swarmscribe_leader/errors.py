@@ -58,6 +58,17 @@ class PayloadTooLarge(LeaderError):
     code = "too_large"
 
 
+class TooManyRequests(LeaderError):
+    """The caller asks too often; the answer carries `Retry-After`."""
+
+    status = 429
+    code = "too_many_requests"
+
+    def __init__(self, message: str, *, retry_after: int):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class ServiceUnavailable(LeaderError):
     """Something the leader depends on (an identity provider, a group directory) cannot be
     reached right now; the caller should retry."""

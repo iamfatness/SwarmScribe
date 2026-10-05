@@ -7,13 +7,16 @@ from .segments import Device, JobSettings
 from .vocabulary import Vocabulary
 
 Directive = Literal["continue", "cancel", "drain"]
+DIRECTIVE_HEADER = "X-SwarmScribe-Directive"
+"""Response header on a claim answered 204. Its value is a Directive; the leader sends only
+`drain`, to a draining follower, which will be given nothing more. Absent otherwise."""
 FailureCode = Literal["source_changed", "undecodable", "engine_error", "out_of_resources", "other"]
 
 
 class Link(WireModel):
     """A short-lived, single-object URL. Identical for every storage backend."""
 
-    url: str
+    url: str = Field(repr=False)  # a capability: never in a log line
     method: Literal["GET", "PUT"]
     headers: dict[str, str] = Field(default_factory=dict)
 
@@ -94,6 +97,17 @@ class FailRequest(WireModel):
 
 class ReleaseRequest(WireModel):
     lease_id: str
+
+
+class LinksRequest(WireModel):
+    lease_id: str
+
+
+class JobLinks(WireModel):
+    """Fresh links for a job, given to the follower that holds its lease."""
+
+    download_url: Link
+    upload_urls: UploadUrls
 
 
 class ErrorBody(WireModel):

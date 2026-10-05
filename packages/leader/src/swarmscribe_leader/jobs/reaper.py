@@ -94,15 +94,18 @@ async def reap(
     """Expire leases, then mark silent followers gone, in two separate transactions so the
     reaper never holds job and follower locks together.
 
-    No lease expires until the process has run for `startup_grace` since `started_at`:
-    after a leader-wide outage, live followers need one lease length to heartbeat again.
+    No lease expires and no follower is marked gone until the process has run for
+    `startup_grace` since `started_at`: after a leader-wide outage, live followers need one
+    lease length to heartbeat again.
     """
-    requeued = failed = 0
+    requeued = failed = gone = 0
     if started_at is None or now - started_at >= startup_grace:
         async with sessionmaker() as session:
             requeued, failed = await expire_leases(session, now=now)
             await session.commit()
-    async with sessionmaker() as session:
-        gone = await mark_gone(session, now=now, gone_after=gone_after)
-        await session.commit()
+        # Nobody is marked gone during the grace either: a pool token's registration takes
+        # over a gone row, and after an outage every live idle follower looks silent.
+        async with sessionmaker() as session:
+            gone = await mark_gone(session, now=now, gone_after=gone_after)
+            await session.commit()
     return ReapResult(requeued=requeued, failed=failed, gone=gone)

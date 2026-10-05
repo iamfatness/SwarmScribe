@@ -6,10 +6,13 @@ from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from swarmscribe_protocol import (
+    DIRECTIVE_HEADER,
     ClaimResponse,
     FailRequest,
     HeartbeatRequest,
     HeartbeatResponse,
+    JobLinks,
+    LinksRequest,
     OutputChecksums,
     RegisterRequest,
     RegisterResponse,
@@ -24,9 +27,17 @@ from ..clock import utcnow
 from ..db.models import Follower, Job, Recording
 from ..errors import LeaderError, Unauthorized
 from ..jobs import store
-from ..jobs.claims import build_claim, device_of, outputs_unchanged, outputs_verified, profile_for
+from ..jobs.claims import (
+    build_claim,
+    build_links,
+    device_of,
+    outputs_unchanged,
+    outputs_verified,
+    profile_for,
+)
 from ..storage.base import StorageError
 from .deps import db_session, settings_of
+from .errors import STORAGE_RETRY_AFTER
 
 logger = logging.getLogger(__name__)
 MAX_CLAIM_ATTEMPTS = 5
@@ -44,10 +55,14 @@ async def current_follower(
     return await authenticate(session, credential.strip(), now=utcnow())
 
 
-def _no_work(request: Request) -> Response:
-    return Response(
-        status_code=204, headers={"Retry-After": str(settings_of(request).claim_retry_after)}
-    )
+def _no_work(request: Request, *, draining: bool = False) -> Response:
+    """Nothing to hand out. A draining follower is told so, here, because an idle follower
+    makes no other call: without it, "you are draining" and "the queue is empty" look the
+    same and an idle follower could never wind down."""
+    headers = {"Retry-After": str(settings_of(request).claim_retry_after)}
+    if draining:
+        headers[DIRECTIVE_HEADER] = "drain"
+    return Response(status_code=204, headers=headers)
 
 
 @router.post("/followers/register", response_model=RegisterResponse)
@@ -74,7 +89,7 @@ async def claim_job(
     settings = settings_of(request)
     if follower.state == "draining":
         await session.commit()
-        return _no_work(request)
+        return _no_work(request, draining=True)
     device = device_of(follower)
     profile = await profile_for(session, device)
     if profile is None:
@@ -149,6 +164,45 @@ async def heartbeat(
     )
     await session.commit()
     return HeartbeatResponse(directive=directive)
+
+
+class _LinksUnavailable(LeaderError):
+    status = 503
+    code = "unavailable"
+    retry_after = STORAGE_RETRY_AFTER
+
+
+@router.post("/jobs/{job_id}/links", response_model=JobLinks)
+async def fresh_links(
+    job_id: uuid.UUID,
+    body: LinksRequest,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(db_session)],
+    follower: Annotated[Follower, Depends(current_follower)],
+) -> JobLinks:
+    """New links for the job, for the follower holding its lease: a job that outlasts its
+    links (two hours for uploads) asks here. The links carry the same lease, so they stop
+    working when it ends, like the ones the claim gave."""
+    settings = settings_of(request)
+    job = await store.refresh_links(
+        session,
+        job_id,
+        body.lease_id,
+        follower,
+        min_interval_seconds=settings.links_refresh_min_seconds,
+    )
+    try:
+        links = await build_links(
+            session, job, settings=settings, backend_factory=request.app.state.backend_factory
+        )
+    except StorageError as exc:
+        # Ids only: a storage key must never reach the log (the claim keeps the same rule).
+        logger.warning(
+            "links for job %s could not be built: %s", job_id, type(exc).__name__
+        )
+        raise _LinksUnavailable("storage location is not available") from None
+    await session.commit()
+    return links
 
 
 @router.post("/jobs/{job_id}/submit", response_model=SubmitResponse)

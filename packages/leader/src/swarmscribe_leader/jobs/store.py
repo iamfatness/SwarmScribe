@@ -1,5 +1,6 @@
 """Job state machine. Every function leaves committing to the caller."""
 
+import math
 import uuid
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ from swarmscribe_protocol import Directive, FailRequest, OutputChecksums, Submit
 
 from .. import audit
 from ..db.models import Follower, Job, JobAttempt, JobResult
-from ..errors import Conflict, Forbidden, NotFound, StaleLease
+from ..errors import Conflict, Forbidden, NotFound, StaleLease, TooManyRequests
 
 OPEN_STATES = ("queued", "leased")
 NON_RETRYABLE = frozenset({"source_changed", "undecodable"})
@@ -33,6 +34,11 @@ class OutputsCheck:
     problem: str | None = None
     no_speech: bool = False
     versions: tuple[tuple[str, str], ...] = ()
+
+
+async def _database_now(session: AsyncSession) -> datetime:
+    """The database's clock, the one every replica shares (as `available_at` is)."""
+    return await session.scalar(select(func.clock_timestamp()))
 
 
 def _parse_lease(lease_id: str) -> uuid.UUID | None:
@@ -109,6 +115,7 @@ async def claim(
     job.lease_id = uuid.uuid4()
     job.leased_by = follower.id
     job.lease_expires_at = now + timedelta(seconds=lease_seconds)
+    job.links_issued_at = await _database_now(session)
     job.attempts += 1
     session.add(
         JobAttempt(job_id=job.id, follower_id=follower.id, lease_id=job.lease_id, started_at=now)
@@ -161,6 +168,41 @@ async def heartbeat(
     _require_lease(job, lease_id, follower)
     job.lease_expires_at = now + timedelta(seconds=lease_seconds)
     return "drain" if follower.state == "draining" else "continue"
+
+
+async def refresh_links(
+    session: AsyncSession,
+    job_id: uuid.UUID,
+    lease_id: str,
+    follower: Follower,
+    *,
+    min_interval_seconds: int,
+) -> Job:
+    """Note that the lease holder is given fresh links, at most once per
+    `min_interval_seconds` for a lease (the claim counts as the first), measured on the
+    database's clock. The job row is locked, so two simultaneous calls are decided one
+    after the other. The lease is not extended: that is the heartbeat's. The caller builds
+    the links and commits."""
+    job = await _locked_job(session, job_id)
+    _require_lease(job, lease_id, follower)
+    issued = await _database_now(session)
+    if job.links_issued_at is not None:
+        wait = min_interval_seconds - (issued - job.links_issued_at).total_seconds()
+        if wait > 0:
+            raise TooManyRequests(
+                "fresh links were issued for this lease a moment ago",
+                retry_after=math.ceil(wait),
+            )
+    job.links_issued_at = issued
+    audit.record(
+        session,
+        actor=f"follower:{follower.id}",
+        action="job.links",
+        subject_type="job",
+        subject_id=job.id,
+        detail={"attempt": job.attempts},
+    )
+    return job
 
 
 def _same_checksums(result: JobResult, request: SubmitRequest) -> bool:

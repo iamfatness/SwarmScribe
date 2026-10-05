@@ -704,3 +704,178 @@ def test_auto_on_a_real_mono_file_writes_what_mono_writes_apart_from_the_request
     assert auto_json["settings"].pop("channel_mode") == "auto"
     assert auto_json["settings"].pop("channel_labels") == ["Left", "Right"]
     assert auto_json == mono_json
+
+
+# --- progress, warm-up and close (follower spec, section 12) ---------------------------
+
+
+def three_segments():
+    return [
+        raw_segment(0.0, 2.0, " one", [raw_word(0.0, 2.0, " one", 0.9)]),
+        raw_segment(2.0, 5.0, "  ", []),  # dropped from the transcript, still reported
+        raw_segment(5.0, 10.0, " three", [raw_word(5.0, 10.0, " three", 0.9)]),
+    ]
+
+
+def test_progress_is_reported_after_every_segment_and_at_the_end(audio):
+    seen = []
+    model = FakeModel(segments=three_segments(), duration=10.0)
+    make_transcriber(model).transcribe(audio, progress=seen.append)
+    assert seen == [0.2, 0.5, 1.0, 1.0]
+
+
+def test_a_split_recording_reports_each_channel_as_half(audio):
+    seen = []
+    model = FakeModel(segments=three_segments(), duration=10.0)
+    split_transcriber(model).transcribe(audio, progress=seen.append)
+    assert seen == [0.1, 0.25, 0.5, 0.6, 0.75, 1.0, 1.0]
+
+
+def test_split_progress_never_goes_backwards(audio):
+    seen = []
+    model = FakeModel(segments=three_segments(), duration=10.0)
+    split_transcriber(model).transcribe(audio, progress=seen.append)
+    assert seen == sorted(seen)
+
+
+def test_progress_never_leaves_zero_to_one(audio):
+    seen = []
+    late = [raw_segment(0.0, 12.0, " longer than the file says", [])]
+    for duration in (10.0, 0.0):
+        model = FakeModel(segments=late, duration=duration)
+        make_transcriber(model).transcribe(audio, progress=seen.append)
+    assert seen == [1.0, 1.0, 0.0, 1.0]
+
+
+class Stop(Exception):
+    pass
+
+
+def test_what_the_progress_callback_raises_stops_the_transcription_unchanged(audio):
+    consumed = []
+
+    def segments():
+        for segment in three_segments():
+            consumed.append(segment)
+            yield segment
+
+    model = FakeModel(duration=10.0)
+    model.segments = segments()
+
+    def stop_at_once(_fraction):
+        raise Stop("asked to stop")
+
+    with pytest.raises(Stop, match="asked to stop"):
+        make_transcriber(model).transcribe(audio, progress=stop_at_once)
+    assert len(consumed) == 1  # nothing after the first segment was computed
+
+
+def test_a_decode_error_raised_by_the_callback_is_not_called_undecodable_audio(audio):
+    def stop(_fraction):
+        raise DecodeError("raised by the caller, not the decoder")
+
+    model = FakeModel(segments=three_segments(), duration=10.0)
+    with pytest.raises(DecodeError):
+        make_transcriber(model).transcribe(audio, progress=stop)
+
+
+def test_a_callback_error_leaves_the_model_usable_for_the_next_job(audio):
+    calls = []
+
+    def stop_once(_fraction):
+        calls.append(1)
+        if len(calls) == 1:
+            raise Stop("first job stopped")
+
+    model = FakeModel(segments=three_segments(), duration=10.0)
+    transcriber = make_transcriber(model)
+    with pytest.raises(Stop):
+        transcriber.transcribe(audio, progress=stop_once)
+    model.segments = three_segments()
+    transcript = transcriber.transcribe(audio, progress=stop_once)
+    assert [segment.text for segment in transcript.segments] == ["one", "three"]
+
+
+def test_a_stop_in_the_right_channel_pass_propagates_and_returns_nothing(audio):
+    def stop_in_right_half(fraction):
+        if fraction > 0.5:
+            raise Stop("stopped in the right channel")
+
+    model = FakeModel(segments=three_segments(), duration=10.0)
+    with pytest.raises(Stop, match="right channel"):
+        split_transcriber(model).transcribe(audio, progress=stop_in_right_half)
+
+
+def test_without_a_callback_nothing_changes(audio):
+    model = FakeModel(segments=three_segments(), duration=10.0)
+    transcript = make_transcriber(model).transcribe(audio)
+    assert [segment.text for segment in transcript.segments] == ["one", "three"]
+
+
+def test_warm_up_runs_the_model_with_the_vad_filter_off():
+    model = FakeModel(segments=[raw_segment(0.0, 1.0, " noise", [])])
+    make_transcriber(model).warm_up()
+    ((audio_arg, kwargs),) = model.calls
+    assert (len(audio_arg), str(audio_arg.dtype)) == (16000, "float32")
+    assert not audio_arg.any()
+    assert kwargs == {
+        "language": "en",
+        "condition_on_previous_text": False,
+        "vad_filter": False,
+        "word_timestamps": False,
+        "temperature": 0.0,
+    }
+
+
+def test_warm_up_consumes_the_segments_so_the_model_really_runs():
+    model = FakeModel(error_while_iterating=RuntimeError("Library cublas64_12.dll is not found"))
+    with pytest.raises(RuntimeError, match="cublas64_12"):
+        make_transcriber(model).warm_up()
+
+
+def test_a_closed_transcriber_refuses_work(audio):
+    transcriber = make_transcriber(FakeModel())
+    transcriber.close()
+    transcriber.close()  # harmless twice
+    with pytest.raises(RuntimeError, match="closed"):
+        transcriber.transcribe(audio)
+    with pytest.raises(RuntimeError, match="closed"):
+        transcriber.warm_up()
+
+
+def test_close_releases_the_model():
+    import weakref
+
+    model = FakeModel()
+    ref = weakref.ref(model)
+    transcriber = make_transcriber(model)
+    del model
+    transcriber.close()
+    assert ref() is None
+
+
+def test_close_during_a_transcription_is_refused_and_changes_nothing(audio):
+    holder = {}
+
+    def close_midway(_fraction):
+        with pytest.raises(RuntimeError, match="while it is transcribing"):
+            holder["transcriber"].close()
+
+    holder["transcriber"] = make_transcriber(FakeModel(segments=three_segments(), duration=10.0))
+    holder["transcriber"].transcribe(audio, progress=close_midway)  # the pass completes
+    holder["transcriber"].close()  # between jobs it works
+    with pytest.raises(RuntimeError, match="closed"):
+        holder["transcriber"].transcribe(audio)
+
+
+def test_the_callbacks_own_cause_is_preserved(audio):
+    root = ValueError("root")
+
+    def stop(_fraction):
+        raise Stop("enough") from root
+
+    with pytest.raises(Stop) as stopped:
+        make_transcriber(FakeModel(segments=three_segments(), duration=10.0)).transcribe(
+            audio, progress=stop
+        )
+    assert stopped.value.__cause__ is root

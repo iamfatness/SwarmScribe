@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from swarmscribe_protocol import (
     ClaimResponse,
+    JobLinks,
     JobSettings,
     OutputChecksums,
     SegmentsDocument,
@@ -50,18 +51,17 @@ async def profile_for(session: AsyncSession, device: str) -> SettingsProfile | N
     return await session.scalar(select(SettingsProfile).where(SettingsProfile.device == device))
 
 
-async def build_claim(
-    session: AsyncSession,
-    job: Job,
-    follower: Follower,
-    *,
-    settings: Settings,
-    backend_factory: BackendFactory,
-    profile: SettingsProfile | None = None,
-) -> ClaimResponse:
+async def build_links(
+    session: AsyncSession, job: Job, *, settings: Settings, backend_factory: BackendFactory
+) -> JobLinks:
+    """The job's download link and three upload links, all bound to its current lease."""
     recording, source, target = await _places(session, job)
     download = backend_factory(source).download_link(
-        recording.key, job.source_version, timedelta(seconds=settings.download_link_ttl_seconds)
+        recording.key,
+        job.source_version,
+        timedelta(seconds=settings.download_link_ttl_seconds),
+        job_id=str(job.id),
+        lease_id=str(job.lease_id),
     )
     uploader = backend_factory(target)
     upload_ttl = timedelta(seconds=settings.upload_link_ttl_seconds)
@@ -73,6 +73,21 @@ async def build_claim(
             for name, key in output_keys(source.output_prefix, recording.key).items()
         }
     )
+    return JobLinks(download_url=download, upload_urls=uploads)
+
+
+async def build_claim(
+    session: AsyncSession,
+    job: Job,
+    follower: Follower,
+    *,
+    settings: Settings,
+    backend_factory: BackendFactory,
+    profile: SettingsProfile | None = None,
+) -> ClaimResponse:
+    _recording, source, _target = await _places(session, job)
+    links = await build_links(session, job, settings=settings, backend_factory=backend_factory)
+    download, uploads = links.download_url, links.upload_urls
     device = device_of(follower)
     if profile is None:
         profile = await profile_for(session, device)

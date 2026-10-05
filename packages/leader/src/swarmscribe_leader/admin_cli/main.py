@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import io
 import json
+import math
 import os
 import re
 import sys
@@ -41,6 +42,18 @@ def parse_labels(text: str) -> tuple[str, ...]:
             'give exactly two names separated by a comma, e.g. "Agent,Customer"'
         )
     return names
+
+
+def parse_temperatures(text: str) -> list[float]:
+    try:
+        values = [float(part) for part in text.split(",")]
+    except ValueError:
+        values = []
+    if not values or not all(math.isfinite(value) for value in values):
+        raise argparse.ArgumentTypeError(
+            "give finite numbers separated by commas, e.g. 0,0.2,0.4"
+        )
+    return values
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -135,6 +148,35 @@ def build_parser() -> argparse.ArgumentParser:
         "name"
     )
 
+    pool_tokens = commands.add_parser(
+        "pool-tokens",
+        help="non-expiring tokens for pools whose followers come and go (Kubernetes);"
+        " administrators, signed in as a person",
+    ).add_subparsers(dest="action", required=True)
+    pool_create = pool_tokens.add_parser("create", help="a new pool token (shown once)")
+    pool_create.add_argument("--name", required=True, help="e.g. gpu-pods")
+    pool_create.add_argument("--pool", default="default")
+    pool_tokens.add_parser("list")
+    pool_revoke = pool_tokens.add_parser("revoke", help="refuse further registrations")
+    pool_revoke.add_argument("name")
+    pool_revoke.add_argument(
+        "--revoke-followers",
+        action="store_true",
+        help="also revoke every follower the token registered (for a token that has leaked)",
+    )
+
+    profiles = commands.add_parser(
+        "profiles", help="the model each device class transcribes with"
+    ).add_subparsers(dest="action", required=True)
+    profiles.add_parser("list")
+    profile_set = profiles.add_parser("set", help="change a device class's model")
+    profile_set.add_argument("device", choices=("cuda", "cpu"))
+    profile_set.add_argument("--model", required=True, help="e.g. large-v3")
+    profile_set.add_argument("--compute-type", required=True, help="e.g. float16 or int8")
+    profile_set.add_argument(
+        "--temperatures", type=parse_temperatures, help="e.g. 0,0.2,0.4 (default: unchanged)"
+    )
+
     consent = commands.add_parser("consent", help="consent overview").add_subparsers(
         dest="action", required=True
     )
@@ -212,6 +254,14 @@ def print_status(data: dict[str, Any], out: TextIO) -> None:
 
 def print_token(data: dict[str, Any], out: TextIO) -> None:
     print(f"join token (shown once; keep it safe): {_cell(data['token'])}", file=out)
+    print_fields({name: value for name, value in data.items() if name != "token"}, out)
+
+
+def print_pool_token(data: dict[str, Any], out: TextIO) -> None:
+    print(
+        f"pool token (store this now; it will not be shown again): {_cell(data['token'])}",
+        file=out,
+    )
     print_fields({name: value for name, value in data.items() if name != "token"}, out)
 
 
@@ -341,6 +391,24 @@ async def dispatch(args: argparse.Namespace, client: LeaderClient) -> tuple[Any,
             columns = ("name", "max_role", "revoked", "revoked_at", "created_by", "created_at")
             return await get("/v1/admin/consoles"), table(columns)
         return await post(f"/v1/admin/consoles/{_seg(args.name)}/revoke"), print_fields
+    if command == "pool-tokens":
+        if action == "create":
+            body = {"name": args.name, "pool": args.pool}
+            return await post("/v1/admin/pool-tokens", body=body), print_pool_token
+        if action == "list":
+            columns = ("name", "pool", "registrations", "last_used_at", "revoked", "created_by")
+            return await get("/v1/admin/pool-tokens"), table(columns)
+        body = {"revoke_followers": True} if args.revoke_followers else None
+        path = f"/v1/admin/pool-tokens/{_seg(args.name)}/revoke"
+        return await post(path, body=body), print_fields
+    if command == "profiles":
+        if action == "list":
+            columns = ("device", "model", "compute_type", "temperatures")
+            return await get("/v1/admin/profiles"), table(columns)
+        body = {"model": args.model, "compute_type": args.compute_type}
+        if args.temperatures is not None:
+            body["temperatures"] = args.temperatures
+        return await post(f"/v1/admin/profiles/{_seg(args.device)}", body=body), print_fields
     if command == "consent":
         params = {"limit": args.limit}
         if args.location:

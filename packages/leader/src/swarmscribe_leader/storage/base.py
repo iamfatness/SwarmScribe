@@ -28,7 +28,9 @@ class StorageBackend(Protocol):
 
     async def stat(self, key: str) -> ObjectInfo | None: ...
 
-    def download_link(self, key: str, version: str, ttl: timedelta) -> Link: ...
+    def download_link(
+        self, key: str, version: str, ttl: timedelta, *, job_id: str = "", lease_id: str = ""
+    ) -> Link: ...
 
     def upload_link(
         self, key: str, ttl: timedelta, *, job_id: str = "", lease_id: str = ""

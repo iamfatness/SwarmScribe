@@ -1,4 +1,5 @@
 import http.client
+import io
 import socket
 import threading
 import time
@@ -138,6 +139,7 @@ def test_run_supervised_ticks_while_it_supervises(tmp_path):
     agent = make_agent(tmp_path, leader, FakeEngine())
     agent._ticked = 0.0
     assert agent.run_supervised(poll=0.01) == 0
+    assert agent._ticked > 0.0  # supervision itself ticked, not just the constructor
     assert agent.health() == (True, "ok")
 
 
@@ -244,3 +246,46 @@ def test_run_opens_no_port_without_the_setting(tmp_path, monkeypatch):
     monkeypatch.setenv("SWARMSCRIBE_FOLLOWER_STATE_DIR", str(tmp_path / "state"))
     settings = Settings()
     assert cli.command_run(settings, lambda s: make_agent(tmp_path, leader, FakeEngine())) == 0
+
+
+def test_a_listener_on_ipv6_loopback_answers():
+    server = HealthServer(("::1", 0), healthy=lambda: (True, "ok"), metrics=bytes)
+    try:
+        server.start()
+    except FollowerExit:
+        pytest.skip("this machine has no IPv6 loopback")
+    try:
+        connection = http.client.HTTPConnection("::1", server.port, timeout=5)
+        connection.request("GET", "/healthz")
+        response = connection.getresponse()
+        assert (response.status, response.read()) == (200, b"ok\n")
+        connection.close()
+    finally:
+        server.close()
+
+
+def test_a_listener_that_cannot_start_ends_run_with_exit_2_and_names_the_setting(
+    tmp_path, monkeypatch
+):
+    taken = socket.socket()
+    taken.bind(("127.0.0.1", 0))
+    taken.listen(1)
+    for name, value in (
+        ("SWARMSCRIBE_LEADER_URL", "https://leader.test"),
+        ("SWARMSCRIBE_FOLLOWER_STATE_DIR", str(tmp_path / "state")),
+        ("SWARMSCRIBE_FOLLOWER_HEALTH_ADDR", f"127.0.0.1:{taken.getsockname()[1]}"),
+    ):
+        monkeypatch.setenv(name, value)
+    err = io.StringIO()
+    try:
+        code = cli.main(
+            ["run"],
+            build=lambda settings: make_agent(tmp_path, FakeLeader(), FakeEngine()),
+            out=io.StringIO(),
+            err=err,
+        )
+    finally:
+        taken.close()
+    assert code == 2
+    assert "SWARMSCRIBE_FOLLOWER_HEALTH_ADDR" in err.getvalue()
+    assert "Traceback" not in err.getvalue()

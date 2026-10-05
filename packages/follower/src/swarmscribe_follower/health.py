@@ -8,7 +8,9 @@ says nothing about the leader, a job or a recording.
 /healthz says that the follower's threads are alive, not that the leader answers: a leader
 outage must never make a supervisor kill a follower that is transcribing."""
 
+import ipaddress
 import logging
+import socket
 import threading
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,10 +25,30 @@ Healthy = Callable[[], tuple[bool, str]]
 PLAIN = "text/plain; charset=utf-8"
 
 
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(
+        self,
+        address: tuple[str, int],
+        healthy: Healthy,
+        metrics: Callable[[], bytes],
+    ) -> None:
+        try:
+            ipv6 = isinstance(ipaddress.ip_address(address[0]), ipaddress.IPv6Address)
+        except ValueError:
+            ipv6 = False  # a name: IPv4, as http.server has always done
+        if ipv6:
+            self.address_family = socket.AF_INET6
+        self.healthy, self.metrics = healthy, metrics
+        super().__init__(address, _Handler)
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "swarmscribe-follower"
     sys_version = ""
     protocol_version = "HTTP/1.1"
+    server: "_Server"
     timeout = 10  # a client that sends nothing is dropped; it cannot hold a thread
 
     def _answer(self, status: int, body: bytes, content_type: str) -> None:
@@ -41,10 +63,10 @@ class _Handler(BaseHTTPRequestHandler):
     def _route(self) -> None:
         path = self.path.split("?", 1)[0]
         if path == "/healthz":
-            alive, text = self.server.healthy()  # type: ignore[attr-defined]
+            alive, text = self.server.healthy()
             self._answer(200 if alive else 503, (text + "\n").encode(), PLAIN)
         elif path == "/metrics":
-            self._answer(200, self.server.metrics(), CONTENT_TYPE)  # type: ignore[attr-defined]
+            self._answer(200, self.server.metrics(), CONTENT_TYPE)
         else:
             self._answer(404, b"not found\n", PLAIN)
 
@@ -60,7 +82,7 @@ class HealthServer:
         self, address: tuple[str, int], *, healthy: Healthy, metrics: Callable[[], bytes]
     ) -> None:
         self._address, self._healthy, self._metrics = address, healthy, metrics
-        self._server: ThreadingHTTPServer | None = None
+        self._server: _Server | None = None
         self._thread: threading.Thread | None = None
 
     @property
@@ -73,7 +95,7 @@ class HealthServer:
     def start(self) -> None:
         host, port = self._address
         try:
-            server = ThreadingHTTPServer((host, port), _Handler)
+            server = _Server((host, port), self._healthy, self._metrics)
         except OSError as error:
             raise FollowerExit(
                 EXIT_CONFIGURATION,
@@ -81,8 +103,6 @@ class HealthServer:
                 f" ({error.strerror or type(error).__name__}); change or unset"
                 " SWARMSCRIBE_FOLLOWER_HEALTH_ADDR",
             ) from None
-        server.daemon_threads = True
-        server.healthy, server.metrics = self._healthy, self._metrics  # type: ignore[attr-defined]
         self._server = server
         self._thread = threading.Thread(target=server.serve_forever, name="health", daemon=True)
         self._thread.start()

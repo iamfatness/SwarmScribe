@@ -591,6 +591,7 @@ class Agent:
         seen = signals.count
         if seen:  # a stop that arrived before start-up began: nothing is to be started
             self.stop(now=seen >= 2)
+        self.tick()  # supervision starts now, whether or not the worker outlives one poll
         worker.start()
         try:
             while worker.is_alive():

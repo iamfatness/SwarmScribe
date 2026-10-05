@@ -74,7 +74,9 @@ ENV PATH="/app/.venv/bin:${PATH}" \
     SWARMSCRIBE_FOLLOWER_SCRATCH_DIR=/scratch \
     SWARMSCRIBE_FOLLOWER_MODEL_DIR=/models \
     SWARMSCRIBE_FOLLOWER_STARTUP_MODEL=${MODELS%%,*} \
-    SWARMSCRIBE_FOLLOWER_OFFLINE=${BAKED:-0}
+    SWARMSCRIBE_FOLLOWER_OFFLINE=${BAKED:-0}     HF_HUB_CACHE=/models     HF_HUB_OFFLINE=${BAKED:-0}
+# HF_HUB_*: the follower sets them itself; the engine CLI in the image (swarmscribe-engine)
+# reads only these two, so a baked image runs it offline against the same cache.
 # Before the environment: a code change does not move a 3 GB model layer.
 COPY --from=models --chown=10001:10001 /models /models
 WORKDIR /var/lib/swarmscribe-follower

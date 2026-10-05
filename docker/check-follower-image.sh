@@ -31,6 +31,29 @@ setting() {  # the value of one variable in the image's environment
     | sed -n "s/^$1=//p"
 }
 
+label() {  # the value of one of the image's labels; empty when it is not set
+  docker inspect --format "{{with .Config.Labels}}{{index . \"$1\"}}{{end}}" "$image"
+}
+
+# --- what it says it is --------------------------------------------------------------------
+# The labels are what a registry shows, and `source` is what links the package to the
+# repository: a wrong one is not noticed by anything that runs.
+[ "$(label org.opencontainers.image.title)" = "swarmscribe-follower" ] \
+  || fail "the title label is '$(label org.opencontainers.image.title)', not swarmscribe-follower"
+[ "$(label org.opencontainers.image.source)" = "https://github.com/iamfatness/SwarmScribe" ] \
+  || fail "the source label is '$(label org.opencontainers.image.source)', not the repository"
+case "$(label org.opencontainers.image.description)" in
+  *SwarmScribe*follower*) ;;
+  *) fail "the description label is '$(label org.opencontainers.image.description)'" ;;
+esac
+installed="$(docker run --rm --entrypoint python "$image" -c \
+  'from importlib.metadata import version; print(version("swarmscribe-follower"))')"
+[ -n "$installed" ] || fail "the image does not say which version of the follower it holds"
+[ "$(label org.opencontainers.image.version)" = "$installed" ] \
+  || fail "the version label is '$(label org.opencontainers.image.version)', the follower in the image is $installed"
+docker run --rm "$image" --version | grep -q -x "swarmscribe-follower $installed" \
+  || fail "swarmscribe-follower --version does not say $installed"
+
 # --- who it runs as, and where it may write --------------------------------------------
 user="$(docker inspect --format '{{.Config.User}}' "$image")"
 [ "$user" = "10001:10001" ] || fail "the image's user is '$user', not 10001:10001"
@@ -109,6 +132,14 @@ if docker run --rm --entrypoint sh "$image" -c \
 fi
 
 # --- how it starts -------------------------------------------------------------------------
+# An init is PID 1, and the follower its child: see the Dockerfile for why.
+entrypoint="$(docker inspect --format '{{json .Config.Entrypoint}}' "$image")"
+[ "$entrypoint" = '["/usr/bin/tini","--","swarmscribe-follower"]' ] \
+  || fail "the entrypoint is $entrypoint, not tini and the follower"
+[ "$(docker inspect --format '{{json .Config.Cmd}}' "$image")" = '["run"]' ] \
+  || fail "the default command is not run"
+docker run --rm --entrypoint /usr/bin/tini "$image" --version >/dev/null \
+  || fail "tini does not run in the image"
 # Read-only root filesystem, no network, no configuration: it names what is missing and
 # exits 2, without a traceback.
 status=0
@@ -199,10 +230,42 @@ if ref != entry["revision"]:
       echo "$output" | grep -q '^device: cuda (' || fail "doctor did not run on the GPU: $output"
     fi
 
-    # PID 1: `docker stop` during start-up ends it with exit 0, well inside Docker's 10 s.
-    # With no network the registration is retried for ever, which is where it is stopped.
     name="follower-check-$$"
-    trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+    trap 'docker rm -f "$name" "$name-early" >/dev/null 2>&1 || true' EXIT
+
+    # A stop at once, before start-up has got anywhere: it must END the container, never be
+    # lost. Lost means Docker kills it when the stop window closes (137), and with the long
+    # window a follower is given (`--stop-timeout 930`) that is a quarter of an hour later,
+    # in the middle of a job. 0: the follower's own handlers caught it (entry.py installs
+    # them before anything is imported). 143: it came before the interpreter was up, and
+    # the init ended the follower. The delays cover the 0.3 s in which it used to be lost.
+    # A stop that lands in the model load waits for the load (it cannot be interrupted),
+    # which is a second for tiny.en and far longer for a large model on a GPU.
+    early_limit=3
+    if [ "$target" = "cuda" ]; then
+      early_limit=60
+    fi
+    for delay in 0 0 0 0.05 0.1 0.15 0.2 0.3 0.5; do
+      docker run -d --name "$name-early" "${locked[@]}" "${gpu[@]}" "${leader[@]}" \
+        -e SWARMSCRIBE_JOIN_TOKEN=not-a-token "$image" >/dev/null
+      sleep "$delay"
+      begun="$(date +%s)"
+      docker stop --time 60 "$name-early" >/dev/null
+      took="$(($(date +%s) - begun))"
+      status="$(docker inspect --format '{{.State.ExitCode}}' "$name-early")"
+      case "$status" in
+        0 | 143) ;;
+        *) fail "a stop $delay s after the start exited $status, not 0 or 143 (137: the stop was lost and it was killed)" ;;
+      esac
+      [ "$took" -lt "$early_limit" ] || fail "a stop $delay s after the start took $took s"
+      if docker logs "$name-early" 2>&1 | grep -q 'Traceback'; then
+        fail "a stop $delay s after the start ended in a traceback"
+      fi
+      docker rm -f "$name-early" >/dev/null
+    done
+
+    # `docker stop` during start-up ends it with exit 0, well inside Docker's 10 s.
+    # With no network the registration is retried for ever, which is where it is stopped.
     docker run -d --name "$name" "${locked[@]}" "${gpu[@]}" "${leader[@]}" \
       -e SWARMSCRIBE_JOIN_TOKEN=not-a-token "$image" >/dev/null
     for _ in $(seq 1 60); do
@@ -210,8 +273,14 @@ if ref != entry["revision"]:
       sleep 1
     done
     docker logs "$name" 2>&1 | grep -q 'loaded on' || fail "the follower never loaded its model"
-    docker exec "$name" cat /proc/1/cmdline | xargs -0 echo | grep -q 'bin/swarmscribe-follower run' \
-      || fail "the follower is not PID 1"
+    # PID 1 is the init, and the follower is the only thing it started.
+    docker exec "$name" cat /proc/1/cmdline | xargs -0 echo \
+      | grep -q -x '/usr/bin/tini -- swarmscribe-follower run' \
+      || fail "PID 1 is not tini running the follower"
+    children="$(docker exec "$name" sh -c \
+      'for s in /proc/[0-9]*/status; do grep -q "^PPid:[[:space:]]*1\$" "$s" && tr "\0" " " <"${s%status}cmdline" && echo; done; true')"
+    echo "$children" | grep -q 'bin/swarmscribe-follower run' \
+      || fail "the follower is not the child of PID 1: $children"
     begun="$(date +%s)"
     docker stop --time 8 "$name" >/dev/null
     took="$(($(date +%s) - begun))"

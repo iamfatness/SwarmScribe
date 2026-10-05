@@ -7,7 +7,8 @@
 # Without MODELS the follower downloads its model on first start into /models. With it, the
 # models are downloaded now, checked against docker/models.lock.json, and the image never
 # asks Hugging Face for anything (SWARMSCRIBE_FOLLOWER_OFFLINE=1); the first name is the
-# start-up model:
+# start-up model. MODELS is names separated by commas, with no spaces (the build fails
+# otherwise):
 #
 #   docker build --build-arg MODELS=distil-large-v3 -t swarmscribe-follower:cpu-distil-large-v3 \
 #     --target cpu -f docker/follower.Dockerfile .
@@ -46,16 +47,25 @@ RUN uv sync --frozen --no-dev --package swarmscribe-follower --no-editable \
 # From the libraries alone, not from the source: a code change does not download them again.
 FROM deps-cpu AS models
 ARG MODELS=""
+# After `--`: whatever MODELS holds is a list of names, never an option of the script.
 RUN --mount=type=bind,source=docker/fetch_models.py,target=/fetch/fetch_models.py \
     --mount=type=bind,source=docker/models.lock.json,target=/fetch/models.lock.json \
     /app/.venv/bin/python /fetch/fetch_models.py \
-      --lock /fetch/models.lock.json --into /models "${MODELS}"
+      --lock /fetch/models.lock.json --into /models -- "${MODELS}"
 
 # --- what both images share --------------------------------------------------------------
 FROM python:3.12-slim-bookworm@sha256:54c85f3c47607a77f32adec749d3c81d1348bf25833671f512b26a9b6d778cb3 AS runtime
+# The follower's version (packages/follower/pyproject.toml). check-follower-image.sh compares
+# the label with the package installed in the image, and fails when they differ.
+ARG VERSION=0.1.0
 LABEL org.opencontainers.image.title="swarmscribe-follower" \
       org.opencontainers.image.description="SwarmScribe follower: transcribes recordings for a leader" \
-      org.opencontainers.image.source="https://github.com/iamfatness/SwarmScribe"
+      org.opencontainers.image.source="https://github.com/iamfatness/SwarmScribe" \
+      org.opencontainers.image.version="${VERSION}"
+# An init as PID 1 (see ENTRYPOINT below). Debian's own package: 24 kB, no dependencies.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tini \
+ && rm -rf /var/lib/apt/lists/*
 # The state and scratch folders are the follower's alone (0700: the credential file is
 # refused in a folder others can write to). /models is world-readable: it holds no secret.
 RUN groupadd --gid 10001 follower \
@@ -74,7 +84,9 @@ ENV PATH="/app/.venv/bin:${PATH}" \
     SWARMSCRIBE_FOLLOWER_SCRATCH_DIR=/scratch \
     SWARMSCRIBE_FOLLOWER_MODEL_DIR=/models \
     SWARMSCRIBE_FOLLOWER_STARTUP_MODEL=${MODELS%%,*} \
-    SWARMSCRIBE_FOLLOWER_OFFLINE=${BAKED:-0}     HF_HUB_CACHE=/models     HF_HUB_OFFLINE=${BAKED:-0}
+    SWARMSCRIBE_FOLLOWER_OFFLINE=${BAKED:-0} \
+    HF_HUB_CACHE=/models \
+    HF_HUB_OFFLINE=${BAKED:-0}
 # HF_HUB_*: the follower sets them itself; the engine CLI in the image (swarmscribe-engine)
 # reads only these two, so a baked image runs it offline against the same cache.
 # Before the environment: a code change does not move a 3 GB model layer.
@@ -86,9 +98,16 @@ USER 10001:10001
 # volume there would copy a baked model on every start. Mount one to keep downloads.
 VOLUME ["/var/lib/swarmscribe-follower", "/scratch"]
 # No HEALTHCHECK yet: the follower listens on no port. Plan F2b adds the listener and it.
-# The follower is PID 1 and handles SIGTERM itself: no shell and no init in between.
+# tini is PID 1 and the follower its only child; no shell in between. The kernel gives PID 1
+# no default action for a signal, so a SIGTERM that reached a follower running as PID 1
+# before Python had installed its handlers was dropped: `docker stop` just after `docker run`
+# was ignored, and the container was killed (137) at the end of the stop window, by then
+# perhaps in the middle of a job. The follower now installs its handlers before it imports
+# anything (entry.py) and then exits 0 on a stop; tini covers the tens of milliseconds
+# before that, in which the interpreter itself starts: it forwards the signal, the child
+# dies of it and the container exits 143. It also reaps what the follower leaves behind.
 STOPSIGNAL SIGTERM
-ENTRYPOINT ["swarmscribe-follower"]
+ENTRYPOINT ["/usr/bin/tini", "--", "swarmscribe-follower"]
 CMD ["run"]
 
 # --- swarmscribe-follower:cpu ---------------------------------------------------------------

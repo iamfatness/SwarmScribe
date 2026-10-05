@@ -82,12 +82,60 @@ def test_the_names_the_follower_defaults_to_are_in_the_lock_file():
         ("", []),
         ("tiny.en", ["tiny.en"]),
         ("large-v3,tiny.en", ["large-v3", "tiny.en"]),
-        (" large-v3 , tiny.en ,large-v3", ["large-v3", "tiny.en"]),
-        ("a b", ["a", "b"]),
+        ("large-v3,tiny.en,large-v3", ["large-v3", "tiny.en"]),
     ],
 )
-def test_model_names_are_split_on_commas_and_spaces_in_order(tool, given, names):
+def test_model_names_are_split_on_commas_in_order(tool, given, names):
     assert tool.names(given) == names
+
+
+# The Dockerfile takes the text before the first comma as the start-up model
+# (`${MODELS%%,*}`). Each of these was read differently by the two: the build passed and the
+# image started on a model named "tiny.en tiny.en", or on a default it did not hold.
+LOOSE = ["a b", "tiny.en tiny.en", " ", ",tiny.en", "tiny.en,", "tiny.en,,large-v3",
+         " tiny.en", "tiny.en, large-v3", "tiny.en\t", "tiny.en\n"]
+
+
+@pytest.mark.parametrize("given", LOOSE)
+def test_spaces_and_empty_items_are_refused(tool, given):
+    with pytest.raises(ValueError, match="commas"):
+        tool.names(given)
+
+
+@pytest.mark.parametrize("given", LOOSE)
+def test_a_loose_list_fails_the_build_before_anything_is_fetched(
+    tool, hub, tmp_path, capsys, given
+):
+    asked, _content = hub
+    code = tool.main(["--lock", str(LOCK), "--into", str(tmp_path / "models"), "--", given])
+    assert code == 2 and asked == []
+    assert "MODELS" in capsys.readouterr().err
+
+
+def start_up_model(models: str) -> str:
+    """What the Dockerfile's `${MODELS%%,*}` gives: the text before the first comma."""
+    return models.split(",", 1)[0]
+
+
+@pytest.mark.parametrize("given", ["", "tiny.en", "large-v3,tiny.en", "large-v3,tiny.en,large-v3"])
+def test_the_dockerfile_and_the_fetcher_agree_on_the_first_model(tool, given):
+    assert start_up_model(given) == (tool.names(given) or [""])[0]
+    line = "    SWARMSCRIBE_FOLLOWER_STARTUP_MODEL=${MODELS%%,*} \\\n"
+    assert line in (DOCKER / "follower.Dockerfile").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("option", ["--pin=tiny.en", "--lock=/etc/passwd", "--into=/", "-h"])
+def test_after_two_dashes_an_option_is_only_a_name_that_is_not_in_the_lock(
+    tool, hub, tmp_path, capsys, monkeypatch, option
+):
+    """The Dockerfile passes MODELS after `--`: a build argument can never be an option."""
+    asked, _content = hub
+    monkeypatch.setattr(tool, "pin", lambda name, repo: pytest.fail("an unpinned fetch"))
+    code = tool.main(["--lock", str(LOCK), "--into", str(tmp_path / "models"), "--", option])
+    assert code == 2 and asked == []
+    assert "not in models.lock.json" in capsys.readouterr().err
+    text = (DOCKER / "follower.Dockerfile").read_text(encoding="utf-8")
+    assert '--lock /fetch/models.lock.json --into /models -- "${MODELS}"' in text
 
 
 def test_a_model_is_downloaded_by_commit_checked_and_made_loadable_offline(tool, hub, tmp_path):

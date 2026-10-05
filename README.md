@@ -88,7 +88,7 @@ The leader needs Postgres. Set:
 | Variable | Meaning |
 |---|---|
 | `SWARMSCRIBE_DATABASE_URL` | e.g. `postgresql://user:pass@host:5432/swarmscribe` |
-| `SWARMSCRIBE_PUBLIC_URL` | the leader's external base URL, used in file links |
+| `SWARMSCRIBE_PUBLIC_URL` | the leader's external base URL, used in file links: an address every follower can reach (the same one for pods and for outside machines) |
 | `SWARMSCRIBE_LINK_KEY` | at least 32 random characters, used to sign file links |
 
 ```
@@ -110,7 +110,7 @@ configured at once). Each person gets a role; roles are cumulative:
 |---|---|
 | viewer | `status`, `whoami`, `locations list`, `jobs list`, `followers list`, `consent report` |
 | operator | viewer + `ingest`, `jobs retry/cancel/priority`, `followers drain` |
-| admin | operator + `locations add/disable/enable`, `tokens create/list/revoke`, `followers revoke`, `console create/list/revoke` (a signed-in person only, never a console) |
+| admin | operator + `locations add/disable/enable`, `tokens create/list/revoke`, `followers revoke`; and, signed in as a person only (never through a console), `console create/list/revoke`, `pool-tokens create/list/revoke` and `profiles set` |
 
 Every admin call is written to the audit log with the person's email, issuer and
 subject, except the console poller's successful reads of status, followers and
@@ -169,6 +169,10 @@ uv run swarmscribe-admin consent report
 uv run swarmscribe-admin console create --name fleet --max-role operator
 uv run swarmscribe-admin console list
 uv run swarmscribe-admin console revoke fleet
+uv run swarmscribe-admin pool-tokens create --name gpu-pods --pool gpu
+uv run swarmscribe-admin pool-tokens revoke gpu-pods
+uv run swarmscribe-admin profiles list
+uv run swarmscribe-admin profiles set cpu --model distil-large-v3 --compute-type int8
 ```
 
 `status --json` also gives `completed_last_day` and `oldest_queued_age_s` (how
@@ -208,6 +212,71 @@ filesystems that invent inode numbers per client are not supported.
 `ingest` asks for a scan within a minute; `jobs cancel` is final for that
 version of the recording until `jobs retry`; `followers revoke` releases the
 follower's work at once.
+
+### Pool tokens versus join tokens
+
+A **join token** expires and has a limited number of uses; use it for a machine
+a person sets up. A **pool token** has no expiry and no limit on uses, and stays
+valid until it is revoked; use it for a pool whose followers come and go by
+themselves (Kubernetes pods). Anyone holding a pool token can register
+followers for as long as it lives, so guard it like a password and revoke it if
+it leaks.
+
+```
+uv run swarmscribe-admin pool-tokens create --name gpu-pods --pool gpu
+uv run swarmscribe-admin pool-tokens list
+uv run swarmscribe-admin pool-tokens revoke gpu-pods
+uv run swarmscribe-admin pool-tokens revoke gpu-pods --revoke-followers
+```
+
+The token is shown once, by `create`; a follower is given it exactly like a
+join token. Names are never reused. `revoke` stops further registrations and
+leaves the followers it registered at work; `--revoke-followers` revokes them
+too (each with its own audit entry, their leases released), which is what a
+leaked token needs.
+
+**Follower rows.** A follower that registers with a pool token takes over the
+row of a `gone` follower of the same token that holds no lease, so pods that
+start and stop do not grow the list of followers (the old credential stops
+working at that moment). These rows are never reused: those of join-token
+followers (an outside machine keeps its identity however long it is off), and
+those of followers that are `draining` or `revoked`.
+
+### Settings profiles
+
+Each device class (`cuda`, `cpu`) transcribes with one profile: a model, a
+compute type and a temperature ladder.
+
+```
+uv run swarmscribe-admin profiles list
+uv run swarmscribe-admin profiles set cuda --model large-v3 --compute-type float16
+uv run swarmscribe-admin profiles set cpu --model distil-large-v3 --compute-type int8 --temperatures 0,0.2,0.4
+```
+
+A change applies to every job claimed after it; a job already leased keeps what
+it was given. A model is a name (`large-v3`, or `owner/name` for a Hugging Face
+repository), never a path. `--temperatures` left out keeps the current ladder.
+
+### What a follower is told
+
+- **Drain.** `followers drain <id>` marks a follower `draining`. A draining
+  follower gets no new work, and hears it on every claim: the empty `204`
+  carries the header `X-SwarmScribe-Directive: drain`, so a follower with
+  nothing to do can wind down too. Deregistering does not end a drain, and
+  there is no command that does.
+- **Fresh links.** `POST /v1/jobs/{id}/links` gives fresh download and upload
+  links for a job that outlasts the two hours its upload links last. Only the
+  follower that holds the job's lease may ask (anyone else is refused, as for
+  any lease call). The claim counts as the first issue; after that, at most one
+  per lease every `SWARMSCRIBE_LINKS_REFRESH_MIN_SECONDS` (60); sooner is
+  answered `429` with `Retry-After`. The lease is not extended: that is the
+  heartbeat's.
+
+### Fleet console
+
+Pool tokens and settings profiles are not managed from the fleet console: their
+routes are for administrators signed in as a person, and a console is refused.
+Use `swarmscribe-admin`.
 
 ### Fleet console credentials
 

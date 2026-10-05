@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -30,6 +31,9 @@ from swarmscribe_leader.db.models import (
     StorageLocation,
 )
 from swarmscribe_leader.db.session import make_engine, make_sessionmaker
+
+# leader_testkit (helpers shared with other packages' tests) sits beside this file.
+sys.path.insert(0, str(Path(__file__).parent))
 
 TEST_DATABASE = "swarmscribe_test"
 REPO_ROOT = Path(__file__).resolve().parents[3]

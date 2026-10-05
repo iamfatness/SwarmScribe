@@ -220,16 +220,20 @@ A leader that needs attention carries a small flag on the right of its link: "no
 (`--bad`) when unreachable, "revoked" (`--bad`) when its credential is revoked, "off"
 (muted) when switched off. The flag is part of the link's text.
 
-With many leaders the rail scrolls on its own.
+With many leaders the list of leaders scrolls inside the rail; the person block (email,
+Theme, Sign out) stays pinned at the bottom.
 
 ### 4.2 Top bar (narrow widths)
 
-At 900px and below the rail is a bar across the top: the brand on the left and a **Menu**
-button on the right (`aria-expanded`, `aria-controls`). Everything else in the rail (the
-nav, the person, Theme, Sign out) is inside the controlled panel, which is `display: none`
-until Menu is pressed. It is a disclosure, not a dialog: the page stays usable, focus stays
-on the button. Escape closes it and returns focus to the button. Following any link in it
-closes it.
+At 900px and below the rail is a bar across the top, sticky so it stays in view as the page
+scrolls: the brand on the left and a **Menu** button on the right (`aria-expanded`,
+`aria-controls`). Everything else in the rail (the nav, the person, Theme, Sign out) is
+inside the controlled panel, which is `display: none` until Menu is pressed. It is a
+disclosure, not a dialog: the page behind it stays in view but does not scroll while it is
+open. Opening it moves focus into the
+menu (to its first link). Escape closes it and returns focus to the Menu button. A click
+outside it closes it and returns focus to the Menu button. Following any link in it closes
+it.
 
 ### 4.3 Page header
 
@@ -377,7 +381,10 @@ Mockup: `docs/superpowers/design/InkConsole.dc.html`.
 - a leader that revoked the console's credential;
 - how many tries failed in the last day, and on which leaders.
 
-It is not shown when there is nothing to list.
+It lists at most five items; when there are more, a plain line beneath counts the rest
+("And 3 more things to look at."). A leader's name inside it never breaks at its hyphen. The
+sheet is as tall as the card beside it, so it never leaves a hole under itself. It is not shown when
+there is nothing to list.
 
 ### 5.3 Sign-in (`/sign-in`)
 

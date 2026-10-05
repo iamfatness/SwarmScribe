@@ -19,7 +19,8 @@ function renderFleet() {
 }
 
 function withHistory(mock: FetchMock, ...names: string[]): FetchMock {
-  for (const name of names) mock.on(`GET /api/leaders/${name}/history?hours=24`, reply(200, history()));
+  for (const name of names)
+    mock.on(`GET /api/leaders/${name}/history?hours=24`, reply(200, history()));
   return mock;
 }
 
@@ -75,33 +76,50 @@ describe("FleetPage", () => {
     expect(within(card).getByText(/oldest waiting 7 min/)).toHaveTextContent(
       "3 followers · default 2, gpu 1 · oldest waiting 7 min",
     );
-    expect(within(card).getByRole("list", { name: "Labels" })).toHaveTextContent("env=prodregion=eu");
-    expect(await within(card).findByRole("img")).toHaveAccessibleName(/^eu-1: Finished per hour/);
+    expect(
+      within(card).getByRole("list", { name: "Labels" }),
+    ).toHaveTextContent("env=prodregion=eu");
+    expect(await within(card).findByRole("img")).toHaveAccessibleName(
+      /^eu-1: Finished per hour/,
+    );
   });
 
   it("links each card's heading to the leader", async () => {
     withHistory(mockFetch().on("GET /api/fleet", reply(200, [EU])), "eu-1");
     renderFleet();
     const card = await findCard("eu-1");
-    const heading = within(card).getByRole("heading", { level: 2, name: "eu-1" });
-    expect(within(heading).getByRole("link", { name: "eu-1" })).toHaveAttribute("href", "/leaders/eu-1/pools");
+    const heading = within(card).getByRole("heading", {
+      level: 2,
+      name: "eu-1",
+    });
+    expect(within(heading).getByRole("link", { name: "eu-1" })).toHaveAttribute(
+      "href",
+      "/leaders/eu-1/pools",
+    );
   });
 
   it("shows a leader that is not answering with its last figures and keeps the others working", async () => {
-    withHistory(mockFetch().on("GET /api/fleet", reply(200, [EU, US])), "eu-1", "us-1");
+    withHistory(
+      mockFetch().on("GET /api/fleet", reply(200, [EU, US])),
+      "eu-1",
+      "us-1",
+    );
     renderFleet();
     const us = await findCard("us-1");
     expect(us).toHaveClass("leader-card-bad");
     expect(within(us).getByText("Not answering")).toBeInTheDocument();
-    expect(within(us).getByText(/^No answer since .+, after four tries\.$/)).toBeInTheDocument();
+    expect(
+      within(us).getByText(/^No answer since .+, after four tries\.$/),
+    ).toBeInTheDocument();
     expect(within(us).getByText(/The last figures are from/)).toHaveTextContent(
       /: 3 waiting, 3 followers\. Recordings already claimed keep going; this console just cannot see them\.$/,
     );
-    expect(within(us).getByText("Last error: It could not be reached.")).toBeInTheDocument();
-    expect(within(us).getByRole("link", { name: "See what us-1 last reported" })).toHaveAttribute(
-      "href",
-      "/leaders/us-1/pools",
-    );
+    expect(
+      within(us).getByText("Last error: It could not be reached."),
+    ).toBeInTheDocument();
+    expect(
+      within(us).getByRole("link", { name: "See what us-1 last reported" }),
+    ).toHaveAttribute("href", "/leaders/us-1/pools");
     // No chart and no fresh figures for a leader that is not answering.
     expect(within(us).queryByRole("img")).not.toBeInTheDocument();
     expect(within(us).queryByRole("term")).not.toBeInTheDocument();
@@ -111,12 +129,19 @@ describe("FleetPage", () => {
 
   it("shows a revoked leader's card with its snapshot time", async () => {
     const revoked = leader({ name: "rev-1", health: "credential_revoked" });
-    withHistory(mockFetch().on("GET /api/fleet", reply(200, [revoked])), "rev-1");
+    withHistory(
+      mockFetch().on("GET /api/fleet", reply(200, [revoked])),
+      "rev-1",
+    );
     renderFleet();
     const card = await findCard("rev-1");
     expect(within(card).getByText("Credential revoked")).toBeInTheDocument();
-    expect(within(card).getByText(/The last figures are from/)).toBeInTheDocument();
-    expect(within(card).getByText(/A console administrator must replace it\.$/)).toBeInTheDocument();
+    expect(
+      within(card).getByText(/The last figures are from/),
+    ).toBeInTheDocument();
+    expect(
+      within(card).getByText(/A console administrator must replace it\.$/),
+    ).toBeInTheDocument();
   });
 
   it("shows a leader that never answered without figures", async () => {
@@ -127,13 +152,26 @@ describe("FleetPage", () => {
       summary: null,
       snapshot: null,
     });
-    withHistory(mockFetch().on("GET /api/fleet", reply(200, [pending])), "new-1");
+    withHistory(
+      mockFetch().on("GET /api/fleet", reply(200, [pending])),
+      "new-1",
+    );
     renderFleet();
     const card = await findCard("new-1");
-    expect(within(card).getByText("Not answering yet, two tries")).toBeInTheDocument();
-    expect(within(card).getByText("No answer yet, after two tries.")).toBeInTheDocument();
-    expect(within(card).getByText("Figures appear after the first check that works.")).toBeInTheDocument();
-    expect(within(card).queryByRole("link", { name: /last reported/ })).not.toBeInTheDocument();
+    expect(
+      within(card).getByText("Not answering yet, two tries"),
+    ).toBeInTheDocument();
+    expect(
+      within(card).getByText("No answer yet, after two tries."),
+    ).toBeInTheDocument();
+    expect(
+      within(card).getByText(
+        "Figures appear after the first check that works.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(card).queryByRole("link", { name: /last reported/ }),
+    ).not.toBeInTheDocument();
     // Nothing to add up: the totals show a dash, never a made-up zero.
     expect(figures(screen.getByRole("region", { name: "Totals" }))).toEqual({
       "Waiting now": "–",
@@ -150,9 +188,13 @@ describe("FleetPage", () => {
     const card = await findCard("off-1");
     expect(within(card).getByText("Switched off")).toBeInTheDocument();
     expect(
-      within(card).getByText("This leader is switched off in the console, so nothing is asked of it."),
+      within(card).getByText(
+        "This leader is switched off in the console, so nothing is asked of it.",
+      ),
     ).toBeInTheDocument();
-    expect(mock.callsTo("GET /api/leaders/off-1/history?hours=24")).toHaveLength(0);
+    expect(
+      mock.callsTo("GET /api/leaders/off-1/history?hours=24"),
+    ).toHaveLength(0);
   });
 
   it("says so when a leader has no followers at work and nothing waiting", async () => {
@@ -170,7 +212,11 @@ describe("FleetPage", () => {
     expect(within(card).getByText(/nothing waiting/)).toHaveTextContent(
       /^No followers at work · nothing waiting$/,
     );
-    expect(figures(screen.getByRole("region", { name: "Totals" }))["Followers at work"]).toBe("0");
+    expect(
+      figures(screen.getByRole("region", { name: "Totals" }))[
+        "Followers at work"
+      ],
+    ).toBe("0");
   });
 
   it("shows a health it does not know as the leader's own word, without a chart or made-up figures", async () => {
@@ -179,13 +225,21 @@ describe("FleetPage", () => {
     renderFleet();
     const card = await findCard("odd-1");
     expect(within(card).getByText("migrating")).toBeInTheDocument();
-    expect(within(card).getByText("The console has no figures for this leader.")).toBeInTheDocument();
+    expect(
+      within(card).getByText("The console has no figures for this leader."),
+    ).toBeInTheDocument();
     expect(within(card).queryByRole("term")).not.toBeInTheDocument();
-    expect(mock.callsTo("GET /api/leaders/odd-1/history?hours=24")).toHaveLength(0);
+    expect(
+      mock.callsTo("GET /api/leaders/odd-1/history?hours=24"),
+    ).toHaveLength(0);
   });
 
   it("adds up the totals and says when they include old figures", async () => {
-    withHistory(mockFetch().on("GET /api/fleet", reply(200, [EU, US])), "eu-1", "us-1");
+    withHistory(
+      mockFetch().on("GET /api/fleet", reply(200, [EU, US])),
+      "eu-1",
+      "us-1",
+    );
     renderFleet();
     await findCard("us-1");
     const totals = screen.getByRole("region", { name: "Totals" });
@@ -204,7 +258,11 @@ describe("FleetPage", () => {
 
   it("lists what needs a look: scan errors, failed tries and a revoked credential", async () => {
     const revoked = leader({ name: "rev-1", health: "credential_revoked" });
-    withHistory(mockFetch().on("GET /api/fleet", reply(200, [EU, revoked])), "eu-1", "rev-1");
+    withHistory(
+      mockFetch().on("GET /api/fleet", reply(200, [EU, revoked])),
+      "eu-1",
+      "rev-1",
+    );
     renderFleet();
     const section = await screen.findByRole("region", { name: "Needs a look" });
     const items = within(section)
@@ -216,23 +274,59 @@ describe("FleetPage", () => {
       "rev-1 could not scan archive. the root folder is not readable",
       "2 tries failed in the last day. 1 on eu-1, 1 on rev-1.",
     ]);
-    expect(within(section).getAllByRole("link", { name: "eu-1 could not scan archive." })[0]).toHaveAttribute(
-      "href",
-      "/leaders/eu-1/locations",
-    );
+    expect(
+      within(section).getAllByRole("link", {
+        name: "eu-1 could not scan archive.",
+      })[0],
+    ).toHaveAttribute("href", "/leaders/eu-1/locations");
     // It comes before the leaders' cards, so it is never below the fold.
     const first = section.parentElement?.firstElementChild;
     expect(first).toBe(section);
   });
 
+  it("lists at most five things under Needs a look and counts the rest", async () => {
+    const many = Array.from({ length: 4 }, (_, i) =>
+      leader({ name: `rev-${i + 1}`, health: "credential_revoked" }),
+    );
+    withHistory(
+      mockFetch().on("GET /api/fleet", reply(200, [EU, ...many])),
+      "eu-1",
+      ...many.map((l) => l.name),
+    );
+    renderFleet();
+    const section = await screen.findByRole("region", { name: "Needs a look" });
+    expect(within(section).getAllByRole("listitem")).toHaveLength(5);
+    // 4 revoked + 5 scan errors (each leader carries EU's) + 1 failed-tries line = 10 in all.
+    expect(concerns([EU, ...many])).toHaveLength(10);
+    expect(
+      within(section).getByText("And 5 more things to look at."),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a leader's name whole inside Needs a look, so it never breaks at its hyphen", async () => {
+    withHistory(mockFetch().on("GET /api/fleet", reply(200, [EU])), "eu-1");
+    renderFleet();
+    const section = await screen.findByRole("region", { name: "Needs a look" });
+    const names = Array.from(section.querySelectorAll("span.nowrap")).map(
+      (el) => el.textContent,
+    );
+    expect(names).toContain("eu-1");
+  });
+
   it("shows no Needs a look section when nothing does", async () => {
     const calm = leader({
-      summary: { ...(EU.summary as NonNullable<typeof EU.summary>), failed_attempts_last_day: 0, scan_errors: [] },
+      summary: {
+        ...(EU.summary as NonNullable<typeof EU.summary>),
+        failed_attempts_last_day: 0,
+        scan_errors: [],
+      },
     });
     withHistory(mockFetch().on("GET /api/fleet", reply(200, [calm])), "eu-1");
     renderFleet();
     await findCard("eu-1");
-    expect(screen.queryByRole("region", { name: "Needs a look" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Needs a look" }),
+    ).not.toBeInTheDocument();
     expect(concerns([calm])).toEqual([]);
   });
 
@@ -240,19 +334,35 @@ describe("FleetPage", () => {
     withHistory(mockFetch().on("GET /api/fleet", reply(200, [EU])), "eu-1");
     renderFleet();
     const checked = await screen.findByText(/Checked at .+, and every 10 s/);
-    expect(checked.closest("[aria-live], [role='status'], [role='alert'], [role='log']")).toBeNull();
+    expect(
+      checked.closest(
+        "[aria-live], [role='status'], [role='alert'], [role='log']",
+      ),
+    ).toBeNull();
     // The count stays in a polite live region: it changes when the filter does.
-    expect(screen.getByText("1 leader").closest("[role='status'], [aria-live='polite']")).not.toBeNull();
+    expect(
+      screen
+        .getByText("1 leader")
+        .closest("[role='status'], [aria-live='polite']"),
+    ).not.toBeNull();
   });
 
   it("keeps the cards when one leader's history request fails", async () => {
-    const usUp = leader({ name: "us-1", labels: { env: "prod", region: "us" } });
+    const usUp = leader({
+      name: "us-1",
+      labels: { env: "prod", region: "us" },
+    });
     const mock = mockFetch().on("GET /api/fleet", reply(200, [EU, usUp]));
     mock.on("GET /api/leaders/eu-1/history?hours=24", reply(200, history()));
-    mock.on("GET /api/leaders/us-1/history?hours=24", fail(502, "leader_unreachable", "down"));
+    mock.on(
+      "GET /api/leaders/us-1/history?hours=24",
+      fail(502, "leader_unreachable", "down"),
+    );
     renderFleet();
     const us = await findCard("us-1");
-    expect(await within(us).findByText("No history to show")).toBeInTheDocument();
+    expect(
+      await within(us).findByText("No history to show"),
+    ).toBeInTheDocument();
     // The card keeps its figures; only its chart is missing.
     expect(figures(us).Waiting).toBe("3");
     const eu = await findCard("eu-1");
@@ -261,22 +371,40 @@ describe("FleetPage", () => {
 
   it("filters by label with pills and keeps the filter in the address", async () => {
     vi.useRealTimers();
-    withHistory(mockFetch().on("GET /api/fleet", reply(200, [EU, US])), "eu-1", "us-1");
+    withHistory(
+      mockFetch().on("GET /api/fleet", reply(200, [EU, US])),
+      "eu-1",
+      "us-1",
+    );
     renderFleet();
     await findCard("us-1");
-    const pills = screen.getByRole("group", { name: "Show leaders with the label" });
-    expect(within(pills).getByRole("button", { name: "All leaders" })).toHaveAttribute("aria-pressed", "true");
-    await userEvent.click(within(pills).getByRole("button", { name: "region = us" }));
+    const pills = screen.getByRole("group", {
+      name: "Show leaders with the label",
+    });
+    expect(
+      within(pills).getByRole("button", { name: "All leaders" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    await userEvent.click(
+      within(pills).getByRole("button", { name: "region = us" }),
+    );
     expect(queryCard("eu-1")).not.toBeInTheDocument();
     expect(queryCard("us-1")).toBeInTheDocument();
     expect(window.location.search).toBe("?label=region%3Dus");
     expect(screen.getByText(/1 of 2 leaders/)).toBeInTheDocument();
-    expect(within(pills).getByRole("button", { name: "region = us" })).toHaveAttribute("aria-pressed", "true");
-    expect(within(pills).getByRole("button", { name: "All leaders" })).toHaveAttribute("aria-pressed", "false");
+    expect(
+      within(pills).getByRole("button", { name: "region = us" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      within(pills).getByRole("button", { name: "All leaders" }),
+    ).toHaveAttribute("aria-pressed", "false");
     // The totals follow the filter.
-    expect(figures(screen.getByRole("region", { name: "Totals" }))["Waiting now"]).toBe("3");
+    expect(
+      figures(screen.getByRole("region", { name: "Totals" }))["Waiting now"],
+    ).toBe("3");
     // Pressing the chosen pill again clears the filter.
-    await userEvent.click(within(pills).getByRole("button", { name: "region = us" }));
+    await userEvent.click(
+      within(pills).getByRole("button", { name: "region = us" }),
+    );
     expect(window.location.search).toBe("");
     expect(queryCard("eu-1")).toBeInTheDocument();
   });
@@ -284,7 +412,11 @@ describe("FleetPage", () => {
   it("filters by a label whose value holds an equals sign", async () => {
     vi.useRealTimers();
     const odd = leader({ name: "odd-1", labels: { team: "a=b" } });
-    withHistory(mockFetch().on("GET /api/fleet", reply(200, [EU, odd])), "eu-1", "odd-1");
+    withHistory(
+      mockFetch().on("GET /api/fleet", reply(200, [EU, odd])),
+      "eu-1",
+      "odd-1",
+    );
     renderFleet();
     await findCard("odd-1");
     await userEvent.click(screen.getByRole("button", { name: "team = a=b" }));
@@ -299,11 +431,20 @@ describe("FleetPage", () => {
       Array.from({ length: LABEL_PILL_LIMIT + 1 }, (_, i) => [`k${i}`, "v"]),
     );
     const many = leader({ name: "many-1", labels });
-    withHistory(mockFetch().on("GET /api/fleet", reply(200, [EU, many])), "eu-1", "many-1");
+    withHistory(
+      mockFetch().on("GET /api/fleet", reply(200, [EU, many])),
+      "eu-1",
+      "many-1",
+    );
     renderFleet();
     await findCard("many-1");
-    expect(screen.queryByRole("group", { name: "Show leaders with the label" })).not.toBeInTheDocument();
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Label" }), "k0=v");
+    expect(
+      screen.queryByRole("group", { name: "Show leaders with the label" }),
+    ).not.toBeInTheDocument();
+    await userEvent.selectOptions(
+      screen.getByRole("combobox", { name: "Label" }),
+      "k0=v",
+    );
     expect(queryCard("eu-1")).not.toBeInTheDocument();
     expect(window.location.search).toBe("?label=k0%3Dv");
   });
@@ -313,8 +454,12 @@ describe("FleetPage", () => {
     window.history.replaceState(null, "", "/?label=region%3Dmoon");
     withHistory(mockFetch().on("GET /api/fleet", reply(200, [EU])), "eu-1");
     renderFleet();
-    expect(await screen.findByText("No leader has the label region=moon.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "region = moon" })).toHaveAttribute("aria-pressed", "true");
+    expect(
+      await screen.findByText("No leader has the label region=moon."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "region = moon" }),
+    ).toHaveAttribute("aria-pressed", "true");
     await userEvent.click(screen.getByRole("button", { name: "All leaders" }));
     expect(await findCard("eu-1")).toBeInTheDocument();
   });
@@ -344,15 +489,26 @@ describe("FleetPage", () => {
   it("says when the person sees no leaders", async () => {
     mockFetch().on("GET /api/fleet", reply(200, []));
     renderFleet();
-    expect(await screen.findByText(/You have no role on any leader yet/)).toBeInTheDocument();
-    expect(screen.queryByRole("region", { name: "Totals" })).not.toBeInTheDocument();
+    expect(
+      await screen.findByText(/You have no role on any leader yet/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Totals" }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows the error with a retry when the first load fails", async () => {
-    mockFetch().on("GET /api/fleet", fail(503, "unavailable", "service temporarily unavailable"));
+    mockFetch().on(
+      "GET /api/fleet",
+      fail(503, "unavailable", "service temporarily unavailable"),
+    );
     renderFleet();
-    expect(await screen.findByRole("alert")).toHaveTextContent("temporarily unavailable");
-    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "temporarily unavailable",
+    );
+    expect(
+      screen.getByRole("button", { name: "Try again" }),
+    ).toBeInTheDocument();
   });
 
   it("keeps one heading element from loading to loaded, so focus on it is not lost", async () => {
@@ -368,18 +524,27 @@ describe("FleetPage", () => {
       "eu-1",
     );
     renderFleet();
-    const heading = await screen.findByRole("heading", { level: 1, name: "Fleet" });
+    const heading = await screen.findByRole("heading", {
+      level: 1,
+      name: "Fleet",
+    });
     expect(screen.getByRole("status")).toHaveTextContent("Loading the fleet…");
     heading.tabIndex = -1;
     heading.focus();
     release();
     await findCard("eu-1");
-    expect(screen.getByRole("heading", { level: 1, name: "Fleet" })).toBe(heading);
+    expect(screen.getByRole("heading", { level: 1, name: "Fleet" })).toBe(
+      heading,
+    );
     expect(heading).toHaveFocus();
   });
 
   it("uses no table and no style attribute", async () => {
-    withHistory(mockFetch().on("GET /api/fleet", reply(200, [EU, US])), "eu-1", "us-1");
+    withHistory(
+      mockFetch().on("GET /api/fleet", reply(200, [EU, US])),
+      "eu-1",
+      "us-1",
+    );
     const { container } = renderFleet();
     await findCard("us-1");
     expect(screen.queryByRole("table")).not.toBeInTheDocument();

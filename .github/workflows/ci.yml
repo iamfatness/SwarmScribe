@@ -176,6 +176,18 @@ jobs:
           docker compose -f e2e/follower-compose/docker-compose.yml
           --profile followers down -v
 
+  # The cuda image is built and checked for what it holds. It is never RUN on a GPU here:
+  # GitHub's runners have none (follower spec, ruling R5). See the F2 outcomes document.
+  follower-cuda-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the cuda follower image, without a model
+        run: docker build -t swarmscribe-follower:cuda --target cuda -f docker/follower.Dockerfile .
+      - name: Check it (cuBLAS loads by name; without a GPU it says so and exits 3)
+        run: bash docker/check-follower-image.sh swarmscribe-follower:cuda cuda
+
   chart:
     runs-on: ubuntu-latest
     steps:

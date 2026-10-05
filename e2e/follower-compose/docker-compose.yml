@@ -59,6 +59,15 @@ x-follower: &follower
     SWARMSCRIBE_JOIN_TOKEN_FILE: /run/secrets/join-token
     # Unset in Compose and Kubernetes arrives as an empty string: it must mean "none".
     SWARMSCRIBE_LEADER_CA_FILE: ""
+    # Room for the model and the four- and eight-minute recordings, and not for an hour:
+    # run_e2e.py queues one, and the memory guard must refuse it (spec 5.7).
+    SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB: "2500"
+  # The image's own HEALTHCHECK on /healthz, asked more often than its 30 s.
+  healthcheck:
+    interval: 2s
+    timeout: 5s
+    retries: 3
+    start_period: 1s
   volumes:
     - ./work/secrets:/run/secrets:ro
 

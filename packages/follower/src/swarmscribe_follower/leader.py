@@ -41,6 +41,7 @@ from swarmscribe_protocol import (
 from . import FOLLOWER_VERSION
 
 TRANSIENT_STATUSES = frozenset({429, 500, 502, 503, 504})
+REQUEST_TIMEOUT_SECONDS = 30.0  # how long one request to the leader may take
 DEFAULT_NO_WORK_SECONDS = 10.0
 Result = TypeVar("Result")
 
@@ -152,7 +153,7 @@ class LeaderClient:
         credential: str | None = None,
         transport: httpx.BaseTransport | None = None,
         verify: Any = True,
-        timeout: float = 30.0,
+        timeout: float = REQUEST_TIMEOUT_SECONDS,
     ) -> None:
         self.credential = credential
         # `trust_env` stays on, so HTTPS_PROXY and the CA environment are honoured (follower

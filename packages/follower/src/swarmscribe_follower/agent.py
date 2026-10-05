@@ -76,6 +76,8 @@ from .job import (
 )
 from .leader import Interrupted, LeaderClient, NoWork, Refused, Transient, retrying
 from .lease import SHUTDOWN, JobControl
+from .memory import MemoryGuard
+from .metrics import Metrics
 from .models import ModelHost, ModelUnavailable, OutOfMemory
 from .scratch import Scratch, ScratchError, ScratchNotOurs, ScratchOutside
 from .signals import StopSignals
@@ -103,6 +105,7 @@ SCRATCH_FAILURE_LIMIT = len(SCRATCH_RETRY_WAITS) + 1
 # 30 s allowance in the estimate, and four times that covers a slow link.
 FINISH_CAP_SECONDS = 120.0
 POLL_SECONDS = 0.1  # how often the main thread looks at the signal counter
+SUPERVISOR_SILENCE_SECONDS = 30.0  # /healthz: the main thread must have ticked this recently
 SCRATCH_FATAL = frozenset({ScratchNotOurs.__name__, ScratchOutside.__name__})
 
 
@@ -123,7 +126,13 @@ class Agent:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         hold_lock: Callable[..., BinaryIO] = hold_state_lock,
+        metrics: Metrics | None = None,
+        guard: MemoryGuard | None = None,
     ) -> None:
+        self._guard = guard
+        self.metrics = metrics or Metrics()
+        self.metrics.watch(state=self.state, progress=self.progress)
+        self._ticked = time.monotonic()
         self._settings, self._client, self._links = settings, client, links
         self._models, self._scratch, self._store, self._probe = models, scratch, store, probe
         self._interval_override, self._parked_poll = heartbeat_interval, parked_poll_seconds
@@ -141,6 +150,37 @@ class Agent:
         self.follower_id: str | None = None
         self.drained = False
         self.exit_reason = ""
+
+    # --- what the listener is told -------------------------------------------------------
+
+    def tick(self) -> None:
+        """The supervising thread is alive. `run_supervised` calls this every time it goes
+        round; anything else that supervises an agent (the F4 Windows service) must too."""
+        self._ticked = time.monotonic()
+
+    def health(self) -> tuple[bool, str]:
+        """Whether the follower's threads are alive, and a line saying so (follower spec 9).
+        Never whether the leader answers. True while the model loads: the supervising thread
+        ticks through it."""
+        if time.monotonic() - self._ticked > SUPERVISOR_SILENCE_SECONDS:
+            return False, "the supervising thread has stopped"
+        runner = self._runner
+        if runner is not None and runner.keeper_stalled():
+            return False, "the lease keeper has stopped"
+        return True, "ok"
+
+    def state(self) -> str:
+        """One of metrics.STATES."""
+        if self._stopping.is_set():
+            return "stopping"
+        control = self._control
+        if self.drained or (control is not None and control.draining):
+            return "draining"
+        return "working" if control is not None else "idle"
+
+    def progress(self) -> float | None:
+        control = self._control
+        return control.progress if control is not None else None
 
     # --- before the loop -----------------------------------------------------------------
 
@@ -296,6 +336,8 @@ class Agent:
             heartbeat_interval=interval,
             clock=self._clock,
             sleep=self._sleep,
+            metrics=self.metrics,
+            guard=self._guard,
         )
 
     def register(self) -> None:
@@ -408,6 +450,7 @@ class Agent:
                 continue
             self.drained = False
             result = self._run(answer)
+            self.metrics.job_ended(result.outcome)
             if result.outcome != SCRATCH_BROKEN:
                 self._scratch_failures = 0
             self._after(result)
@@ -552,10 +595,12 @@ class Agent:
         seen = signals.count
         if seen:  # a stop that arrived before start-up began: nothing is to be started
             self.stop(now=seen >= 2)
+        self.tick()  # supervision starts now, whether or not the worker outlives one poll
         worker.start()
         try:
             while worker.is_alive():
                 worker.join(poll)
+                self.tick()
                 arrived = signals.count
                 if arrived > seen:
                     seen = arrived

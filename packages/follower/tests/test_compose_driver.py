@@ -293,3 +293,17 @@ def test_no_port_another_test_uses_is_published(loaded):
     text = (COMPOSE / "docker-compose.yml").read_text(encoding="utf-8")
     for port in ("8900", "8901", '"5432:5432"', "8080:", "18080", "18443"):
         assert port not in text, port
+
+
+def test_the_memory_limit_admits_the_long_recordings_and_refuses_the_hour(loaded):
+    from swarmscribe_follower.memory import job_mb
+
+    compose = yaml.safe_load((COMPOSE / "docker-compose.yml").read_text(encoding="utf-8"))
+    environment = compose["services"]["follower-1"]["environment"]
+    limit = int(environment["SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB"])
+    # Refused whatever the model holds; the driver writes exactly an hour.
+    assert job_mb(3600, split=False) > limit
+    # Admitted with room to spare: large-v3 on a GPU holds about 1.1 GB on the host.
+    longest = 96 * loaded.fixture_seconds()
+    assert 1100 + job_mb(longest, split=True) < limit
+    assert loaded.TOO_LONG not in loaded.SHORT[loaded.TALKS]

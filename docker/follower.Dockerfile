@@ -2,7 +2,8 @@
 # swarmscribe-follower: the agent that takes recordings from a leader and transcribes them
 # (follower spec, section 8.1). Build from the repository root; `cpu` is the default target:
 #
-#   docker build -t swarmscribe-follower:cpu --target cpu -f docker/follower.Dockerfile .
+#   docker build -t swarmscribe-follower:cpu  --target cpu  -f docker/follower.Dockerfile .
+#   docker build -t swarmscribe-follower:cuda --target cuda -f docker/follower.Dockerfile .
 #
 # Without MODELS the follower downloads its model on first start into /models. With it, the
 # models are downloaded now, checked against docker/models.lock.json, and the image never
@@ -10,8 +11,8 @@
 # start-up model. MODELS is names separated by commas, with no spaces (the build fails
 # otherwise):
 #
-#   docker build --build-arg MODELS=distil-large-v3 -t swarmscribe-follower:cpu-distil-large-v3 \
-#     --target cpu -f docker/follower.Dockerfile .
+#   docker build --build-arg MODELS=large-v3 -t swarmscribe-follower:cuda-large-v3 \
+#     --target cuda -f docker/follower.Dockerfile .
 #
 # The base image is pinned by tag and digest, as in console.Dockerfile; move both together.
 
@@ -41,6 +42,15 @@ COPY packages/follower packages/follower
 # --no-editable: the three packages are installed as wheels, so the final image needs
 # /app/.venv and nothing of the source tree. uv's lock file is created world-writable.
 RUN uv sync --frozen --no-dev --package swarmscribe-follower --no-editable \
+ && rm -f /app/.venv/.lock
+
+# --- the same, with cuBLAS from the nvidia wheel (the `cuda` extra) ----------------------
+FROM manifests AS build-cuda
+RUN uv sync --frozen --no-dev --package swarmscribe-follower --extra cuda --no-install-workspace
+COPY packages/protocol packages/protocol
+COPY packages/engine packages/engine
+COPY packages/follower packages/follower
+RUN uv sync --frozen --no-dev --package swarmscribe-follower --extra cuda --no-editable \
  && rm -f /app/.venv/.lock
 
 # --- the baked models (an empty folder when MODELS is empty) ------------------------------
@@ -86,7 +96,8 @@ ENV PATH="/app/.venv/bin:${PATH}" \
     SWARMSCRIBE_FOLLOWER_STARTUP_MODEL=${MODELS%%,*} \
     SWARMSCRIBE_FOLLOWER_OFFLINE=${BAKED:-0} \
     HF_HUB_CACHE=/models \
-    HF_HUB_OFFLINE=${BAKED:-0}
+    HF_HUB_OFFLINE=${BAKED:-0} \
+    SWARMSCRIBE_FOLLOWER_HEALTH_ADDR=127.0.0.1:9108
 # HF_HUB_*: the follower sets them itself; the engine CLI in the image (swarmscribe-engine)
 # reads only these two, so a baked image runs it offline against the same cache.
 # Before the environment: a code change does not move a 3 GB model layer.
@@ -97,7 +108,11 @@ USER 10001:10001
 # recording is ever written into the container's own layer. /models is not declared: a
 # volume there would copy a baked model on every start. Mount one to keep downloads.
 VOLUME ["/var/lib/swarmscribe-follower", "/scratch"]
-# No HEALTHCHECK yet: the follower listens on no port. Plan F2b adds the listener and it.
+# /healthz says the follower's threads are alive; it answers while the model loads and
+# while the leader is away. Loopback only: nothing outside the container can reach it. A
+# follower started with the listener turned off (the variable set to nothing) is not probed.
+# The probe's `python -c` child is reaped by the init every time.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD ["python", "-c", "import os, sys, urllib.request; a = os.environ.get('SWARMSCRIBE_FOLLOWER_HEALTH_ADDR', ''); sys.exit(0 if not a or urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://' + a + '/healthz', timeout=3).status == 200 else 1)"]
 # tini is PID 1 and the follower its only child; no shell in between. The kernel gives PID 1
 # no default action for a signal, so a SIGTERM that reached a follower running as PID 1
 # before Python had installed its handlers was dropped: `docker stop` just after `docker run`
@@ -110,6 +125,16 @@ STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/bin/tini", "--", "swarmscribe-follower"]
 CMD ["run"]
 
-# --- swarmscribe-follower:cpu ---------------------------------------------------------------
+# --- swarmscribe-follower:cuda -------------------------------------------------------------
+FROM runtime AS cuda
+COPY --from=build-cuda /app/.venv /app/.venv
+# CTranslate2 loads cuBLAS by name at the first inference; the driver's own libraries
+# (libcuda) and nvidia-smi come from the NVIDIA container runtime (`--gpus all`). This image
+# is for a GPU: without one it says so and exits 3, where `auto` would quietly use the CPU.
+ENV LD_LIBRARY_PATH=/app/.venv/lib/python3.12/site-packages/nvidia/cublas/lib \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    SWARMSCRIBE_FOLLOWER_DEVICE=cuda
+
+# --- swarmscribe-follower:cpu (last: the default target) ----------------------------------
 FROM runtime AS cpu
 COPY --from=build-cpu /app/.venv /app/.venv

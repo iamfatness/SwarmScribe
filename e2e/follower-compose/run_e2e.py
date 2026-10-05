@@ -12,9 +12,11 @@ network with no route out. What it proves, in order:
 3. the killed follower, started again, reuses its credential and finds its scratch empty;
 4. a follower stopped with SIGTERM in the middle of a job releases it (no attempt is
    counted) and exits 0 within the stop window;
-5. a drained follower exits 0, exits 0 again when started again, and takes nothing more;
-6. a revoked follower exits 4, and 4 again when started again;
-7. the recording without consent is never queued, and no follower log holds the join
+5. an hour-long recording is refused by the memory guard, three times, and parked as
+   failed with its reason, without the engine ever reading it; `/metrics` counts all of it;
+6. a drained follower exits 0, exits 0 again when started again, and takes nothing more;
+7. a revoked follower exits 4, and 4 again when started again;
+8. the recording without consent is never queued, and no follower log holds the join
    token, a file link or a word of a transcript.
 
 Administration is done with the leader's own functions against its database, as
@@ -55,6 +57,7 @@ from swarmscribe_protocol import SegmentsDocument
 
 HERE = Path(__file__).resolve().parent
 COMPOSE_FILE = HERE / "docker-compose.yml"
+GPU_FILE = HERE / "docker-compose.gpu.yml"
 WORK = HERE / "work"
 DATA = WORK / "data"  # mounted at /data in the leaders
 SECRETS = WORK / "secrets"  # mounted at /run/secrets in the followers
@@ -79,6 +82,9 @@ class Target:
 # CI, and the default. Four minutes of audio: on two cores tiny.en needs some 30 s for it
 # on a fast machine and about a minute on a CI runner.
 CPU = Target("cpu", "tiny.en", "int8", (COMPOSE_FILE,), 48)
+# `run --gpu`, on a machine with an NVIDIA GPU: FOLLOWER_IMAGE names a cuda image with
+# large-v3 baked in, and the followers are given the GPU. Eight minutes of audio.
+GPU = Target("cuda", "large-v3", "float16", (COMPOSE_FILE, GPU_FILE), 96)
 target = CPU
 
 # The fixture: the left channel says "The weather today is clear and bright", then the right
@@ -92,6 +98,7 @@ SHORT = {
 }
 UNCONSENTED = "private/held.wav"  # in CALLS, matched by no line of its consent.txt
 KILLED, STOPPED, AFTER_DRAIN = "long/kill.wav", "long/stop.wav", "day2/after-drain.wav"
+TOO_LONG = "an-hour.wav"  # in TALKS: more than the followers' memory limit allows
 CONSENT = {CALLS: "day*/*.wav\nlong/*.wav\n", TALKS: "*.wav\n"}
 
 LEASE_SECONDS = 8.0  # SWARMSCRIBE_LEASE_SECONDS in docker-compose.yml
@@ -130,6 +137,18 @@ def write_recording(path: Path, repeats: int = 1) -> None:
         out.setparams(params)
         for _ in range(repeats):
             out.writeframes(frames)
+    partial.replace(path)
+
+
+def write_silence(path: Path, seconds: int) -> None:
+    """A mono recording of nothing, as small as a WAV file gets (8 kHz, 8 bits)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_name(path.name + ".part")
+    with wave.open(str(partial), "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(1)
+        out.setframerate(8000)
+        out.writeframes(bytes([128]) * 8000 * seconds)
     partial.replace(path)
 
 
@@ -301,6 +320,36 @@ def a_follower_gave_up() -> str | None:
 
 def start(service: str) -> None:
     must(compose("start", service), f"starting {service}")
+
+
+def health(service: str) -> str:
+    """Docker's own view of the container, from the image's HEALTHCHECK."""
+    container_id = compose("ps", "-a", "-q", service).stdout.strip()
+    done = subprocess.run(
+        ["docker", "inspect", "--format", "{{.State.Health.Status}}", container_id],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    return done.stdout.strip()
+
+
+def metrics(service: str) -> dict[str, float]:
+    """The follower's /metrics, asked from inside its container (the listener is on
+    loopback): {sample with its labels: value}."""
+    fetch = (
+        "import urllib.request;"
+        "print(urllib.request.build_opener(urllib.request.ProxyHandler({}))"
+        ".open('http://127.0.0.1:9108/metrics', timeout=5).read().decode())"
+    )
+    done = compose("exec", "-T", service, "python", "-c", fetch)
+    text = must(done, f"reading {service}'s metrics")
+    found = {}
+    for line in text.splitlines():
+        if line and not line.startswith("#"):
+            name, _, number = line.rpartition(" ")
+            found[name] = float(number)
+    return found
 
 
 async def wait_for_exit(service: str, *, after: str | None, within: float) -> Container:
@@ -483,6 +532,11 @@ async def scenario(sessions: Sessions) -> Report:
         return all(registrations(name) for name in FOLLOWERS)
 
     await until(both_said_so, "both followers to log their registration", 30.0)
+
+    async def both_healthy() -> bool:
+        return all(health(name) == "healthy" for name in FOLLOWERS)
+
+    await until(both_healthy, "Docker to report both followers healthy", 60.0)
     service_of = {registrations(name)[0]: name for name in FOLLOWERS}
     rows = await followers(sessions)
     expect(set(service_of) == set(rows), "the followers' logs and the leader disagree on their ids")
@@ -532,6 +586,11 @@ async def scenario(sessions: Sessions) -> Report:
         f"{LEASE_SECONDS:.0f} s lease; raise the target's long_repeats",
     )
     check_outputs(CALLS, KILLED, repeats=target.long_repeats)
+    survivor = service_of[attempts[1][0]]
+    expect(
+        health(survivor) == "healthy",
+        f"{survivor} is {health(survivor)} after a long job under a short lease",
+    )
 
     # 3. Started again, the killed follower is the same follower, with an empty scratch.
     await come_back(sessions, service_of[victim], victim)
@@ -565,7 +624,59 @@ async def scenario(sessions: Sessions) -> Report:
     check_outputs(CALLS, STOPPED, repeats=target.long_repeats)
     await come_back(sessions, service_of[holder], holder)
 
-    # 5. Drain: exit 0, exit 0 again when started again, and nothing more is taken.
+    # 5. The memory guard refuses a recording too long for the followers' limit, on every
+    # attempt, and the leader parks the job with the reason; /metrics counts it all.
+    write_silence(DATA / TALKS / TOO_LONG, 3600)
+
+    async def parked() -> Job | None:
+        job = await job_of(sessions, TALKS, TOO_LONG)
+        return job if job is not None and job.state == "failed" else None
+
+    job = await until(parked, f"{TOO_LONG} to be refused for good")
+    reason = job.failure_reason or ""
+    expect(
+        reason.startswith("out_of_resources: ") and "60 minutes" in reason,
+        f"{TOO_LONG} failed with an unexpected reason: {reason[:200]}",
+    )
+    attempts = await attempts_of(sessions, job)
+    expect(
+        [outcome for _, outcome, _ in attempts] == ["failed"] * 3,
+        f"{TOO_LONG}: expected three failed attempts, got {[a[1] for a in attempts]}",
+    )
+    expect(
+        not transcript(TALKS, TOO_LONG, "txt").exists(), f"{TOO_LONG} was transcribed anyway"
+    )
+    p = "swarmscribe_follower_"
+
+    def totals(counted: list[dict[str, float]]) -> Callable[[str], float]:
+        return lambda sample: sum(follower.get(sample, 0.0) for follower in counted)
+
+    async def counted_in_metrics() -> list[dict[str, float]] | None:
+        # The follower counts a failure a moment after its `fail` call returns, which is
+        # after the leader shows the job parked: ask until the counts are there.
+        counted = [metrics(name) for name in FOLLOWERS]
+        total = totals(counted)
+        done = (
+            total(p + 'jobs_total{outcome="failed"}') == 3
+            and total(p + 'jobs_total{outcome="completed"}') >= 1
+            and total(p + "audio_seconds_total") > 0
+            and total(p + "download_bytes_total") > 0
+            and all(follower.get(p + 'state{state="idle"}') == 1.0 for follower in counted)
+        )
+        return counted if done else None
+
+    counted = await until(counted_in_metrics, "the refusals to be counted in /metrics")
+    total = totals(counted)
+    expect(total(p + 'jobs_total{outcome="failed"}') == 3, "the refusals are not in /metrics")
+    expect(total(p + 'jobs_total{outcome="completed"}') >= 1, "no completion is in /metrics")
+    expect(total(p + "audio_seconds_total") > 0, "no audio is counted in /metrics")
+    expect(total(p + "download_bytes_total") > 0, "no download is counted in /metrics")
+    expect(
+        all(follower.get(p + 'state{state="idle"}') == 1.0 for follower in counted),
+        "an idle follower does not say so in /metrics",
+    )
+
+    # 6. Drain: exit 0, exit 0 again when started again, and nothing more is taken.
     drained, revoked = sorted(service_of, key=service_of.get)
     before = container(service_of[drained])
     async with sessions() as session:
@@ -586,7 +697,7 @@ async def scenario(sessions: Sessions) -> Report:
     check_outputs(CALLS, AFTER_DRAIN)
     expect((await followers(sessions))[drained].state == "draining", "the drain did not last")
 
-    # 6. Revoke: exit 4, and 4 again.
+    # 7. Revoke: exit 4, and 4 again.
     before = container(service_of[revoked])
     async with sessions() as session:
         await revoke_follower(session, uuid.UUID(revoked), now=utcnow(), actor="e2e")
@@ -597,7 +708,7 @@ async def scenario(sessions: Sessions) -> Report:
     again = await wait_for_exit(service_of[revoked], after=ended.finished_at, within=60.0)
     expect(again.exit_code == 4, f"a revoked follower, restarted, exited {again.exit_code}")
 
-    # 7. Nothing registered twice, nothing without consent was touched, nothing leaked.
+    # 8. Nothing registered twice, nothing without consent was touched, nothing leaked.
     rows = await followers(sessions)
     expect(len(rows) == len(FOLLOWERS), f"the leader has {len(rows)} follower rows, not 2")
     expect(rows[revoked].state == "revoked", "the revocation did not last")
@@ -650,8 +761,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="SwarmScribe follower Compose scenario")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("prepare", help="write the recordings and folders (before up)")
-    commands.add_parser("run", help="run the scenario against the running Compose project")
+    scenario_command = commands.add_parser(
+        "run", help="run the scenario against the running Compose project"
+    )
+    scenario_command.add_argument(
+        "--gpu", action="store_true", help="the followers are a cuda image and get the GPU"
+    )
     args = parser.parse_args()
+    global target
+    target = GPU if getattr(args, "gpu", False) else CPU
     try:
         if args.command == "prepare":
             prepare()

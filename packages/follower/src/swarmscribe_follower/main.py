@@ -24,7 +24,10 @@ from .config import Settings
 from .credentials import CredentialFileError, CredentialStore
 from .device import cached_models, probe
 from .errors import EXIT_CONFIGURATION, EXIT_OK, EXIT_UNFIT, FollowerExit
+from .health import HealthServer
 from .leader import LeaderClient, Refused, Transient
+from .memory import MemoryGuard, find_limit
+from .metrics import Metrics
 from .models import ModelHost, ModelUnavailable, OutOfMemory
 from .scratch import Scratch
 from .signals import StopSignals
@@ -137,14 +140,22 @@ def build(settings: Settings) -> Agent:
     except DeviceUnavailableError as error:
         raise FollowerExit(EXIT_UNFIT, str(error)) from None
     verify = tls(settings)
+    metrics = Metrics()
+    limit = find_limit(settings.memory_limit_mb)
     return Agent(
         settings,
         client=LeaderClient(settings.leader_url, verify=verify),
         links=Links(verify=verify, allow_http=settings.allow_http),
-        models=ModelHost(found.choice.device, allowed=frozenset(settings.allowed_models)),
+        models=ModelHost(
+            found.choice.device,
+            allowed=frozenset(settings.allowed_models),
+            on_loaded=metrics.model_loaded,
+        ),
         scratch=Scratch(settings.scratch, settings.state_dir),
         store=CredentialStore(settings.credential_file),
         probe=found,
+        metrics=metrics,
+        guard=MemoryGuard(limit) if limit is not None else None,
     )
 
 
@@ -158,7 +169,19 @@ def command_run(settings: Settings, build: Build, signals: StopSignals | None = 
         logger.info("stopping: stopped before it started")
         return EXIT_OK
     agent = build(settings)
-    return agent.run_supervised(signals=signals)
+    listener = None
+    if settings.health_address is not None:
+        # Before the model is loaded (spec 5.2, step 2): a slow load or a first download
+        # must not look like a failed start to whoever probes /healthz.
+        listener = HealthServer(
+            settings.health_address, healthy=agent.health, metrics=agent.metrics.render
+        )
+        listener.start()
+    try:
+        return agent.run_supervised(signals=signals)
+    finally:
+        if listener is not None:
+            listener.close()
 
 
 def command_join(
@@ -307,6 +330,11 @@ def command_doctor(
     gpu = f" ({found.gpu_name}, {found.gpu_memory_mb} MiB)" if found.gpu_name else ""
     print(f"device: {choice.device}{gpu}", file=out)
     print(f"cached models: {', '.join(cached_models(settings.model_dir)) or '(none)'}", file=out)
+    limit = find_limit(settings.memory_limit_mb)
+    if limit is None:
+        print("memory: unknown (recordings are not checked against it)", file=out)
+    else:
+        print(f"memory: {limit.megabytes} MiB may be used ({limit.source})", file=out)
     if load_model:
         models = host(choice.device, allowed=frozenset(settings.allowed_models))
         try:

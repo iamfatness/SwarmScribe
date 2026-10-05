@@ -27,7 +27,14 @@ from swarmscribe_engine import (
 )
 from swarmscribe_protocol import ClaimResponse, FailureCode, JobLinks, OutputChecksums
 
-from .leader import Interrupted, LeaderClient, Refused, Transient, retrying
+from .leader import (
+    REQUEST_TIMEOUT_SECONDS,
+    Interrupted,
+    LeaderClient,
+    Refused,
+    Transient,
+    retrying,
+)
 from .lease import (
     CANCELLED,
     LEASE_GONE,
@@ -40,6 +47,8 @@ from .lease import (
     JobStopped,
     LeaseKeeper,
 )
+from .memory import MemoryGuard
+from .metrics import Metrics
 from .models import ModelHost, ModelUnavailable, OutOfMemory, is_out_of_memory
 from .scratch import Scratch, ScratchDiskFull, ScratchError, ScratchWipeFailed
 from .transfer import (
@@ -62,6 +71,7 @@ SUBMIT_500_LIMIT = 5
 TELL_ATTEMPTS = 3
 TELL_WAIT_CAP_SECONDS = 10.0
 UPLOAD_AGAIN = frozenset({"outputs_missing", "checksum_mismatch", "outputs_changed"})
+KEEPER_INTERVALS = 3  # /healthz: the lease keeper must have gone round within this many
 
 # JobResult.outcome
 COMPLETED = "completed"
@@ -141,10 +151,15 @@ class JobRunner:
         heartbeat_interval: float,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        metrics: Metrics | None = None,
+        guard: MemoryGuard | None = None,
     ) -> None:
         self._client, self._links, self._models, self._scratch = client, links, models, scratch
         self._device, self._interval = device, heartbeat_interval
         self._clock, self._sleep = clock, sleep
+        self._metrics = metrics or Metrics()
+        self._guard = guard  # None: this follower has no memory limit to hold a job to
+        self._keeper: LeaseKeeper | None = None
         self._control: JobControl | None = None
         self._phase = "idle"
         self._transcribing_since = 0.0
@@ -171,6 +186,16 @@ class JobRunner:
             return elapsed * (1.0 - progress) / progress + UPLOAD_ALLOWANCE_SECONDS
         return None
 
+    def keeper_stalled(self) -> bool:
+        """True when a job is held and its lease keeper has not gone round its loop for
+        three heartbeat intervals plus the time one request may take (follower spec 9). A
+        leader that does not answer never makes this true: the keeper still goes round."""
+        keeper = self._keeper
+        if keeper is None or not keeper.is_alive():
+            return False  # no job, or the keeper ended itself and stopped the job
+        allowed = KEEPER_INTERVALS * self._interval + REQUEST_TIMEOUT_SECONDS
+        return time.monotonic() - keeper.last_loop > allowed
+
     # --- the job -------------------------------------------------------------------------
 
     def run(self, claim: ClaimResponse, control: JobControl) -> JobResult:
@@ -181,9 +206,16 @@ class JobRunner:
             return JobResult(ABANDONED, INVALID_JOB_ID)
         extra = {"job_id": claim.job_id, "lease_id": claim.lease_id}
         logger.info("job claimed", extra={**extra, "event": "job.claimed"})
-        keeper = LeaseKeeper(self._client, claim.job_id, claim.lease_id, self._interval, control)
+        keeper = LeaseKeeper(
+            self._client,
+            claim.job_id,
+            claim.lease_id,
+            self._interval,
+            control,
+            on_failure=self._metrics.heartbeat_failed,
+        )
         folder: Path | None = None
-        self._control, self._phase = control, "starting"
+        self._control, self._phase, self._keeper = control, "starting", keeper
         try:
             try:
                 keeper.start()
@@ -197,7 +229,7 @@ class JobRunner:
         finally:
             keeper.finish()
             self._clean_up(folder, extra)
-            self._control, self._phase = None, "idle"
+            self._control, self._phase, self._keeper = None, "idle", None
         logger.info(
             "job %s%s",
             result.outcome,
@@ -299,10 +331,18 @@ class JobRunner:
             downloaded = self._with_fresh_links(claim, control, links, download)
         except Transient:
             raise _Release("the recording could not be downloaded for ten minutes") from None
+        self._metrics.downloaded(source.stat().st_size)
 
         self._phase = "model"
         transcriber = self._models.get(settings.model, settings.compute_type)
         control.check()
+
+        # After the model is in memory (what it holds is counted) and before the engine
+        # reads the recording. Not the "model" phase: a recording too long for this machine
+        # fails the job `out_of_resources`; it does not make the machine unfit.
+        self._phase = "guard"
+        if self._guard is not None:
+            self._guard.check(source, settings.channel_mode)
 
         self._phase = "transcribe"
         self._transcribing_since = self._clock()
@@ -314,6 +354,7 @@ class JobRunner:
         transcript = transcriber.transcribe(
             source, vocabulary, settings=settings, progress=on_progress
         )
+        self._metrics.transcribed(transcript.duration, self._clock() - self._transcribing_since)
         if transcript.source_checksum != downloaded:
             raise _Fail("engine_error", "the recording changed on disk during the job", True)
         files = write_outputs(transcript, folder)  # all three, or none: never a partial set
@@ -331,6 +372,7 @@ class JobRunner:
                     ),
                     pause=control.pause,
                 )
+                self._metrics.uploaded(path.stat().st_size)
             return sent
 
         for _round in range(SUBMIT_ROUNDS):

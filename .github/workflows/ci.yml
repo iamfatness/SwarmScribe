@@ -140,6 +140,42 @@ jobs:
         if: always()
         run: docker compose -f e2e/console-compose/docker-compose.yml --profile tools down -v
 
+  follower-compose-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      - name: Build the leader image
+        run: docker build -t swarmscribe-leader:e2e -f e2e/compose/Dockerfile .
+      - name: Build the follower image with tiny.en baked in
+        run: >-
+          docker build --build-arg MODELS=tiny.en -t swarmscribe-follower:e2e
+          --target cpu -f docker/follower.Dockerfile .
+      - name: Build the follower image without a model
+        run: docker build -t swarmscribe-follower:cpu --target cpu -f docker/follower.Dockerfile .
+      - name: Check both follower images
+        run: |
+          bash docker/check-follower-image.sh swarmscribe-follower:e2e cpu tiny.en
+          bash docker/check-follower-image.sh swarmscribe-follower:cpu cpu
+      - name: Write the recordings
+        run: uv run python e2e/follower-compose/run_e2e.py prepare
+      - name: Start Postgres, two leader replicas and the proxy
+        run: docker compose -f e2e/follower-compose/docker-compose.yml up -d
+      - name: Run the scenario (kills, stops, drains and revokes followers)
+        run: uv run python e2e/follower-compose/run_e2e.py run
+      - name: Show every service's logs
+        if: failure()
+        run: >-
+          docker compose -f e2e/follower-compose/docker-compose.yml
+          --profile followers logs --no-color
+      - name: Tear down
+        if: always()
+        run: >-
+          docker compose -f e2e/follower-compose/docker-compose.yml
+          --profile followers down -v
+
   chart:
     runs-on: ubuntu-latest
     steps:

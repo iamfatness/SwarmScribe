@@ -1,4 +1,4 @@
-import { THEMES, expect, expectAccessible, signIn, test } from "./support";
+import { THEMES, expect, expectAccessible, setLeaderMode, signIn, test } from "./support";
 
 // Every page the app has, in both themes, with zero axe violations (WCAG 2.1 A and AA).
 const SIGNED_IN_PAGES: { path: string; heading: string }[] = [
@@ -32,6 +32,72 @@ for (const theme of THEMES) {
         await expect(page.getByText(/^Loading/)).toHaveCount(0);
         await expectAccessible(page, `${path} (${theme})`);
       }
+    });
+
+    test("the fleet overview has no accessibility violations in any of its states", async ({
+      page,
+      request,
+    }) => {
+      await signIn(page, "admin");
+      await expect(page.getByRole("article", { name: "eu-1" }).getByRole("img")).toBeVisible();
+      await page.getByRole("button", { name: "region = us" }).click();
+      await expectAccessible(page, `fleet, filtered (${theme})`);
+      await page.getByRole("button", { name: "All leaders" }).click();
+      await setLeaderMode(request, "us-1", "down");
+      await expect(
+        page.getByRole("article", { name: "us-1" }).getByText("Not answering", { exact: true }),
+      ).toBeVisible({ timeout: 30_000 });
+      await expectAccessible(page, `fleet, one leader not answering (${theme})`);
+    });
+
+    test("the fleet overview has no violations with no leaders, with every kind of leader, and with a label nobody has", async ({
+      page,
+    }) => {
+      // The fleet as the browser gets it: every state a card can be in, one with the longest
+      // name and label the registry allows, and (below) a fleet request that fails.
+      type Leader = Record<string, unknown>;
+      await page.route("**/api/fleet", async (route) => {
+        const answer = await route.fetch();
+        const [eu] = (await answer.json()) as Leader[];
+        const quiet = { summary: null, snapshot: null, last_success_at: null };
+        const make = (name: string, patch: Leader): Leader => ({ ...eu, name, labels: { env: "test" }, ...patch });
+        const json = [
+          eu,
+          make("rev-1", { health: "credential_revoked" }),
+          make("off-1", { health: "disabled", enabled: false }),
+          make("new-1", { health: "pending", consecutive_failures: 2, ...quiet }),
+          make("fresh-1", { health: "pending", consecutive_failures: 0, ...quiet }),
+          make("lost-1", { health: "unreachable", consecutive_failures: 5, last_error: "connect_error", ...quiet }),
+          make(`L${"o".repeat(99)}`, { labels: { note: "v".repeat(200) } }),
+        ];
+        await route.fulfill({ response: answer, json });
+      });
+      await signIn(page, "admin");
+      await expect(page.getByRole("article", { name: "lost-1" })).toBeVisible();
+      await expect(page.getByText(/^Loading/)).toHaveCount(0);
+      await expectAccessible(page, `fleet, every kind of leader (${theme})`);
+      await page.getByRole("button", { name: `note = ${"v".repeat(200)}` }).click();
+      await expectAccessible(page, `fleet, filtered to a long label (${theme})`);
+      await page.goto("/?label=region%3Dmoon");
+      await expect(page.getByText("No leader has the label region=moon.")).toBeVisible();
+      await expectAccessible(page, `fleet, a label nobody has (${theme})`);
+      await page.unroute("**/api/fleet");
+
+      await page.route("**/api/fleet", (route) => route.fulfill({ json: [] }));
+      await page.goto("/");
+      await expect(page.getByText(/You have no role on any leader yet/)).toBeVisible();
+      await expectAccessible(page, `fleet, no leaders (${theme})`);
+    });
+
+    test("the fleet overview has no violations while a refresh is failing", async ({ page }) => {
+      await signIn(page, "admin");
+      await expect(page.getByRole("article", { name: "eu-1" })).toBeVisible();
+      await page.route("**/api/fleet", (route) =>
+        route.fulfill({ status: 503, json: { code: "unavailable", message: "down" } }),
+      );
+      await expect(page.getByRole("alert")).toContainText("The last check did not work", { timeout: 30_000 });
+      await expect(page.getByRole("article", { name: "eu-1" })).toBeVisible();
+      await expectAccessible(page, `fleet, last check failed (${theme})`);
     });
 
     test("the join token dialogs have no accessibility violations", async ({ page }) => {

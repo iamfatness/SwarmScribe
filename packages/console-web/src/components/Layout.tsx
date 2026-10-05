@@ -149,8 +149,8 @@ export function Layout({
   }, [open]);
 
   // Escape closes the open menu and hands focus back to its button. A dialog's own Escape
-  // comes first: with one open, this does nothing. A press outside the rail also closes it,
-  // and leaves focus where the person put it.
+  // comes first: with one open, this does nothing. A press outside the rail also closes it;
+  // focus goes to whatever was pressed, or back to the Menu button when that is not focusable.
   useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
@@ -161,6 +161,16 @@ export function Layout({
     const onPress = (event: PointerEvent) => {
       if (event.target instanceof Node && rail.current?.contains(event.target)) return;
       setOpenAt(null);
+      // The press moves focus to whatever was pressed once this handler returns. When that is
+      // a control, focus stays with it; when it is only the page (the body or the main region,
+      // which takes focus for the skip link), the Menu button takes it, so focus is not lost
+      // with the menu that held it.
+      setTimeout(() => {
+        const active = document.activeElement;
+        if (active === null || active === document.body || active === main.current) {
+          menuButton.current?.focus();
+        }
+      }, 0);
     };
     document.addEventListener("keydown", onKey);
     document.addEventListener("pointerdown", onPress);

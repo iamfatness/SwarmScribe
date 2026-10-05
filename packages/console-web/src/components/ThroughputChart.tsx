@@ -9,7 +9,7 @@ export const HISTORY_REFRESH_MS = 5 * 60 * 1000;
 
 /**
  * One leader's 24-hour throughput, from GET /api/leaders/{name}/history?hours=24. A failed
- * request only affects this cell: the row and the table stay.
+ * request only affects this chart: the card and the page stay.
  */
 export function ThroughputChart({ name, now }: { name: string; now: number }) {
   const load = useCallback(
@@ -18,7 +18,7 @@ export function ThroughputChart({ name, now }: { name: string; now: number }) {
   );
   const { data, error } = usePoll(load, HISTORY_REFRESH_MS, `history:${name}`);
   if (data === undefined) {
-    return <span className="muted">{error ? "History unavailable" : "Loading…"}</span>;
+    return <span className="muted">{error ? "No history to show" : "Loading…"}</span>;
   }
   return <Sparkline points={data} now={now} name={name} />;
 }

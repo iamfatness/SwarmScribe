@@ -1,59 +1,189 @@
+import type { Page } from "@playwright/test";
 import { expect, setLeaderMode, signIn, test } from "./support";
+
+/** How far the page is wider than the window: more than 0 means it scrolls sideways. */
+function sidewaysOverflow(page: Page): Promise<number> {
+  return page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+}
+
+/**
+ * Words that wrap in the middle, in every table cell and every card on the page. Text that
+ * opts in to breaking anywhere (.long: a path, an address, an id, a leader's own error text)
+ * is the only text allowed to.
+ */
+function brokenWords(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const broken: string[] = [];
+    const roots = document.querySelectorAll("th, td, .leader-card, .stat-tile, .needs-look, .rail, .page-head");
+    for (const root of roots) {
+      const cell = root.matches("th, td");
+      if (cell && (root.classList.contains("long") || root.querySelector(".long"))) continue;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+        if (node.parentElement?.closest(".long, .visually-hidden")) continue;
+        const text = node.textContent ?? "";
+        for (const match of text.matchAll(/\S+/g)) {
+          const range = document.createRange();
+          range.setStart(node, match.index);
+          range.setEnd(node, match.index + match[0].length);
+          // A word that wraps in the middle has client rects on more than one line.
+          const tops = new Set(Array.from(range.getClientRects()).map((r) => Math.round(r.top)));
+          if (tops.size > 1) broken.push(`${root.tagName} "${match[0]}"`);
+        }
+      }
+    }
+    for (const head of document.querySelectorAll("thead th")) {
+      const wraps = getComputedStyle(head).whiteSpace;
+      if (wraps !== "nowrap") broken.push(`header ${head.textContent} is ${wraps}`);
+    }
+    return broken;
+  });
+}
 
 test("the overview shows each leader's figures and 24-hour chart", async ({ page }) => {
   await signIn(page, "viewer");
-  const eu = page.getByRole("row", { name: /eu-1/ });
-  await expect(eu.getByText("Reachable", { exact: true })).toBeVisible();
-  // The fake eu-1: two queued jobs, 7 completed in the hour, 30 in the day, one failure.
-  await expect(eu.getByRole("cell").nth(1)).toHaveText("2");
-  await expect(eu.getByRole("cell").nth(2)).toHaveText("7");
-  await expect(eu.getByRole("cell").nth(3)).toHaveText("30");
-  await expect(eu.getByRole("cell").nth(4)).toHaveText("1");
-  await expect(eu.getByRole("cell").nth(5)).toHaveText("default 1 · gpu 1");
-  await expect(eu.getByRole("cell").nth(6)).toHaveText(/^1\d min$/);
-  await expect(eu.getByText("archive: the root folder is not readable")).toBeVisible();
-  await expect(eu.getByRole("img")).toHaveAccessibleName(/Jobs completed per hour over the last 24 hours/);
-  const us = page.getByRole("row", { name: /us-1/ });
-  await expect(us.getByRole("img")).toHaveAccessibleName(/Unreachable in 4 five-minute periods/);
+  const eu = page.getByRole("article", { name: "eu-1" });
+  await expect(eu.getByText("Answering", { exact: true })).toBeVisible();
+  // The fake eu-1: two waiting jobs, 7 finished in the hour, 30 in the day, one failure.
+  await expect(eu.getByRole("term")).toHaveText([
+    "Waiting",
+    "Last hour, finished",
+    "Last day, finished",
+    "Failed tries, last day",
+  ]);
+  await expect(eu.getByRole("definition")).toHaveText(["2", "7", "30", "1"]);
+  await expect(eu.getByText(/oldest waiting/)).toHaveText(
+    /^2 followers · default 1, gpu 1 · oldest waiting 1\d min$/,
+  );
+  await expect(eu.getByRole("list", { name: "Labels" }).getByRole("listitem")).toHaveText([
+    "env=prod",
+    "region=eu",
+  ]);
+  await expect(eu.getByRole("img")).toHaveAccessibleName(
+    /^eu-1: Finished per hour over the last 24 hours/,
+  );
+  const us = page.getByRole("article", { name: "us-1" });
+  await expect(us.getByRole("img")).toHaveAccessibleName(/No answer in 4 five-minute periods/);
 });
 
-test("the label filter narrows the rows", async ({ page }) => {
+test("the overview adds up the fleet and lists what needs a look", async ({ page }) => {
   await signIn(page, "viewer");
-  await page.getByRole("combobox", { name: "Label" }).selectOption("region=us");
-  await expect(page.getByRole("rowheader", { name: /us-1/ })).toBeVisible();
-  await expect(page.getByRole("rowheader", { name: /eu-1/ })).toHaveCount(0);
-  await expect(page).toHaveURL("/?label=region%3Dus");
+  const totals = page.getByRole("region", { name: "Totals" });
+  await expect(totals.getByRole("term")).toHaveText([
+    "Waiting now",
+    "Finished, last hour",
+    "Finished, last day",
+    "Followers at work",
+  ]);
+  await expect(totals.getByRole("definition")).toHaveText(["4", "10", "42", "4"]);
+  const look = page.getByRole("region", { name: "Needs a look" });
+  await expect(look.getByRole("heading", { level: 2, name: "Needs a look" })).toBeVisible();
+  await expect(look.getByRole("listitem")).toHaveText([
+    "eu-1 could not scan archive. the root folder is not readable",
+    "2 tries failed in the last day. 1 on eu-1, 1 on us-1.",
+  ]);
+  await look.getByRole("link", { name: "eu-1 could not scan archive." }).click();
+  await expect(page).toHaveURL("/leaders/eu-1/locations");
 });
 
-test("a leader that stops answering is shown unreachable while the other stays reachable", async ({
+test("the label filter narrows the cards", async ({ page }) => {
+  await signIn(page, "viewer");
+  const pills = page.getByRole("group", { name: "Show leaders with the label" });
+  await expect(pills.getByRole("button", { name: "All leaders" })).toHaveAttribute("aria-pressed", "true");
+  await pills.getByRole("button", { name: "region = us" }).click();
+  await expect(page.getByRole("article", { name: "us-1" })).toBeVisible();
+  await expect(page.getByRole("article", { name: "eu-1" })).toHaveCount(0);
+  await expect(page).toHaveURL("/?label=region%3Dus");
+  await expect(pills.getByRole("button", { name: "region = us" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByText("1 of 2 leaders")).toBeVisible();
+});
+
+test("a leader that stops answering is shown not answering while the other keeps answering", async ({
   page,
   request,
 }) => {
   await signIn(page, "viewer");
   await setLeaderMode(request, "us-1", "down");
-  const us = page.getByRole("row", { name: /us-1/ });
-  await expect(us.getByText("Unreachable", { exact: true })).toBeVisible({ timeout: 30_000 });
-  await expect(us.getByText(/Figures as of/)).toBeVisible();
-  await expect(page.getByRole("row", { name: /eu-1/ }).getByText("Reachable", { exact: true })).toBeVisible();
+  const us = page.getByRole("article", { name: "us-1" });
+  await expect(us.getByText("Not answering", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(us.getByText(/^No answer since .+, after \w+ tries\.$/)).toBeVisible();
+  await expect(us.getByText(/The last figures are from/)).toBeVisible();
+  await expect(us.getByRole("link", { name: "See what us-1 last reported" })).toBeVisible();
+  await expect(
+    page.getByRole("navigation", { name: "Console" }).getByRole("link", { name: "us-1 no answer" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("article", { name: "eu-1" }).getByText("Answering", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("region", { name: "Totals" })).toContainText(
+    "These include the last figures from us-1, which the console cannot check right now.",
+  );
 });
 
-test("the layout holds at tablet width", async ({ page }) => {
+test("the layout holds at tablet width: the rail is a top bar with a menu", async ({ page }) => {
   await page.setViewportSize({ width: 768, height: 1024 });
   await signIn(page, "viewer");
-  await expect(page.getByRole("rowheader", { name: /eu-1/ })).toBeVisible();
-  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
-  expect(overflow).toBeLessThanOrEqual(0);
-  // Sign out is behind the Menu button at this width.
+  const eu = page.getByRole("article", { name: "eu-1" });
+  await expect(eu).toBeVisible();
+  expect(await sidewaysOverflow(page)).toBeLessThanOrEqual(0);
+
+  // Everything under the brand sits behind the Menu button until it is asked for.
   const menu = page.getByRole("button", { name: "Menu" });
+  await expect(menu).toBeVisible();
   await expect(menu).toHaveAttribute("aria-expanded", "false");
   await expect(page.getByRole("button", { name: "Sign out" })).toBeHidden();
+  await expect(page.getByRole("navigation", { name: "Console" })).toBeHidden();
+
   await menu.click();
   await expect(menu).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByRole("navigation", { name: "Console" }).getByRole("link", { name: "Fleet" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Sign out" })).toBeInViewport();
+  await expect(page.getByRole("combobox", { name: "Theme" })).toBeVisible();
+  expect(await sidewaysOverflow(page)).toBeLessThanOrEqual(0);
+
   await page.keyboard.press("Escape");
+  await expect(menu).toHaveAttribute("aria-expanded", "false");
   await expect(menu).toBeFocused();
   await expect(page.getByRole("button", { name: "Sign out" })).toBeHidden();
-  await expect(page.getByRole("region", { name: "Leaders" })).toBeVisible();
+
+  // Following a link from the menu closes it.
+  await menu.click();
+  await page.getByRole("navigation", { name: "Console" }).getByRole("link", { name: "eu-1" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "eu-1" })).toBeVisible();
+  await expect(menu).toHaveAttribute("aria-expanded", "false");
+});
+
+test("at tablet width the cards sit two across and nothing is cut off", async ({ page }) => {
+  await page.setViewportSize({ width: 768, height: 1024 });
+  await signIn(page, "viewer");
+  const look = await page.getByRole("region", { name: "Needs a look" }).boundingBox();
+  const eu = await page.getByRole("article", { name: "eu-1" }).boundingBox();
+  const us = await page.getByRole("article", { name: "us-1" }).boundingBox();
+  if (look === null || eu === null || us === null) throw new Error("a card is not on the page");
+  // "Needs a look" first, the first leader beside it, the next leader on the row below.
+  expect(Math.round(eu.y)).toBe(Math.round(look.y));
+  expect(eu.x).toBeGreaterThan(look.x + look.width);
+  expect(us.y).toBeGreaterThanOrEqual(look.y + look.height);
+  for (const box of [look, eu, us]) {
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(768);
+  }
+  // The chart fills its card and keeps its height.
+  const chart = await page.getByRole("article", { name: "eu-1" }).getByRole("img").boundingBox();
+  if (chart === null) throw new Error("the chart is not on the page");
+  expect(Math.round(chart.height)).toBe(64);
+  expect(chart.width).toBeGreaterThan(eu.width * 0.75);
+  expect(await brokenWords(page)).toEqual([]);
+});
+
+test("at phone width everything stacks and the page still does not scroll sideways", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await signIn(page, "viewer");
+  const eu = await page.getByRole("article", { name: "eu-1" }).boundingBox();
+  const us = await page.getByRole("article", { name: "us-1" }).boundingBox();
+  if (eu === null || us === null) throw new Error("a card is not on the page");
+  expect(us.y).toBeGreaterThanOrEqual(eu.y + eu.height);
+  expect(await sidewaysOverflow(page)).toBeLessThanOrEqual(0);
 });
 
 test("the overview works from the keyboard alone", async ({ page }) => {
@@ -62,16 +192,66 @@ test("the overview works from the keyboard alone", async ({ page }) => {
   await expect(page.getByRole("link", { name: "Skip to main content" })).toBeFocused();
   await page.keyboard.press("Enter");
   await page.keyboard.press("Tab");
-  await expect(page.getByRole("combobox", { name: "Label" })).toBeFocused();
+  // The skip link lands past the rail: the first stop is the first control of the page.
+  await expect(page.getByRole("button", { name: "All leaders" })).toBeFocused();
   await page.keyboard.press("Tab");
-  await expect(page.getByRole("region", { name: "Leaders" })).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(page).toHaveURL("/?label=env%3Dprod");
+  await expect(page.getByRole("button", { name: "env = prod" })).toBeFocused();
+
+  // Tab reaches a leader's own link without ever leaving the main region.
+  const card = page.getByRole("article", { name: "eu-1" }).getByRole("link", { name: "eu-1", exact: true });
+  for (let i = 0; i < 12; i += 1) {
+    await page.keyboard.press("Tab");
+    expect(await page.evaluate(() => document.activeElement?.closest("main") !== null)).toBe(true);
+    if (await card.evaluate((el) => el === document.activeElement)) break;
+  }
+  await expect(card).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL("/leaders/eu-1/pools");
+  await expect(page.getByRole("heading", { level: 1, name: "eu-1" })).toBeFocused();
+
   await page.getByRole("combobox", { name: "Theme" }).focus();
   await page.keyboard.press("ArrowDown");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 });
 
+test("the longest leader name and a very long label never push the page sideways", async ({ page }) => {
+  // The registry allows a name of 100 characters and a label value of 255, with no spaces.
+  const name = `L${"o".repeat(99)}`;
+  const label = `note=${"v".repeat(200)}`;
+  await signIn(page, "admin", "/admin/leaders");
+  await page.getByRole("button", { name: "Add leader" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add a leader" });
+  await dialog.getByRole("textbox", { name: "Name" }).fill(name);
+  await dialog.getByRole("textbox", { name: "Address (https://)" }).fill("https://long.leaders.example");
+  await dialog.getByRole("textbox", { name: "Labels" }).fill(label);
+  await dialog.getByLabel("Console credential").fill("c".repeat(20) + "_-" + "D".repeat(21));
+  await dialog.getByRole("button", { name: "Add leader" }).click();
+  await expect(dialog).toHaveCount(0);
+
+  for (const width of [1280, 768, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/");
+    // The new leader has no fake behind it: its card appears at the next 10 s refresh.
+    await expect(page.getByRole("article", { name })).toBeVisible({ timeout: 20_000 });
+    expect(await sidewaysOverflow(page), `fleet at ${width}`).toBeLessThanOrEqual(0);
+    await page.getByRole("button", { name: `note = ${"v".repeat(200)}` }).click();
+    await expect(page.getByRole("article", { name: "eu-1" })).toHaveCount(0);
+    expect(await sidewaysOverflow(page), `fleet, filtered, at ${width}`).toBeLessThanOrEqual(0);
+    const menu = page.getByRole("button", { name: "Menu" });
+    if (await menu.isVisible()) {
+      await menu.click();
+      await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
+      expect(await sidewaysOverflow(page), `menu at ${width}`).toBeLessThanOrEqual(0);
+    }
+    await page.goto(`/leaders/${name}/pools`);
+    await expect(page.getByRole("heading", { level: 1, name })).toBeVisible();
+    expect(await sidewaysOverflow(page), `leader page at ${width}`).toBeLessThanOrEqual(0);
+  }
+});
+
 const TABLE_PAGES = [
-  "/",
   "/leaders/eu-1/jobs",
   "/leaders/eu-1/pools",
   "/leaders/eu-1/locations",
@@ -82,41 +262,18 @@ const TABLE_PAGES = [
   "/admin/admins",
 ];
 
-test("no table breaks a word across lines, and the page never scrolls sideways at tablet width", async ({
+test("no table or card breaks a word across lines, and the page never scrolls sideways at tablet width", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 768, height: 1024 });
   await signIn(page, "admin");
+  await expect(page.getByRole("article", { name: "eu-1" })).toBeVisible();
+  expect(await brokenWords(page), "/").toEqual([]);
+  expect(await sidewaysOverflow(page), "/").toBeLessThanOrEqual(0);
   for (const path of TABLE_PAGES) {
     await page.goto(path);
     await expect(page.getByRole("table").first()).toBeVisible();
-    const found = await page.evaluate(() => {
-      const broken: string[] = [];
-      for (const cell of document.querySelectorAll("th, td")) {
-        // Columns that opt in to breaking anywhere (.long) are the only ones allowed to.
-        if (cell.classList.contains("long") || cell.querySelector(".long")) continue;
-        const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
-        for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
-          const text = node.textContent ?? "";
-          for (const match of text.matchAll(/\S+/g)) {
-            const range = document.createRange();
-            range.setStart(node, match.index);
-            range.setEnd(node, match.index + match[0].length);
-            // A word that wraps in the middle has client rects on more than one line.
-            const tops = new Set(Array.from(range.getClientRects()).map((r) => Math.round(r.top)));
-            if (tops.size > 1) broken.push(`${cell.tagName} "${match[0]}"`);
-          }
-        }
-      }
-      for (const head of document.querySelectorAll("thead th")) {
-        const wraps = getComputedStyle(head).whiteSpace;
-        if (wraps !== "nowrap" && !head.closest(".fleet-table")) broken.push(`header ${head.textContent} is ${wraps}`);
-      }
-      return broken;
-    });
-    expect(found, path).toEqual([]);
-    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
-    expect(overflow, path).toBeLessThanOrEqual(0);
+    expect(await brokenWords(page), path).toEqual([]);
+    expect(await sidewaysOverflow(page), path).toBeLessThanOrEqual(0);
   }
 });
-

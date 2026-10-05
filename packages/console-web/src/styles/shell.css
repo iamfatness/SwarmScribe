@@ -28,7 +28,7 @@ main {
   height: 100vh;
   height: 100dvh;
   padding: 22px 18px;
-  overflow-y: auto;
+  overflow: hidden;
   border-right: 1px solid var(--line);
   background: var(--panel);
 }
@@ -80,6 +80,21 @@ main {
   flex-direction: column;
   gap: var(--s-8);
   min-height: 0;
+}
+
+/* With many leaders the list scrolls inside the rail; the person, the theme and Sign out
+   below it stay in view. The small padding and matching negative margin keep a focus ring
+   from being clipped by the scroller. */
+.rail-panel nav {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: -4px;
+  padding: 4px;
+  overflow-y: auto;
+}
+
+.rail-foot {
+  flex: none;
 }
 
 .nav-list,
@@ -275,8 +290,17 @@ main {
     max-height: 100dvh;
     gap: 0;
     padding: var(--s-3) var(--s-5);
+    overflow-y: auto;
     border-right: 0;
     border-bottom: 1px solid var(--line);
+  }
+
+  /* The whole open menu scrolls in the bar here, not the list alone. */
+  .rail-panel nav {
+    flex: none;
+    margin: 0;
+    padding: 0;
+    overflow: visible;
   }
 
   html {

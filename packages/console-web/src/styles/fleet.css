@@ -40,6 +40,18 @@
   color: var(--muted);
 }
 
+/* ---- Nothing to show: no role on any leader, or a label nobody has ---- */
+
+.empty-state {
+  max-width: 640px;
+  margin-top: 26px;
+  overflow-wrap: break-word;
+}
+
+.empty-state p {
+  margin: 0;
+}
+
 /* ---- The grid of cards ---- */
 
 .fleet-grid {

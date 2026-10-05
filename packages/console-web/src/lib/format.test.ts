@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   formatCount,
   formatDuration,
+  countOf,
+  describeLastError,
   formatPools,
+  formatTries,
   formatTime,
   labelPairs,
   oldestQueuedAge,
@@ -29,7 +32,7 @@ describe("format", () => {
   });
 
   it("formats pools and labels", () => {
-    expect(formatPools({ gpu: 1, default: 2 })).toBe("default 2 · gpu 1");
+    expect(formatPools({ gpu: 1, default: 2 })).toBe("default 2, gpu 1");
     expect(formatPools({})).toBe("none");
     expect(labelPairs({ region: "eu", env: "prod" })).toEqual(["env=prod", "region=eu"]);
     expect(formatCount(null)).toBe("–");
@@ -52,9 +55,34 @@ describe("format", () => {
     expect(formatPools({ a: Number.NaN })).toBe("a –");
   });
 
+  it("says a small number of tries in words and a large one in digits", () => {
+    expect(formatTries(1)).toBe("one try");
+    expect(formatTries(3)).toBe("three tries");
+    expect(formatTries(9)).toBe("nine tries");
+    expect(formatTries(10)).toBe("10 tries");
+    expect(formatTries(0)).toBe("no tries");
+    expect(formatTries(Number.NaN)).toBe("no tries");
+    expect(formatTries(-2)).toBe("no tries");
+    expect(formatTries(2.9)).toBe("two tries");
+  });
+
+  it("counts a noun in the singular and the plural", () => {
+    expect(countOf(1, "leader")).toBe("1 leader");
+    expect(countOf(0, "follower")).toBe("0 followers");
+    expect(countOf(1234, "follower")).toBe(`${formatCount(1234)} followers`);
+  });
+
   it("formats a recent time as a clock and an old one with its date", () => {
     const now = Date.parse("2026-10-04T12:00:00Z");
     expect(formatTime("2026-10-04T11:59:00Z", now)).toMatch(/\d/);
     expect(formatTime("2026-09-01T11:59:00Z", now)).toMatch(/2026/);
+  });
+
+  it("says a leader's last error in words and never shows its code", () => {
+    expect(describeLastError("connect_error")).toBe("It could not be reached.");
+    expect(describeLastError("timeout")).toBe("It took too long to answer.");
+    expect(describeLastError("http_502")).toBe("It answered with an error (502).");
+    expect(describeLastError("something_new")).toBe("The check did not work.");
+    expect(describeLastError("something_new")).not.toContain("_");
   });
 });

@@ -44,10 +44,10 @@ export function oldestQueuedAge(
   return ageAtSnapshot + since;
 }
 
-/** "default 2 · gpu 1", pools sorted by name; "none" when empty. */
+/** "default 2, gpu 1", pools sorted by name; "none" when empty. */
 export function formatPools(byPool: Record<string, number>): string {
   const entries = Object.entries(byPool).sort(([a], [b]) => a.localeCompare(b));
-  return entries.length === 0 ? "none" : entries.map(([pool, n]) => `${pool} ${formatCount(n)}`).join(" · ");
+  return entries.length === 0 ? "none" : entries.map(([pool, n]) => `${pool} ${formatCount(n)}`).join(", ");
 }
 
 /** Labels as "key=value" strings, sorted. */
@@ -55,4 +55,40 @@ export function labelPairs(labels: Record<string, string>): string[] {
   return Object.entries(labels)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([key, value]) => `${key}=${value}`);
+}
+
+const SMALL_NUMBERS = ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
+
+/** "one try", "three tries", "12 tries": small counts as words, the way a person says them. */
+export function formatTries(count: number): string {
+  const n = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+  return `${SMALL_NUMBERS[n] ?? formatCount(n)} ${n === 1 ? "try" : "tries"}`;
+}
+
+/** "1 leader", "3 followers": a count with its noun (the plural adds an s). */
+export function countOf(count: number, noun: string): string {
+  return `${formatCount(count)} ${count === 1 ? noun : `${noun}s`}`;
+}
+
+const LAST_ERRORS: Record<string, string> = {
+  timeout: "It took too long to answer.",
+  connect_error: "It could not be reached.",
+  transport_error: "The connection to it broke.",
+  bad_response: "Its answer could not be understood.",
+  credential_unreadable: "The console cannot open its stored credential for it.",
+  credential_rejected: "It does not accept the console's credential.",
+  credential_revoked: "It revoked the console's credential.",
+  forbidden: "It refused the console's request.",
+  invalid_target: "Its address is not one the console may call.",
+  locked: "The console was busy with another check.",
+  error: "Something went wrong that the console did not expect.",
+};
+
+/** The last failed check in words: the leader's own code is never shown as copy. */
+export function describeLastError(code: string): string {
+  const known = LAST_ERRORS[code];
+  if (known !== undefined) return known;
+  const http = /^http_(\d{3})$/.exec(code);
+  if (http !== null) return `It answered with an error (${http[1]}).`;
+  return "The check did not work.";
 }

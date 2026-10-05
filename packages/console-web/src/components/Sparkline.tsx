@@ -2,14 +2,16 @@ import { useId } from "react";
 import type { HistoryPoint } from "../api/types";
 import { formatCount } from "../lib/format";
 
-// Hand-written SVG (no chart library: the CSP forbids injected <style>). Plots
+// Hand-written SVG (no chart library: the CSP forbids injected <style>). The drawing is
+// 400 by 64 units and is stretched to the width of its card (styles/fleet.css); strokes do
+// not scale, so the line keeps its weight at any width. Plots
 // completed_last_hour from each 5-minute history bucket: each point is how many jobs the
 // leader completed in the hour before that snapshot, so the line is the leader's rolling
 // hourly throughput. The line breaks where a bucket is missing or the leader was
 // unreachable; unreachable buckets are also marked along the bottom edge.
 
-export const WIDTH = 160;
-export const HEIGHT = 36;
+export const WIDTH = 400;
+export const HEIGHT = 64;
 const PAD = 3;
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 const GAP_MS = 10 * 60 * 1000; // more than one missing 5-minute bucket breaks the line
@@ -75,17 +77,17 @@ export function geometry(points: HistoryPoint[], now: number): Geometry {
 }
 
 export function describe(g: Geometry): string {
-  if (g.latest === null && g.downCount === 0) return "No throughput history yet.";
+  if (g.latest === null && g.downCount === 0) return "No history yet.";
   const parts = [
-    `Jobs completed per hour over the last 24 hours: latest ${g.latest === null ? "unknown" : formatCount(g.latest)}, highest ${formatCount(g.peak)}.`,
+    `Finished per hour over the last 24 hours: latest ${g.latest === null ? "unknown" : formatCount(g.latest)}, highest ${formatCount(g.peak)}.`,
   ];
   if (g.downCount > 0) {
-    parts.push(`Unreachable in ${g.downCount} five-minute ${g.downCount === 1 ? "period" : "periods"}.`);
+    parts.push(`No answer in ${g.downCount} five-minute ${g.downCount === 1 ? "period" : "periods"}.`);
   }
   return parts.join(" ");
 }
 
-/** `name` (the leader) leads the accessible name, so each chart in a table is told apart. */
+/** `name` (the leader) leads the accessible name, so each card's chart is told apart. */
 export function Sparkline({ points, now, name }: { points: HistoryPoint[]; now: number; name?: string }) {
   const titleId = useId();
   const g = geometry(points, now);
@@ -105,7 +107,7 @@ export function Sparkline({ points, now, name }: { points: HistoryPoint[]; now: 
         <path key={d} className="sparkline-line" d={d} />
       ))}
       {g.dots.map((p) => (
-        <circle key={`${p.x},${p.y}`} className="sparkline-dot" cx={p.x} cy={p.y} r={1.5} />
+        <path key={`${p.x},${p.y}`} className="sparkline-dot" d={`M${p.x} ${p.y}h0.01`} />
       ))}
       {g.down.map((dx) => (
         <rect key={dx} className="sparkline-down" x={dx - 1.5} y={HEIGHT - PAD} width={3} height={PAD} />

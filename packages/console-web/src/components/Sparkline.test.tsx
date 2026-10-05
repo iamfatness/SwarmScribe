@@ -31,7 +31,7 @@ group("Sparkline", () => {
     expect(g.segments).toHaveLength(2);
     expect(g.downCount).toBe(1);
     expect(describe(g)).toBe(
-      "Jobs completed per hour over the last 24 hours: latest 3, highest 3. Unreachable in 1 five-minute period.",
+      "Finished per hour over the last 24 hours: latest 3, highest 3. No answer in 1 five-minute period.",
     );
   });
 
@@ -47,16 +47,16 @@ group("Sparkline", () => {
   });
 
   it("says so when there is no history", () => {
-    expect(describe(geometry([], NOW))).toBe("No throughput history yet.");
+    expect(describe(geometry([], NOW))).toBe("No history yet.");
   });
 
   it("renders an image with its description as the accessible name", () => {
     render(<Sparkline points={history()} now={NOW} />);
     const chart = screen.getByRole("img");
     expect(chart).toHaveAccessibleName(
-      /Jobs completed per hour over the last 24 hours: latest 1, highest 12\./,
+      /Finished per hour over the last 24 hours: latest 1, highest 12\./,
     );
-    expect(chart).toHaveAccessibleName(/Unreachable in 1 five-minute period\./);
+    expect(chart).toHaveAccessibleName(/No answer in 1 five-minute period\./);
   });
 
   it("handles a single point", () => {
@@ -71,9 +71,9 @@ group("Sparkline", () => {
     expect(g.segments).toHaveLength(0);
     expect(g.dots).toHaveLength(0);
     expect(g.latest).toBeNull();
-    expect(describe(g)).toBe("No throughput history yet.");
+    expect(describe(g)).toBe("No history yet.");
     render(<Sparkline points={[point(5, null)]} now={NOW} />);
-    expect(screen.getByRole("img")).toHaveAccessibleName("No throughput history yet.");
+    expect(screen.getByRole("img")).toHaveAccessibleName("No history yet.");
   });
 
   it("handles gaps at the start, middle and end", () => {
@@ -93,14 +93,14 @@ group("Sparkline", () => {
     expect(g.segments).toHaveLength(2);
     expect(g.downCount).toBe(4);
     expect(g.latest).toBe(4);
-    expect(describe(g)).toContain("Unreachable in 4 five-minute periods.");
+    expect(describe(g)).toContain("No answer in 4 five-minute periods.");
   });
 
   it("handles only unreachable buckets", () => {
     const g = geometry([point(10, null, false), point(5, null, false)], NOW);
     expect(g.segments).toHaveLength(0);
     expect(describe(g)).toBe(
-      "Jobs completed per hour over the last 24 hours: latest unknown, highest 0. Unreachable in 2 five-minute periods.",
+      "Finished per hour over the last 24 hours: latest unknown, highest 0. No answer in 2 five-minute periods.",
     );
   });
 
@@ -124,5 +124,29 @@ group("Sparkline", () => {
     );
     expect(container.querySelector("[style]")).toBeNull();
     expect(container.querySelectorAll("rect.sparkline-down")).toHaveLength(1);
+  });
+
+  it("is drawn 400 by 64 and stretched by the stylesheet, with lone points as round strokes", () => {
+    const { container } = render(<Sparkline points={[point(60, 1), point(30, 2), point(25, 2)]} now={NOW} />);
+    const svg = container.querySelector("svg");
+    expect(svg).toHaveAttribute("viewBox", "0 0 400 64");
+    expect(svg).toHaveAttribute("preserveAspectRatio", "none");
+    expect(svg).toHaveClass("sparkline");
+    // A circle would stretch into an ellipse; a zero-length round-capped stroke does not.
+    expect(container.querySelector("circle")).toBeNull();
+    expect(container.querySelectorAll("path.sparkline-dot")).toHaveLength(1);
+    expect(container.querySelector("path.sparkline-dot")?.getAttribute("d")).toMatch(/^M[\d.]+ [\d.]+h0\.01$/);
+  });
+
+  it("keeps every point inside the drawing", () => {
+    const g = geometry([point(24 * 60, 5), point(12 * 60, 9), point(0, 1)], NOW);
+    for (const d of g.segments) {
+      for (const [, x, y] of d.matchAll(/[ML]([\d.]+) ([\d.]+)/g)) {
+        expect(Number(x)).toBeGreaterThanOrEqual(0);
+        expect(Number(x)).toBeLessThanOrEqual(400);
+        expect(Number(y)).toBeGreaterThanOrEqual(0);
+        expect(Number(y)).toBeLessThanOrEqual(64);
+      }
+    }
   });
 });

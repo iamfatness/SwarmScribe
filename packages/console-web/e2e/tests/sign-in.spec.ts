@@ -6,8 +6,8 @@ test("a person without a session is sent to sign in and comes back to the page t
   await signIn(page, "viewer", "/?label=region%3Deu");
   await expect(page).toHaveURL("/?label=region%3Deu");
   await expect(page.getByRole("heading", { name: "Fleet" })).toBeVisible();
-  await expect(page.getByRole("rowheader", { name: /eu-1/ })).toBeVisible();
-  await expect(page.getByRole("rowheader", { name: /us-1/ })).toHaveCount(0);
+  await expect(page.getByRole("article", { name: "eu-1" })).toBeVisible();
+  await expect(page.getByRole("article", { name: "us-1" })).toHaveCount(0);
 });
 
 test("signing out ends the session", async ({ page }) => {

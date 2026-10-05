@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
@@ -127,6 +127,8 @@ describe("the signed-in shell", () => {
     await userEvent.click(screen.getByRole("heading", { level: 1, name: "Fleet" }));
     expect(menu).toHaveAttribute("aria-expanded", "false");
     expect(document.documentElement).not.toHaveClass("menu-open");
+    // Focus was inside the menu; it does not fall to the page, it returns to the button.
+    await waitFor(() => expect(menu).toHaveFocus());
   });
 
   it("closes the menu when a link in it is followed", async () => {

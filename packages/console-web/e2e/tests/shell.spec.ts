@@ -55,6 +55,8 @@ test.describe("the menu at narrow width", () => {
     expect(await page.evaluate(() => getComputedStyle(document.documentElement).overflow)).toBe("hidden");
     await page.mouse.click(NARROW.width - 20, NARROW.height - 20);
     await expect(menu).toHaveAttribute("aria-expanded", "false");
+    // Focus was inside the menu: it returns to the button, not to the top of the page.
+    await expect(menu).toBeFocused();
     expect(await page.evaluate(() => getComputedStyle(document.documentElement).overflow)).toBe("visible");
 
     // A press inside the menu that is not on a link leaves it open.
@@ -144,6 +146,45 @@ test.describe("the rail on a tall page", () => {
     const after = await rail.boundingBox();
     expect(Math.abs(after?.y ?? 1)).toBeLessThan(1);
     expect(Math.round(after?.height ?? 0)).toBe(600);
+  });
+});
+
+test.describe("the rail with twenty leaders", () => {
+  test.use({ viewport: { width: 1280, height: 700 } });
+
+  test("scrolls its list inside itself, with the person, theme and Sign out always in view", async ({
+    page,
+  }) => {
+    await manyLeaders(page, 10);
+    await signIn(page, "admin");
+    await expect(nav(page).getByRole("link", { name: "eu-1-9" })).toBeAttached();
+    await expect(nav(page).getByRole("list", { name: "Leaders" }).getByRole("listitem")).toHaveCount(20);
+    const signOut = page.getByRole("button", { name: "Sign out" });
+    await expect(signOut).toBeInViewport({ ratio: 1 });
+    await expect(page.getByRole("combobox", { name: "Theme" })).toBeInViewport({ ratio: 1 });
+    // The list is what scrolls: it is taller than the room it has, and the rail itself is not.
+    const sizes = await page.evaluate(() => {
+      const list = document.querySelector<HTMLElement>(".rail-panel nav");
+      const rail = document.querySelector<HTMLElement>(".rail");
+      return {
+        listScrolls: (list?.scrollHeight ?? 0) > (list?.clientHeight ?? 0),
+        railScrolls: (rail?.scrollHeight ?? 0) > (rail?.clientHeight ?? 0),
+      };
+    });
+    expect(sizes).toEqual({ listScrolls: true, railScrolls: false });
+    // Scrolling the list to its end leaves Sign out where it was.
+    const at = await signOut.boundingBox();
+    await nav(page).evaluate((el) => el.scrollTo(0, el.scrollHeight));
+    expect(await signOut.boundingBox()).toEqual(at);
+    // And from the keyboard: Tab from the last leader reaches Administration, the theme, then Sign out.
+    await nav(page).getByRole("link", { name: "us-1-9" }).focus();
+    await page.keyboard.press("Tab");
+    await expect(nav(page).getByRole("link", { name: "Administration" })).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(page.getByRole("combobox", { name: "Theme" })).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(signOut).toBeFocused();
+    await expect(signOut).toBeInViewport({ ratio: 1 });
   });
 });
 

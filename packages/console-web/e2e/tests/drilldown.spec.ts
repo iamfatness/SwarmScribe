@@ -201,8 +201,15 @@ test("a leader's own refusal is shown and focus stays in the dialog: us-1 caps t
   const dialog = page.getByRole("alertdialog");
   const confirm = dialog.getByRole("button", { name: "Switch it off" });
   await confirm.click();
-  await expect(dialog.getByRole("alert")).toContainText("Your role does not allow this.");
-  await expect(dialog.getByRole("alert")).toContainText("this needs the admin role");
+  // The leader's limit, in the console's words: none of the leader's own sentence is shown.
+  await expect(dialog.getByRole("alert")).toContainText("us-1 lets this console act only as an operator.");
+  await expect(dialog.getByRole("alert")).toContainText(
+    "This needs an admin. Whoever runs the leader can change that.",
+  );
+  await expect(dialog.getByRole("alert")).not.toContainText(/limited to|needs the admin role/);
+  // The role line promises an admin nothing the leader may not allow.
+  await expect(page.getByText(/^You are an admin here\.$/)).toBeVisible();
+  await expect(page.getByRole("main")).not.toContainText("Nothing here is switched off");
   // The dialog stays open on the failure and keeps focus where the person acted.
   await expect(confirm).toBeFocused();
   expect(await page.evaluate(() => document.activeElement?.closest("dialog") !== null)).toBe(true);
@@ -225,7 +232,9 @@ test("with one leader down its tabs report it, and the other leader stays operab
   await signIn(page, "operator", "/leaders/us-1/jobs");
   await setLeaderMode(request, "us-1", "down");
   await page.getByRole("button", { name: "Refresh" }).click();
-  await expect(page.getByRole("alert")).toContainText("The leader is not answering right now.");
+  await expect(page.getByRole("alert")).toContainText("us-1 is not answering right now.");
+  await expect(page.getByRole("alert")).toContainText("Try again in 15 seconds.");
+  await expect(page.getByRole("main")).not.toContainText("cannot be reached");
   await expect(page.getByRole("link", { name: "Locations" })).toBeVisible();
 
   await page.getByRole("navigation", { name: "Console" }).getByRole("link", { name: "Fleet" }).click();

@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
-import { reply } from "../../test/fetchMock";
+import { fail, reply } from "../../test/fetchMock";
 import { history, leader } from "../../test/fixtures";
 import type { JobOut } from "../../api/types";
 import { renderApp } from "../../test/renderApp";
@@ -103,6 +103,97 @@ describe("leader drill-down", () => {
     expect(
       screen.getByRole("heading", { level: 1, name: "eu-1" }),
     ).toBeInTheDocument();
+  });
+
+  it("says a leader the fleet knows is down once more only, quietly, with the wait and a retry", async () => {
+    const mock = renderApp("/leaders/us-1/jobs", {
+      fleet: [leader({ name: "us-1", health: "unreachable", consecutive_failures: 3 })],
+    }).on("GET /api/leaders/us-1/jobs?limit=100", {
+      status: 503,
+      body: { code: "leader_unreachable", message: "leader us-1 cannot be reached; try again" },
+      headers: { "Retry-After": "15" },
+    });
+    const line = await screen.findByText(/Nothing to show until us-1 answers/);
+    expect(line).toHaveTextContent("Nothing to show until us-1 answers. Try again in 15 seconds.");
+    expect(line).toHaveAttribute("role", "status");
+    // The notice above has said it: no second, red panel, and none of the backend's words.
+    const main = screen.getByRole("main");
+    expect(within(main).queryByRole("alert")).not.toBeInTheDocument();
+    expect(main).not.toHaveTextContent(/cannot be reached/);
+    expect(main.textContent?.match(/not answering/gi)).toHaveLength(2); // the pill and the notice
+    const before = mock.callsTo("GET /api/leaders/us-1/jobs?limit=100").length;
+    await userEvent.click(within(main).getByRole("button", { name: "Try again" }));
+    await waitFor(() =>
+      expect(mock.callsTo("GET /api/leaders/us-1/jobs?limit=100").length).toBe(before + 1),
+    );
+  });
+
+  it("names the leader in the error when the fleet has not noticed yet that it is down", async () => {
+    renderApp("/leaders/eu-1/jobs").on("GET /api/leaders/eu-1/jobs?limit=100", {
+      status: 503,
+      body: { code: "leader_unreachable", message: "leader eu-1 cannot be reached; try again" },
+      headers: { "Retry-After": "15" },
+    });
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("eu-1 is not answering right now.");
+    expect(alert).toHaveTextContent("Try again in 15 seconds.");
+    expect(alert).not.toHaveTextContent(/cannot be reached/);
+    expect(within(alert).getByRole("button", { name: "Try again" })).toBeInTheDocument();
+  });
+
+  it("never shows the backend's word for a switched-off leader, and offers no retry that cannot work", async () => {
+    renderApp("/leaders/us-1/locations", {
+      fleet: [leader({ name: "us-1", role: "admin", health: "disabled", enabled: false })],
+    }).on("GET /api/leaders/us-1/locations", fail(409, "leader_disabled", "this leader is disabled in the console"));
+    const line = await screen.findByText(/Nothing to show while us-1 is switched off/);
+    expect(line).toHaveTextContent(
+      "Nothing to show while us-1 is switched off. A console administrator can switch it on under Administration.",
+    );
+    const main = screen.getByRole("main");
+    expect(main).not.toHaveTextContent(/disabled/i);
+    expect(within(main).queryByRole("alert")).not.toBeInTheDocument();
+    expect(within(main).queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+  });
+
+  it("says a switched-off leader in its own words when the fleet has not caught up", async () => {
+    renderApp("/leaders/us-1/locations", { fleet: [leader({ name: "us-1" })] }).on(
+      "GET /api/leaders/us-1/locations",
+      fail(409, "leader_disabled", "this leader is disabled in the console"),
+    );
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("us-1 is switched off in the console.");
+    expect(alert).toHaveTextContent("A console administrator can switch it on under Administration.");
+    expect(alert).not.toHaveTextContent(/disabled/i);
+    expect(within(alert).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("sends a person back to the fleet when the leader is removed while its page is open", async () => {
+    renderApp("/leaders/eu-1/jobs").on(
+      "GET /api/leaders/eu-1/jobs?limit=100",
+      fail(404, "leader_not_found", "no leader with that name"),
+    );
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("You cannot see this leader.");
+    expect(alert).toHaveTextContent(
+      "It is no longer in the console, or you no longer have a role on it. Go back to the fleet.",
+    );
+    expect(alert).not.toHaveTextContent(/no leader with that name/);
+    expect(within(alert).getByRole("link", { name: "Go back to the fleet" })).toHaveAttribute("href", "/");
+    expect(within(alert).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("promises an admin nothing the leader may not allow: us-1 lets the console act only as an operator", async () => {
+    renderApp("/leaders/us-1/tokens", { fleet: [leader({ name: "us-1", role: "admin" })] }).on(
+      "GET /api/leaders/us-1/tokens",
+      fail(403, "forbidden", "this needs the admin role; console main is limited to operator"),
+    );
+    const role = await screen.findByText(/You are an/);
+    expect(role).toHaveTextContent(/^You are an admin here\.$/);
+    expect(screen.getByRole("main")).not.toHaveTextContent(/Nothing here is switched off/);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("us-1 lets this console act only as an operator.");
+    expect(alert).toHaveTextContent("This needs an admin. Whoever runs the leader can change that.");
+    expect(alert).not.toHaveTextContent(/limited to|needs the admin role/);
   });
 
   it("keeps focus on the tab link when only the tab changes", async () => {

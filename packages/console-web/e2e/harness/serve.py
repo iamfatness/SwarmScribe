@@ -4,7 +4,8 @@ in-memory leaders in place of the network, its own Postgres database, and the re
 (every 2 s, so "unreachable" arrives in seconds).
 
 A separate control server on http://127.0.0.1:8901 lets the tests reset the world, sign a
-persona in, take a leader down and end every session. It is a different port and a
+persona in, take a leader down, have a leader revoke the console's credential and end every
+session. It is a different port and a
 different app: nothing here is part of the console package or the built web app.
 
 Run from the repository root (Playwright's webServer does this):
@@ -18,6 +19,7 @@ import asyncio
 import logging
 import math
 import os
+import re
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -61,6 +63,7 @@ LEADERS = {
     "us-1": {"region": "us", "env": "prod"},
 }
 KEEP_TABLES = {"alembic_version"}
+HOST_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 # Emptying the tables races whatever the console is doing at that moment: a request still
 # being answered for the last test's page, or the poller recording a check. TRUNCATE wants
 # every table at once and they hold one while waiting for another, so the two can wait on
@@ -239,7 +242,10 @@ def control_app(harness: Harness) -> Starlette:
     async def leader_mode(request: Request) -> JSONResponse:
         name = request.path_params["name"]
         mode = (await request.json()).get("mode")
-        if name not in CAPS or mode not in ("ok", "down"):
+        # "revoked" is allowed for any host name: a leader a test adds can revoke too.
+        known = name in CAPS and mode in ("ok", "down", "revoked")
+        added = HOST_NAME.fullmatch(name) is not None and mode == "revoked"
+        if not (known or added):
             return JSONResponse({"error": "unknown leader or mode"}, status_code=400)
         harness.fakes.modes[name] = mode
         return JSONResponse({"ok": True})

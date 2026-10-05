@@ -5,7 +5,11 @@ console's allow-list in the shapes of swarmscribe_leader.api.admin_models, so ac
 what the next read shows. A leader applies its console credential's cap the way C1 does
 (effective role = the lower of the asserted role and the cap) and then the route's role, so
 an action the console allows can still meet the leader's own 403 (us-1 is capped at
-operator). `modes[name] = "down"` makes a leader refuse connections."""
+operator), in the sentence the real leader uses. `modes[name] = "down"` makes a leader refuse
+connections; `modes[name] = "revoked"` makes it answer that this console's credential was
+revoked (C1b's 401), for any host name, so a leader added in a test can be in that state too.
+A host that is not one of the two leaders refuses connections, as a leader that was never
+there does."""
 
 import json
 import secrets
@@ -323,6 +327,8 @@ class FakeLeaders:
 
     async def handler(self, request: httpx.Request) -> httpx.Response:
         name = (request.url.host or "").split(".", 1)[0]
+        if self.modes.get(name) == "revoked":
+            return _error(401, "credential_revoked", "this console credential was revoked")
         leader = self.leaders.get(name)
         if leader is None or self.modes.get(name) == "down":
             raise httpx.ConnectError("connection refused", request=request)
@@ -341,7 +347,13 @@ class FakeLeaders:
             return _error(404, "not_found", "Not Found")
         route, params = found
         if not at_least(role, route.role):
-            return _error(403, "forbidden", f"this needs the {route.role} role")
+            # The real leader's two sentences (swarmscribe_leader.api.admin_auth._refusal).
+            reason = (
+                f"console e2e is limited to {cap}"
+                if not at_least(cap, route.role)
+                else f"you have {role}"
+            )
+            return _error(403, "forbidden", f"this needs the {route.role} role; {reason}")
         raw = await request.aread()
         body = json.loads(raw) if raw else {}
         query = dict(request.url.params)

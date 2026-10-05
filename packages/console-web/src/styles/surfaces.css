@@ -365,6 +365,21 @@ html:has(dialog[open]) {
   color: var(--bad);
 }
 
+/* A read that has nothing to show for a reason the page has already given (the leader is not
+   answering, or is switched off): one quiet line and, where it can work, a retry. */
+.quiet-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-3) var(--s-5);
+  margin: var(--s-4) 0;
+  color: var(--muted);
+}
+
+.quiet-note p {
+  margin: 0;
+}
+
 .action-notice {
   display: flex;
   align-items: center;

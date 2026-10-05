@@ -97,6 +97,8 @@ test("the last console administrator cannot be removed", async ({ page }) => {
   const dialog = page.getByRole("alertdialog");
   await dialog.getByRole("button", { name: "Remove administrator" }).click();
   await expect(dialog.getByRole("alert")).toContainText("The last console administrator cannot be removed.");
+  await expect(dialog.getByRole("alert")).toContainText("Add another one first.");
+  await expect(dialog.getByRole("alert")).not.toContainText("this is the last");
 });
 
 test("a person who is not a console administrator has no administration", async ({ page }) => {

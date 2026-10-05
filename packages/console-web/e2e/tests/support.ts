@@ -19,7 +19,7 @@ export async function resetWorld(request: APIRequestContext): Promise<void> {
 export async function setLeaderMode(
   request: APIRequestContext,
   name: string,
-  mode: "ok" | "down",
+  mode: "ok" | "down" | "revoked",
 ): Promise<void> {
   const answer = await request.post(`${CONTROL}/control/leaders/${name}/mode`, { data: { mode } });
   expect(answer.ok()).toBe(true);

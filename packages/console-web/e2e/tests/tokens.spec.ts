@@ -250,7 +250,8 @@ test("a slow create that fails shows its error and Create works again", async ({
   for (let i = 0; i < 5; i += 1) await page.keyboard.press("Escape");
   release();
   await expect(form).toBeVisible();
-  await expect(form.getByText("The leader is not answering right now.")).toBeVisible();
+  await expect(form.getByText("eu-1 is not answering right now.")).toBeVisible();
+  await expect(form).not.toContainText("cannot be reached");
   await expect(form.getByRole("button", { name: "Create token" })).not.toHaveAttribute("aria-disabled", "true");
 
   fail = false;

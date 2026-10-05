@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { expect, signIn, test } from "./support";
+import { chooseTheme, expect, signIn, test } from "./support";
 
 const TOKEN_POST = "**/api/leaders/eu-1/tokens";
 
@@ -264,9 +264,10 @@ test("a slow create that fails shows its error and Create works again", async ({
 for (const theme of ["dark", "light"] as const) {
   for (const width of [1280, 900, 768, 390, 320]) {
     test(`the whole join token can be read in its field: ${theme} at ${width}px`, async ({ page }) => {
-      await page.emulateMedia({ colorScheme: theme });
+      await chooseTheme(page, theme);
       await page.setViewportSize({ width, height: 900 });
       await signIn(page, "admin", "/leaders/eu-1/tokens");
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await openCreate(page);
       await page.keyboard.press("Enter");
       const shown = page.getByRole("dialog", { name: "Here is the join token. It is shown once." });

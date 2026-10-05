@@ -25,8 +25,9 @@ in that language and approved them.
 
 1. Every screen matches its approved mockup in layout, colour, type and wording, except
    where section 10 says why not.
-2. The dark Ink console is the designed default. A light theme exists, follows the system
-   setting and the Theme switch, and is designed, not derived.
+2. The dark Ink console is the default for everyone, whatever the system is set to (owner's
+   ruling on O6). A light theme exists, is chosen in the Theme switch (as Light, or as System
+   on a light system), and is designed, not derived.
 3. Every user-visible string is the one in section 6.
 4. Nothing about behaviour changes: section 8.
 5. Accessibility is at least what it was: section 7. Zero axe violations (WCAG 2.1 A and
@@ -91,21 +92,23 @@ everything inside it reads the same token names.
 So a sheet is always the opposite of the page it sits on. Buttons, fields, links and error
 panels inside a sheet need no special rules: they read the sheet's set.
 
-Theme selection is unchanged in mechanism (`src/app/theme.ts` sets `data-theme` on
-`<html>`, or leaves it off to follow the system). The stylesheet's base is now the dark
-set, and `prefers-color-scheme: light` gives the light theme unless `data-theme="dark"`.
-In practice a browser always reports light or dark, so with Theme on "System" the console
-is light on a light system and dark on a dark one, as before. See O6.
+Theme selection (`src/app/theme.ts`) sets `data-theme` on `<html>` to `dark`, `light` or
+`system`. **Dark is the default for everyone** (owner's ruling on O6): with nothing stored the
+choice is Dark, whatever `prefers-color-scheme` says. The stylesheet's base is the dark set,
+with no attribute needed, so the page is dark even before any script runs;
+`prefers-color-scheme: light` gives the light theme only under `data-theme="system"`. Light
+and System are a person's explicit choices in the Theme switch; each is stored and wins from
+then on. System is no longer the default and is no longer stored as "nothing".
 
 **Theme boot script.** The chosen theme is set before the first paint, not after the app
-loads, or a person who chose Dark on a light system (or the reverse) would see the system's
-theme flash. `src/theme-boot.ts` calls `applyTheme(readTheme())` from `app/theme.ts`, so the
+loads, or a person who chose Light or System would see the dark default flash. `src/theme-boot.ts` calls `applyTheme(readTheme())` from `app/theme.ts`, so the
 storage key has one source. `vite.config.ts` builds it on its own, as a script with no imports
 left, to `assets/theme-<hash>.js`, and puts it in `<head>` as a plain blocking
 `<script src>` (no `type`, `defer` or `async`), so the CSP's `script-src 'self'` still holds.
 `scripts/check-dist.mjs` fails the build if it is missing, not in `<head>`, not classic, or
 has import or export left in it. `theme.spec.ts` holds the app script back and checks the
-painted background for both mismatches.
+painted background: ink on a light system with nothing chosen (and with the boot script
+blocked altogether), and the chosen theme for each mismatch.
 
 ### 3.2 Colour
 
@@ -541,7 +544,7 @@ Rules:
 | `{email}` | Same |
 | (none) | "Console administrator" (for one) |
 | (none) | "Admin on 2 leaders" / "Admin on 2, viewer on 1 leader" / "No role on any leader yet" |
-| "Theme", "System", "Light", "Dark" | Same |
+| "Theme", "System", "Light", "Dark" | Same words; the order is Dark, Light, System, and Dark is what a person starts on |
 | "Sign out" | Same |
 | "Skip to main content" | Same |
 | "Updates are paused because you have been inactive. Press any key or click to resume." | "Checks are paused because you have been away. Press a key or click to start them again." |
@@ -989,8 +992,9 @@ Everything C3 established stays, and is tested where it was tested.
     The page does not scroll sideways at 1280, 768 or 390 pixels because of one. A group's
     object ID wraps inside its cell (`.ident`), never preferring a hyphen. The test measures
     overflow after fonts are ready and two frames have passed.
-18. **The chosen theme wins.** Dark chosen on a light system, or Light on a dark one, is
-    what is painted, and it survives a reload. The rail is ink either way.
+18. **Dark until chosen, then the chosen theme wins.** With no choice the console is dark on
+    a light system too, the sign-in page included. Light on a dark system, or System, is what
+    is painted once chosen, and it survives a reload. The rail is ink either way.
 
 ## 8. What does not change
 
@@ -1005,7 +1009,8 @@ Everything C3 established stays, and is tested where it was tested.
 - Polling: intervals, the idle pause, the hidden-tab pause, the 401 latch.
 - Form validation rules and what each form sends.
 - The dialog component's behaviour, the double-submit guard, the one-time token rules.
-- The theme switch's three choices and where the choice is stored.
+- The theme switch's three choices and where the choice is stored. (Changed afterwards by the
+  owner's ruling on O6: the default is Dark, not System, and System is stored like the others.)
 - Dependencies: none added, none removed.
 - The backend. Nothing outside `packages/console-web` changes.
 
@@ -1082,7 +1087,7 @@ could not be replaced. The hexagon is a `clip-path`; the logo is inline SVG.
 | O3 | **The sign-in note's exact times.** To say "8 hours" and "an hour" truthfully the console's API would have to send its session settings with the list of providers. That is a backend change. | The general sentence. |
 | O4 | **"Wind down" for drain** (M15), and **"Who can do what" vocabulary** (M16). | As written in section 6. |
 | O5 | **Follower names.** The drawing shows "gpu-02". Followers have no name in the API. | The id's first eight characters. |
-| O6 | **Should the console be dark for everyone until they choose otherwise?** C3 says the app "already honours the system preference", so a person on a light system gets the light theme first. Browsers always report light or dark, so "dark by default" only shows on a dark system. Making Ink the first thing everyone sees means changing what "System" does, or defaulting the switch to Dark. | Follows the system. Dark only where the system is dark or Dark is chosen. |
+| O6 | **Should the console be dark for everyone until they choose otherwise?** C3 says the app "already honours the system preference", so a person on a light system gets the light theme first. Browsers always report light or dark, so "dark by default" only shows on a dark system. Making Ink the first thing everyone sees means changing what "System" does, or defaulting the switch to Dark. | **Ruled by the owner, 2026-10-05: dark for everyone.** With no stored choice the console is dark whatever the system says, from the first paint. Light and System are explicit choices in the Theme switch and are remembered. (Before the ruling it followed the system.) |
 | O7 | **Health in Administration.** It needs either a console-administrator view of the fleet in the API, or accepting an often-empty column. | Not shown. |
 
 ## 12. Delivery

@@ -36,8 +36,9 @@ never goes in a URL, in storage or in state that outlives its dialog.
 
 ## What it looks like
 
-Dark by default, on warm ink with honey amber; a designed light theme (paper page, ink rail)
-follows the system or the Theme switch. A rail on the left runs the full height of the window:
+Dark for everyone by default, on warm ink with honey amber, whatever the system is set to. A
+designed light theme (paper page, ink rail) is one choice away in the Theme switch, which also
+offers System; the choice is remembered. A rail on the left runs the full height of the window:
 the brand, Fleet, one link per leader you can see (flagged "no answer", "revoked" or "off"),
 Administration for console administrators, and your name, Theme and Sign out pinned at the
 bottom. Below 900px the rail becomes a sticky top bar with a Menu button.
@@ -81,8 +82,9 @@ a component, not in another stylesheet (the mark's two brand constants in `shell
 only exception). A test fails on any hex colour outside that file. To change a colour, change
 its token. `src/styles/tokens.test.ts` measures the
 tokens: it fails when a text pair is under 4.5:1, a mark or control edge under 3:1, or the
-two copies of a colour set differ. The dark theme is the default; the light theme follows
-the system setting or the Theme switch in the rail.
+two copies of a colour set differ. The dark theme is the default for everyone: the stylesheet is
+dark with no attribute and no script. Light, and following the system, are choices in the
+Theme switch in the rail (`data-theme="light"` or `"system"` on `<html>`).
 
 There are no inline styles, no web fonts and no images from another origin. The logo is
 inline SVG (`src/components/Brand.tsx`); the favicon is a hashed asset.
@@ -92,8 +94,8 @@ inline SVG (`src/components/Brand.tsx`); the favicon is a hashed asset.
 `index.html` loads a small classic (blocking) script, in `<head>`, before the page's first paint. It is built from
 `src/theme-boot.ts` (Vite builds it on its own, with no imports left and a hashed name, so the
 CSP still holds) and does what `main.tsx` does later: reads the stored theme and sets
-`data-theme` on `<html>`. Without it, a person who chose Dark on a light system, or the
-reverse, would see the system's theme flash before the app loaded. `scripts/check-dist.mjs`
+`data-theme` on `<html>` (dark when nothing is stored). Without it, a person who chose Light or
+System would see the dark default flash before the app loaded. `scripts/check-dist.mjs`
 fails the build if the script is missing from `index.html`.
 
 ### Adding a route

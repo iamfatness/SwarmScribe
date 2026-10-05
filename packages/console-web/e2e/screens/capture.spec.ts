@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Page } from "@playwright/test";
-import { expect, setLeaderMode, signIn, test } from "../tests/support";
+import { chooseTheme, expect, setLeaderMode, signIn, test } from "../tests/support";
 
 // Not a test of behaviour: it photographs every screen in both themes at desktop and tablet
 // width, into packages/console-web/screens/, for a person to LOOK at. jsdom and axe pass
@@ -65,7 +65,9 @@ for (const theme of THEMES) {
           fullPage,
         });
       };
+      // Dark is the default whatever the system says; the light shots choose Light.
       await page.emulateMedia({ colorScheme: theme });
+      await chooseTheme(page, theme);
       await page.setViewportSize({ width, height: 900 });
 
       await page.goto("/sign-in?signed_out=1");

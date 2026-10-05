@@ -89,6 +89,18 @@ export async function expectAccessible(page: Page, context: string): Promise<voi
 export const THEMES = ["light", "dark"] as const;
 
 /**
+ * Has the person's Theme choice already made when the page opens. The console is dark for
+ * everyone until they choose (the system's setting is not followed), so a test of the light
+ * theme chooses Light, as a person would. A choice made later, in the page, is kept.
+ */
+export async function chooseTheme(page: Page, theme: "light" | "dark" | "system"): Promise<void> {
+  await page.addInitScript((choice) => {
+    const key = "swarmscribe-console-theme";
+    if (localStorage.getItem(key) === null) localStorage.setItem(key, choice);
+  }, theme);
+}
+
+/**
  * Every test fails on a Content Security Policy violation, an uncaught page error or a
  * browser request to anything but the console (the tests must never depend on the
  * Internet), and starts from a freshly reset console.

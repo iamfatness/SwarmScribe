@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     shutdown_grace_seconds: float = Field(default=8.0, ge=0)
     on_drained: Literal["exit", "park"] = "exit"
     log_format: Literal["json", "text"] = "json"
+    # `host:port` for /healthz and /metrics. Unset: no listener, and no port is opened.
+    health_addr: str | None = None
 
     @field_validator(
         "join_token",
@@ -68,6 +70,7 @@ class Settings(BaseSettings):
         "scratch_dir",
         "model_dir",
         "startup_model",
+        "health_addr",
         mode="before",
     )
     @classmethod
@@ -108,6 +111,17 @@ class Settings(BaseSettings):
             raise ValueError("startup_model must be a model name or owner/name, never a path")
         return value
 
+    @field_validator("health_addr")
+    @classmethod
+    def _a_host_and_a_port(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        host, _, port = value.strip().rpartition(":")
+        host = host.removeprefix("[").removesuffix("]")  # [::1]:9108
+        if not host or not port.isascii() or not port.isdigit() or not 0 < int(port) < 65536:
+            raise ValueError("health_addr must be host:port, e.g. 127.0.0.1:9108")
+        return f"{host}:{int(port)}"
+
     @model_validator(mode="after")
     def _startup_model_is_allowed(self) -> "Settings":
         if (
@@ -143,6 +157,14 @@ class Settings(BaseSettings):
     @property
     def scratch(self) -> Path:
         return self.scratch_dir or self.state_dir / "scratch"
+
+    @property
+    def health_address(self) -> tuple[str, int] | None:
+        """(host, port) to listen on for /healthz and /metrics, or None for no listener."""
+        if self.health_addr is None:
+            return None
+        host, _, port = self.health_addr.rpartition(":")
+        return host, int(port)
 
     @property
     def credential_file(self) -> Path:

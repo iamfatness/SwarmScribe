@@ -27,7 +27,14 @@ from swarmscribe_engine import (
 )
 from swarmscribe_protocol import ClaimResponse, FailureCode, JobLinks, OutputChecksums
 
-from .leader import Interrupted, LeaderClient, Refused, Transient, retrying
+from .leader import (
+    REQUEST_TIMEOUT_SECONDS,
+    Interrupted,
+    LeaderClient,
+    Refused,
+    Transient,
+    retrying,
+)
 from .lease import (
     CANCELLED,
     LEASE_GONE,
@@ -63,6 +70,7 @@ SUBMIT_500_LIMIT = 5
 TELL_ATTEMPTS = 3
 TELL_WAIT_CAP_SECONDS = 10.0
 UPLOAD_AGAIN = frozenset({"outputs_missing", "checksum_mismatch", "outputs_changed"})
+KEEPER_INTERVALS = 3  # /healthz: the lease keeper must have gone round within this many
 
 # JobResult.outcome
 COMPLETED = "completed"
@@ -148,6 +156,7 @@ class JobRunner:
         self._device, self._interval = device, heartbeat_interval
         self._clock, self._sleep = clock, sleep
         self._metrics = metrics or Metrics()
+        self._keeper: LeaseKeeper | None = None
         self._control: JobControl | None = None
         self._phase = "idle"
         self._transcribing_since = 0.0
@@ -174,6 +183,16 @@ class JobRunner:
             return elapsed * (1.0 - progress) / progress + UPLOAD_ALLOWANCE_SECONDS
         return None
 
+    def keeper_stalled(self) -> bool:
+        """True when a job is held and its lease keeper has not gone round its loop for
+        three heartbeat intervals plus the time one request may take (follower spec 9). A
+        leader that does not answer never makes this true: the keeper still goes round."""
+        keeper = self._keeper
+        if keeper is None or not keeper.is_alive():
+            return False  # no job, or the keeper ended itself and stopped the job
+        allowed = KEEPER_INTERVALS * self._interval + REQUEST_TIMEOUT_SECONDS
+        return time.monotonic() - keeper.last_loop > allowed
+
     # --- the job -------------------------------------------------------------------------
 
     def run(self, claim: ClaimResponse, control: JobControl) -> JobResult:
@@ -193,7 +212,7 @@ class JobRunner:
             on_failure=self._metrics.heartbeat_failed,
         )
         folder: Path | None = None
-        self._control, self._phase = control, "starting"
+        self._control, self._phase, self._keeper = control, "starting", keeper
         try:
             try:
                 keeper.start()
@@ -207,7 +226,7 @@ class JobRunner:
         finally:
             keeper.finish()
             self._clean_up(folder, extra)
-            self._control, self._phase = None, "idle"
+            self._control, self._phase, self._keeper = None, "idle", None
         logger.info(
             "job %s%s",
             result.outcome,

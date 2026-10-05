@@ -24,6 +24,7 @@ from .config import Settings
 from .credentials import CredentialFileError, CredentialStore
 from .device import cached_models, probe
 from .errors import EXIT_CONFIGURATION, EXIT_OK, EXIT_UNFIT, FollowerExit
+from .health import HealthServer
 from .leader import LeaderClient, Refused, Transient
 from .metrics import Metrics
 from .models import ModelHost, ModelUnavailable, OutOfMemory
@@ -165,7 +166,19 @@ def command_run(settings: Settings, build: Build, signals: StopSignals | None = 
         logger.info("stopping: stopped before it started")
         return EXIT_OK
     agent = build(settings)
-    return agent.run_supervised(signals=signals)
+    listener = None
+    if settings.health_address is not None:
+        # Before the model is loaded (spec 5.2, step 2): a slow load or a first download
+        # must not look like a failed start to whoever probes /healthz.
+        listener = HealthServer(
+            settings.health_address, healthy=agent.health, metrics=agent.metrics.render
+        )
+        listener.start()
+    try:
+        return agent.run_supervised(signals=signals)
+    finally:
+        if listener is not None:
+            listener.close()
 
 
 def command_join(

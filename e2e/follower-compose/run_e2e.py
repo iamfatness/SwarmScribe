@@ -255,6 +255,50 @@ def registrations(service: str) -> list[str]:
     return found
 
 
+# What a follower prints when its start-up model cannot be loaded (agent.py). An image built
+# without MODELS is not offline and tries a download the network forbids, so it may take a
+# while to say so; one built with another model says so at once and exits 3.
+MODEL_FAILURE = "cannot transcribe with its start-up model"
+EXIT_MEANS = {
+    2: "its configuration or its state folder is refused",
+    3: "this machine or image cannot do the work",
+    4: "it is not authorised: the join token was refused",
+    5: "the leader speaks another protocol version",
+    137: "it was killed",
+}
+
+
+def gave_up(service: str) -> str | None:
+    """Why this follower will never register: it has exited, or it has said that its model
+    cannot be loaded (it may be between restarts). None while it is still on its way. The
+    answer names the cause, so that a wait for it need not run to its timeout. The last log
+    line is safe to show: a follower's exit reason never holds a token, credential or link."""
+    seen = container(service)
+    if seen is None:
+        return None
+    said = [line.strip() for line in logs(service).splitlines() if line.strip()]
+    last = said[-1][:400] if said else "(it logged nothing)"
+    failed = next((line[:400] for line in reversed(said) if MODEL_FAILURE in line), None)
+    bake = (
+        f". Is the image built with `--build-arg MODELS={target.model}`? This scenario needs"
+        " the model baked in: its followers have no route out to download one. "
+    )
+    exited = ""
+    if seen.status == "exited":
+        means = EXIT_MEANS.get(seen.exit_code, "an unexpected error")
+        exited = f"{service} exited {seen.exit_code} ({means})"
+    if failed is not None:
+        subject = f"{exited}: it" if exited else service
+        return f"{subject} cannot load its model{bake}It said: {failed}"
+    if exited:
+        return f"{exited} before it registered: {last}"
+    return None
+
+
+def a_follower_gave_up() -> str | None:
+    return next((why for why in map(gave_up, FOLLOWERS) if why), None)
+
+
 def start(service: str) -> None:
     must(compose("start", service), f"starting {service}")
 
@@ -277,13 +321,22 @@ Sessions = async_sessionmaker[AsyncSession]
 
 
 async def until(
-    check: Callable[[], Awaitable[Any]], what: str, within: float = STEP_SECONDS
+    check: Callable[[], Awaitable[Any]],
+    what: str,
+    within: float = STEP_SECONDS,
+    *,
+    unless: Callable[[], str | None] | None = None,
 ) -> Any:
+    """Wait for `check`. `unless` is asked on every round and ends the wait at once, with
+    its own words, when what is waited for can no longer happen."""
     deadline = time.monotonic() + within
     while time.monotonic() < deadline:
         found = await check()
         if found:
             return found
+        why = unless() if unless is not None else None
+        if why:
+            raise AssertionError(f"{why} (while waiting for {what})")
         await asyncio.sleep(0.5)
     raise AssertionError(f"timed out after {within:.0f} s waiting for {what}")
 
@@ -423,7 +476,7 @@ async def scenario(sessions: Sessions) -> Report:
     async def both_registered() -> bool:
         return len(await followers(sessions)) == len(FOLLOWERS)
 
-    await until(both_registered, "both followers to register")
+    await until(both_registered, "both followers to register", unless=a_follower_gave_up)
     registered_after = time.monotonic() - started
 
     async def both_said_so() -> bool:

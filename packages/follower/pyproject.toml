@@ -12,6 +12,12 @@ dependencies = [
     "prometheus-client>=0.20,<1",
 ]
 
+[project.optional-dependencies]
+# The GPU library CTranslate2 loads by name at the first inference (follower spec D15).
+cuda = [
+    "nvidia-cublas-cu12>=12,<13; sys_platform == 'linux' or sys_platform == 'win32'",
+]
+
 [project.scripts]
 swarmscribe-follower = "swarmscribe_follower.entry:run"
 

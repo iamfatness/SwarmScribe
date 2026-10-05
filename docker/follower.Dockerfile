@@ -86,7 +86,8 @@ ENV PATH="/app/.venv/bin:${PATH}" \
     SWARMSCRIBE_FOLLOWER_STARTUP_MODEL=${MODELS%%,*} \
     SWARMSCRIBE_FOLLOWER_OFFLINE=${BAKED:-0} \
     HF_HUB_CACHE=/models \
-    HF_HUB_OFFLINE=${BAKED:-0}
+    HF_HUB_OFFLINE=${BAKED:-0} \
+    SWARMSCRIBE_FOLLOWER_HEALTH_ADDR=127.0.0.1:9108
 # HF_HUB_*: the follower sets them itself; the engine CLI in the image (swarmscribe-engine)
 # reads only these two, so a baked image runs it offline against the same cache.
 # Before the environment: a code change does not move a 3 GB model layer.
@@ -97,7 +98,11 @@ USER 10001:10001
 # recording is ever written into the container's own layer. /models is not declared: a
 # volume there would copy a baked model on every start. Mount one to keep downloads.
 VOLUME ["/var/lib/swarmscribe-follower", "/scratch"]
-# No HEALTHCHECK yet: the follower listens on no port. Plan F2b adds the listener and it.
+# /healthz says the follower's threads are alive; it answers while the model loads and
+# while the leader is away. Loopback only: nothing outside the container can reach it. A
+# follower started with the listener turned off (the variable set to nothing) is not probed.
+# The probe's `python -c` child is reaped by the init every time.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3   CMD ["python", "-c", "import os, sys, urllib.request; a = os.environ.get('SWARMSCRIBE_FOLLOWER_HEALTH_ADDR', ''); sys.exit(0 if not a or urllib.request.urlopen('http://' + a + '/healthz', timeout=3).status == 200 else 1)"]
 # tini is PID 1 and the follower its only child; no shell in between. The kernel gives PID 1
 # no default action for a signal, so a SIGTERM that reached a follower running as PID 1
 # before Python had installed its handlers was dropped: `docker stop` just after `docker run`

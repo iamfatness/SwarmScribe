@@ -69,6 +69,12 @@ volumes="$(docker inspect --format '{{range $path, $_ := .Config.Volumes}}{{prin
 [ "$(setting SWARMSCRIBE_FOLLOWER_SCRATCH_DIR)" = "/scratch" ] || fail "the scratch folder is not set"
 [ "$(setting SWARMSCRIBE_FOLLOWER_MODEL_DIR)" = "/models" ] || fail "the model folder is not set"
 
+# The listener for /healthz and /metrics is on loopback only, and the image probes it.
+[ "$(setting SWARMSCRIBE_FOLLOWER_HEALTH_ADDR)" = "127.0.0.1:9108" ] \
+  || fail "the health listener is not on 127.0.0.1:9108"
+docker inspect --format '{{json .Config.Healthcheck}}' "$image" | grep -q '/healthz' \
+  || fail "the image has no HEALTHCHECK on /healthz"
+
 # The credential is refused in a folder that others can write to, or that is not its own.
 docker run --rm --entrypoint sh "$image" -c \
   'test "$(stat -c "%u:%g %a" /var/lib/swarmscribe-follower)" = "10001:10001 700" \
@@ -267,6 +273,7 @@ if ref != entry["revision"]:
     # `docker stop` during start-up ends it with exit 0, well inside Docker's 10 s.
     # With no network the registration is retried for ever, which is where it is stopped.
     docker run -d --name "$name" "${locked[@]}" "${gpu[@]}" "${leader[@]}" \
+      --health-interval 2s --health-start-period 1s \
       -e SWARMSCRIBE_JOIN_TOKEN=not-a-token "$image" >/dev/null
     for _ in $(seq 1 60); do
       docker logs "$name" 2>&1 | grep -q 'loaded on' && break
@@ -281,6 +288,22 @@ if ref != entry["revision"]:
       'for s in /proc/[0-9]*/status; do grep -q "^PPid:[[:space:]]*1\$" "$s" && tr "\0" " " <"${s%status}cmdline" && echo; done; true')"
     echo "$children" | grep -q 'bin/swarmscribe-follower run' \
       || fail "the follower is not the child of PID 1: $children"
+
+    # Healthy with no leader in reach: /healthz is about the follower's own threads.
+    health=""
+    for _ in $(seq 1 30); do
+      health="$(docker inspect --format '{{.State.Health.Status}}' "$name")"
+      [ "$health" = "healthy" ] && break
+      sleep 1
+    done
+    [ "$health" = "healthy" ] || fail "Docker reports the follower $health while it waits for a leader"
+    metrics="$(docker exec "$name" python -c \
+      "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:9108/metrics', timeout=3).read().decode())")" \
+      || fail "/metrics does not answer"
+    echo "$metrics" | grep -q '^swarmscribe_follower_state{state="idle"} 1.0$' \
+      || fail "/metrics does not show an idle follower"
+    echo "$metrics" | grep -q '^swarmscribe_follower_model_load_seconds [0-9]' \
+      || fail "/metrics does not show the model load"
     begun="$(date +%s)"
     docker stop --time 8 "$name" >/dev/null
     took="$(($(date +%s) - begun))"

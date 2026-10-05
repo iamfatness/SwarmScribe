@@ -60,7 +60,7 @@ export async function signIn(page: Page, persona: Persona, path = "/"): Promise<
   });
   await page.goto(path);
   await expect(page).toHaveURL(/\/sign-in/);
-  await page.getByRole("link", { name: "Sign in with Microsoft Entra ID" }).click();
+  await page.getByRole("link", { name: "Continue with Microsoft" }).click();
   await expect(page.getByText("Microsoft sign-in")).toBeVisible();
   expect(redirect.status).toBe(302);
   expect(redirect.location.startsWith(ENTRA)).toBe(true);

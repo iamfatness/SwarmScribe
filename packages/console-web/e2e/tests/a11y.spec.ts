@@ -20,8 +20,10 @@ for (const theme of THEMES) {
 
     test("the sign-in page has no accessibility violations", async ({ page }) => {
       await page.goto("/sign-in?signed_out=1");
-      await expect(page.getByRole("link", { name: "Sign in with Microsoft Entra ID" })).toBeVisible();
+      await expect(page.getByRole("link", { name: "Continue with Microsoft" })).toBeVisible();
       await expectAccessible(page, `sign-in (${theme})`);
+      await page.setViewportSize({ width: 768, height: 1024 });
+      await expectAccessible(page, `sign-in at tablet width (${theme})`);
     });
 
     test("every signed-in page has no accessibility violations", async ({ page }) => {

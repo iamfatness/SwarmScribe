@@ -1,0 +1,188 @@
+# SwarmScribe followers: one release of this chart is one pool. The three things you must
+# set are `image`, `leader.url` and `poolToken.existingSecret`.
+
+# Names. fullnameOverride replaces <release>-swarmscribe-follower as the name of every object.
+nameOverride: ""
+fullnameOverride: ""
+
+# Followers in the pool. Each takes one recording at a time; 0 parks the pool.
+replicaCount: 1
+
+# The images are not published: there is no working default. Build one with its model baked
+# in (README, "Deploy a follower pool"), load or push it, then name it here. Both are required.
+image:
+  repository: ""
+  tag: ""
+  # "sha256:..." pins the image by digest and wins over the tag.
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+leader:
+  # SWARMSCRIBE_LEADER_URL: the address followers reach the leader at, e.g.
+  # https://leader.example.org. The leader's own file links are built from ITS
+  # SWARMSCRIBE_PUBLIC_URL, which must be reachable from these pods too.
+  url: ""
+  # true accepts a plain http leader URL and plain http file links
+  # (SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1): a test cluster only.
+  allowHttp: false
+  # A leader whose TLS certificate comes from a private CA: a ConfigMap you created that
+  # holds the CA certificates as PEM, trusted in addition to the public roots.
+  ca:
+    existingConfigMap: ""
+    key: ca.pem
+
+# The pool token (`swarmscribe-admin pool-tokens create --name ... --pool ...`), in a Secret
+# you created. The chart never creates a Secret: a values file and Helm's release history
+# are no place for it. It is mounted as a file and read only when a pod registers, so a
+# changed Secret reaches the next registration without a restart.
+poolToken:
+  existingSecret: ""
+  key: pool-token
+
+# The pool name the followers report (SWARMSCRIBE_FOLLOWER_POOL). The token decides the real
+# pool; keep the two the same.
+pool: default
+
+# A GPU pool: one GPU per pod (one follower uses one GPU, whole), the device set to cuda,
+# and no surge pod on a rollout. Use a `cuda` image; set nodeSelector, tolerations and
+# runtimeClassName below as your cluster's GPU nodes need.
+gpu:
+  enabled: false
+  # The extended resource the device plugin advertises.
+  resource: nvidia.com/gpu
+runtimeClassName: ""
+
+# Other follower settings, without the SWARMSCRIBE_FOLLOWER_ prefix, for example
+#   ALLOWED_MODELS: "large-v3"
+#   LOG_FORMAT: text
+# Names are upper case (^[A-Z][A-Z0-9_]*$). The render refuses a name the chart sets itself
+# (STATE_DIR, SCRATCH_DIR, MODEL_DIR, HEALTH_ADDR, ON_DRAINED, SHUTDOWN_GRACE_SECONDS,
+# MEMORY_LIMIT_MB, ALLOW_HTTP, POOL, DEVICE) and the four the chart takes from its own
+# values (JOIN_TOKEN, JOIN_TOKEN_FILE, LEADER_URL, LEADER_CA_FILE).
+settings: {}
+
+# Extra environment for the follower container, as a list of {name, value|valueFrom}, for
+# example HTTPS_PROXY. A token, the leader's URL and the names the chart sets are refused.
+extraEnv: []
+
+# The port of /healthz and /metrics, on the pod's own address. There is no Service: nothing
+# connects to a follower but the kubelet and, if you let it (networkPolicy.ingress.from),
+# your Prometheus.
+healthPort: 9108
+
+# Memory decides the longest recording a follower takes. A job needs about 3600 MiB per hour
+# of recording beside the model, and a recording that cannot fit under the limit is refused
+# (failed `out_of_resources`), not killed half-way. The memory limit is passed to the follower
+# as SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB. Size it as
+#   what the model holds once loaded + 0.4 GiB + 3600 MiB x hours of the longest recording
+# (README, "Sizing a pool"). The default serves recordings of up to one hour with
+# distil-large-v3 on a CPU or large-v3 on a GPU. Keep the memory request equal to the limit:
+# a follower uses all of it for a few seconds of every long recording.
+# On a CPU pool the CPU limit is also the number of threads (OMP_NUM_THREADS).
+resources:
+  requests:
+    cpu: "2"
+    memory: 6Gi
+  limits:
+    cpu: "4"
+    memory: 6Gi
+
+# Working files: the recording being transcribed and its outputs, on the node's disk, emptied
+# after every job. As large as the largest recording.
+scratch:
+  sizeLimit: 20Gi
+
+# Where models come from.
+#   none                   baked into the image (--build-arg MODELS=...): the default
+#   emptyDir               downloaded by every new pod (needs egress to huggingface.co)
+#   persistentVolumeClaim  a claim you created, holding the cache or filled on first use
+models:
+  volume: none
+  sizeLimit: 10Gi
+  existingClaim: ""
+
+# How long a pod may take to stop. A follower finishes the recording in hand when its
+# estimated time left fits, and hands it back otherwise; it is told 30 s less than this
+# (SWARMSCRIBE_FOLLOWER_SHUTDOWN_GRACE_SECONDS), so handing back fits inside it.
+terminationGracePeriodSeconds: 900
+
+# How long a new pod must stay up before the rollout counts it as available. A pod is Ready
+# about 3 s after it starts, before its model loads and before it registers; one that cannot
+# do either (a bad image, a revoked token) exits within a minute and must not count as
+# available, or an upgrade to it replaces the whole pool. Costs this long per batch on every
+# rollout.
+minReadySeconds: 60
+
+metrics:
+  # true adds prometheus.io/scrape, /port and /path annotations to the pods.
+  scrapeAnnotations: false
+
+podDisruptionBudget:
+  # Off: an evicted follower hands its recording back and another redoes it, so a budget
+  # protects nothing but compute and slows every node drain by up to the grace period per
+  # pod. Rendered only when enabled and replicaCount is above 1.
+  enabled: false
+  maxUnavailable: 1
+
+networkPolicy:
+  # Needs a network plugin that enforces NetworkPolicy; without one this object is accepted
+  # and does nothing. It allows by address and port only, never by name.
+  enabled: true
+  ingress:
+    # Who may reach /healthz and /metrics (NetworkPolicyPeer objects), e.g. your Prometheus:
+    #   - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}
+    # Empty: nobody. On most CNIs the kubelet's probes come from the pod's own node, which
+    # the policy does not cut off; on a CNI that applies ingress policy to node traffic they
+    # are dropped, the startup probe fails and every pod restarts. If the pods' probes fail
+    # with the policy on, add the nodes' address range here (the port is already limited to
+    # healthPort):
+    #   - ipBlock: {cidr: 10.0.0.0/16}
+    # or set networkPolicy.enabled: false. /metrics has no authentication. Where the network
+    # plugin does not match CIDR rules against cluster-managed pods or nodes (Cilium, and GKE
+    # Dataplane V2, which is Cilium), the ipBlock above does not let the probes in either:
+    # set networkPolicy.enabled: false, or use the plugin's own policy for node/host traffic.
+    # Not run here.
+    from: []
+  egress:
+    dns:
+      # Where the pods resolve names. Add an ipBlock for NodeLocal DNSCache
+      # (169.254.20.10/32), which the link-local block below would otherwise cut off.
+      peers:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+    https:
+      # The leader, the storage its file links point at, and (unless the model is baked)
+      # huggingface.co. The port of leader.url is always allowed as well. Peers are matched
+      # AFTER Service address translation: for a leader inside the cluster the port that
+      # counts is its pod's, so list that here if it differs from the Service's.
+      # Object storage that serves its signed links on a port other than 443 (MinIO on 9000,
+      # for example) is blocked until that port is added to this list.
+      ports: [443]
+      cidrs: ["0.0.0.0/0", "::/0"]
+      # More ranges to cut out of 0.0.0.0/0 and ::/0.
+      extraExcept: []
+    # Extra raw egress rules (NetworkPolicyEgressRule objects). Needed for a leader or an
+    # object store that runs INSIDE this cluster on a network plugin where an ipBlock does not
+    # match cluster-managed pods (Cilium, and GKE Dataplane V2, which inherits it): the rule
+    # above would cut the followers off (pods Ready, never registering; not run here). Name
+    # the peer by selector instead:
+    #   - to:
+    #       - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: swarmscribe}}
+    #         podSelector: {matchLabels: {app.kubernetes.io/name: swarmscribe-leader}}
+    #     ports: [{protocol: TCP, port: 8080}]
+    extra: []
+
+serviceAccount:
+  create: true
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

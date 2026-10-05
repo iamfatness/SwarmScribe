@@ -1,0 +1,204 @@
+{{- include "swarmscribe-follower.validate" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "swarmscribe-follower.fullname" . }}
+  labels:
+    {{- include "swarmscribe-follower.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  # A pod is Ready seconds after it starts, before its model loads or it registers; one that
+  # cannot do either exits within a minute. Without this a new pod counts as available at once
+  # and a bad image walks through the whole pool.
+  minReadySeconds: {{ .Values.minReadySeconds }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+      # A surge pod on a GPU pool would wait for a GPU that is not there.
+      maxSurge: {{ ternary 0 "25%" .Values.gpu.enabled }}
+  selector:
+    matchLabels:
+      {{- include "swarmscribe-follower.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- /* The selector labels only: the chart and app version labels would restart every
+        follower on any chart bump. */}}
+        {{- include "swarmscribe-follower.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if or .Values.metrics.scrapeAnnotations .Values.podAnnotations }}
+      annotations:
+        {{- if .Values.metrics.scrapeAnnotations }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.healthPort | toString | quote }}
+        prometheus.io/path: /metrics
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "swarmscribe-follower.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.runtimeClassName }}
+      runtimeClassName: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "swarmscribe-follower.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: follower
+          image: {{ include "swarmscribe-follower.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["run"]
+          ports:
+            - name: health
+              containerPort: {{ .Values.healthPort }}
+              protocol: TCP
+          env:
+            - name: SWARMSCRIBE_LEADER_URL
+              value: {{ .Values.leader.url | quote }}
+            - name: SWARMSCRIBE_JOIN_TOKEN_FILE
+              value: /run/secrets/swarmscribe/pool-token
+            {{- if .Values.leader.ca.existingConfigMap }}
+            - name: SWARMSCRIBE_LEADER_CA_FILE
+              value: {{ printf "/etc/swarmscribe/leader-ca/%s" .Values.leader.ca.key | quote }}
+            {{- end }}
+            {{- if .Values.leader.allowHttp }}
+            - name: SWARMSCRIBE_FOLLOWER_ALLOW_HTTP
+              value: "1"
+            {{- end }}
+            - name: SWARMSCRIBE_FOLLOWER_POOL
+              value: {{ .Values.pool | quote }}
+            # A folder inside the mount, which the follower makes its own (0700). The mount
+            # itself is root's, and a credential is never kept in a folder that is.
+            - name: SWARMSCRIBE_FOLLOWER_STATE_DIR
+              value: /var/lib/swarmscribe-follower/state
+            # A Deployment restarts whatever exits, so a drained follower stays up instead.
+            - name: SWARMSCRIBE_FOLLOWER_ON_DRAINED
+              value: park
+            - name: SWARMSCRIBE_FOLLOWER_SHUTDOWN_GRACE_SECONDS
+              value: {{ sub (int .Values.terminationGracePeriodSeconds) 30 | toString | quote }}
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            # The pod's own address, never loopback: the kubelet probes it from the node.
+            # The brackets serve an IPv6 address and do no harm to an IPv4 one.
+            - name: SWARMSCRIBE_FOLLOWER_HEALTH_ADDR
+              value: "[$(POD_IP)]:{{ .Values.healthPort }}"
+            - name: SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB
+              valueFrom:
+                resourceFieldRef:
+                  containerName: follower
+                  resource: limits.memory
+                  divisor: 1Mi
+            {{- if .Values.gpu.enabled }}
+            - name: SWARMSCRIBE_FOLLOWER_DEVICE
+              value: cuda
+            {{- else }}
+            - name: OMP_NUM_THREADS
+              valueFrom:
+                resourceFieldRef:
+                  containerName: follower
+                  resource: limits.cpu
+                  divisor: "1"
+            {{- end }}
+            {{- range $name, $value := .Values.settings }}
+            - name: SWARMSCRIBE_FOLLOWER_{{ $name }}
+              value: {{ $value | toString | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          securityContext:
+            {{- include "swarmscribe-follower.containerSecurityContext" . | nindent 12 }}
+          # /healthz says the follower's threads are alive: from its first seconds, so also
+          # while the model loads, and also while the leader is away. There is no readiness
+          # probe: nothing routes to a follower.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 2
+            timeoutSeconds: 3
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- include "swarmscribe-follower.resources" . | nindent 12 }}
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/swarmscribe-follower
+            - name: scratch
+              mountPath: /scratch
+            - name: pool-token
+              mountPath: /run/secrets/swarmscribe
+              readOnly: true
+            {{- if ne .Values.models.volume "none" }}
+            - name: models
+              mountPath: /models
+            {{- end }}
+            {{- if .Values.leader.ca.existingConfigMap }}
+            - name: leader-ca
+              mountPath: /etc/swarmscribe/leader-ca
+              readOnly: true
+            {{- end }}
+      volumes:
+        # The credential: in memory, for as long as the pod. A restarted container finds it;
+        # a new pod registers again with the pool token.
+        - name: state
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        - name: scratch
+          emptyDir:
+            sizeLimit: {{ .Values.scratch.sizeLimit | quote }}
+        # The Secret as a volume, never a subPath: the kubelet then refreshes the file when
+        # the Secret changes.
+        - name: pool-token
+          secret:
+            secretName: {{ .Values.poolToken.existingSecret | quote }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.poolToken.key | quote }}
+                path: pool-token
+        {{- if eq .Values.models.volume "emptyDir" }}
+        - name: models
+          emptyDir:
+            sizeLimit: {{ .Values.models.sizeLimit | quote }}
+        {{- else if eq .Values.models.volume "persistentVolumeClaim" }}
+        - name: models
+          persistentVolumeClaim:
+            claimName: {{ .Values.models.existingClaim | quote }}
+        {{- end }}
+        {{- if .Values.leader.ca.existingConfigMap }}
+        - name: leader-ca
+          configMap:
+            name: {{ .Values.leader.ca.existingConfigMap | quote }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

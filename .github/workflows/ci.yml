@@ -207,12 +207,32 @@ jobs:
         run: >-
           helm lint deploy/helm/swarmscribe-console
           -f deploy/helm/swarmscribe-console/ci/test-values.yaml --strict
-      - name: Validate the rendered manifests against the Kubernetes schemas
+      - name: Validate the console chart's manifests against the Kubernetes schemas
         run: |
           helm template console deploy/helm/swarmscribe-console --namespace fleet \
             -f deploy/helm/swarmscribe-console/ci/test-values.yaml > "$RUNNER_TEMP/rendered.yaml"
           kubeconform -strict -summary -kubernetes-version 1.33.0 "$RUNNER_TEMP/rendered.yaml"
-      - name: Check what the chart renders
+      - name: Check what the console chart renders
         run: >-
           uv run --no-project --with pyyaml
           python deploy/helm/swarmscribe-console/ci/check_render.py
+      - name: Lint the follower chart, as a CPU pool and as a GPU pool
+        run: |
+          helm lint deploy/helm/swarmscribe-follower \
+            -f deploy/helm/swarmscribe-follower/ci/test-values.yaml --strict
+          helm lint deploy/helm/swarmscribe-follower \
+            -f deploy/helm/swarmscribe-follower/ci/test-values.yaml \
+            -f deploy/helm/swarmscribe-follower/ci/gpu-values.yaml --strict
+      - name: Validate the follower chart's manifests against the Kubernetes schemas
+        run: |
+          helm template pool deploy/helm/swarmscribe-follower --namespace transcribe \
+            -f deploy/helm/swarmscribe-follower/ci/test-values.yaml > "$RUNNER_TEMP/follower-cpu.yaml"
+          helm template pool deploy/helm/swarmscribe-follower --namespace transcribe \
+            -f deploy/helm/swarmscribe-follower/ci/test-values.yaml \
+            -f deploy/helm/swarmscribe-follower/ci/gpu-values.yaml > "$RUNNER_TEMP/follower-gpu.yaml"
+          kubeconform -strict -summary -kubernetes-version 1.33.0 \
+            "$RUNNER_TEMP/follower-cpu.yaml" "$RUNNER_TEMP/follower-gpu.yaml"
+      - name: Check what the follower chart renders
+        run: >-
+          uv run --no-project --with pyyaml
+          python deploy/helm/swarmscribe-follower/ci/check_render.py

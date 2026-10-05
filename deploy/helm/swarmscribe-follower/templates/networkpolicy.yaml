@@ -1,0 +1,71 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $egress := .Values.networkPolicy.egress }}
+{{- $v4 := include "swarmscribe-follower.refusedV4" . | fromYamlArray }}
+{{- $v6 := include "swarmscribe-follower.refusedV6" . | fromYamlArray }}
+{{- range $egress.https.extraExcept }}
+{{- if contains ":" . }}
+{{- $v6 = append $v6 . }}
+{{- else }}
+{{- $v4 = append $v4 . }}
+{{- end }}
+{{- end }}
+{{- $ports := list (include "swarmscribe-follower.leaderPort" . | int) }}
+{{- range $egress.https.ports }}
+{{- $ports = append $ports (int .) }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "swarmscribe-follower.fullname" . }}
+  labels:
+    {{- include "swarmscribe-follower.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "swarmscribe-follower.selectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  # /healthz and /metrics, and only for the peers named in values. On most CNIs the kubelet's
+  # probes come from the pod's own node, which no NetworkPolicy cuts off; where they are cut
+  # off, add the nodes' range to networkPolicy.ingress.from or set networkPolicy.enabled: false.
+  {{- if .Values.networkPolicy.ingress.from }}
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.healthPort }}
+      from:
+        {{- toYaml .Values.networkPolicy.ingress.from | nindent 8 }}
+  {{- else }}
+  ingress: []
+  {{- end }}
+  egress:
+    # Name resolution.
+    - to:
+        {{- toYaml $egress.dns.peers | nindent 8 }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # The leader, the storage its links point at and the model host: the refused ranges are
+    # cut out of "anywhere".
+    - to:
+        {{- range $egress.https.cidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+            {{- if eq . "0.0.0.0/0" }}
+            except:
+              {{- toYaml $v4 | nindent 14 }}
+            {{- else if eq . "::/0" }}
+            except:
+              {{- toYaml $v6 | nindent 14 }}
+            {{- end }}
+        {{- end }}
+      ports:
+        {{- range $ports | uniq }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    {{- with $egress.extra }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

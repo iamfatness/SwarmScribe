@@ -1,0 +1,23 @@
+# Values the chart is linted and rendered with, locally and in CI. Nothing here is a real secret.
+image:
+  repository: swarmscribe-follower
+  tag: cpu-distil-large-v3
+leader:
+  url: https://leader.example.org
+  ca:
+    existingConfigMap: leader-ca
+poolToken:
+  existingSecret: swarmscribe-pool-token
+pool: cpu-pods
+replicaCount: 2
+settings:
+  ALLOWED_MODELS: "distil-large-v3"
+networkPolicy:
+  ingress:
+    from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: monitoring
+  egress:
+    https:
+      extraExcept: ["10.96.0.0/12", "fd00:10:96::/112"]

@@ -1,0 +1,23 @@
+# A GPU pool, given after test-values.yaml: what the `gpu` checks render the chart with.
+image:
+  repository: swarmscribe-follower
+  tag: cuda-large-v3
+pool: gpu-pods
+replicaCount: 4
+gpu:
+  enabled: true
+runtimeClassName: nvidia
+nodeSelector:
+  nvidia.com/gpu.present: "true"
+tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+resources:
+  requests:
+    cpu: "2"
+    memory: 8Gi
+  limits:
+    memory: 8Gi
+podDisruptionBudget:
+  enabled: true

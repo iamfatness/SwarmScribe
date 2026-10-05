@@ -35,10 +35,10 @@ export function ConsentTab({ leader }: TabProps) {
                   <thead>
                     <tr>
                       <th scope="col">Location</th>
-                      <th scope="col">Consented</th>
-                      <th scope="col">Not consented</th>
-                      <th scope="col">Withdrawn</th>
-                      <th scope="col">Missing</th>
+                      <th scope="col" className="num">Consented</th>
+                      <th scope="col" className="num">Not consented</th>
+                      <th scope="col" className="num">Withdrawn</th>
+                      <th scope="col" className="num">Missing</th>
                     </tr>
                   </thead>
                   <tbody>

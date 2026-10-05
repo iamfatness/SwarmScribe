@@ -3,8 +3,8 @@ import { startActivityTracking } from "./app/activity";
 import { FleetProvider } from "./app/fleet";
 import { RouterProvider, matchPath, useLocation, useNavigate } from "./app/router";
 import { isRouted } from "./app/routes";
-import { SessionProvider, useSession } from "./app/session";
-import { Layout, type NavItem } from "./components/Layout";
+import { SessionProvider } from "./app/session";
+import { Layout } from "./components/Layout";
 import { AdminAdminsPage } from "./pages/admin/AdminAdminsPage";
 import { AdminGrantsPage } from "./pages/admin/AdminGrantsPage";
 import { AdminLeadersPage } from "./pages/admin/AdminLeadersPage";
@@ -13,18 +13,6 @@ import { LeaderPage } from "./pages/leader/LeaderPage";
 import { leaderUrl } from "./pages/leader/tabs";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { SignInPage } from "./pages/SignInPage";
-
-const FLEET: NavItem = {
-  to: "/",
-  label: "Fleet",
-  match: (pathname) => pathname === "/" || pathname.startsWith("/leaders/"),
-};
-
-const ADMIN: NavItem = {
-  to: "/admin/leaders",
-  label: "Administration",
-  match: (pathname) => pathname.startsWith("/admin"),
-};
 
 /**
  * The page a path belongs to, for moving focus: switching tabs inside one leader's
@@ -59,11 +47,9 @@ function SignedInPage() {
 }
 
 function SignedIn() {
-  const { session } = useSession();
-  const nav = session.console_admin ? [FLEET, ADMIN] : [FLEET];
   return (
     <FleetProvider>
-      <Layout nav={nav} pageOf={pageOf}>
+      <Layout pageOf={pageOf}>
         <SignedInPage />
       </Layout>
     </FleetProvider>

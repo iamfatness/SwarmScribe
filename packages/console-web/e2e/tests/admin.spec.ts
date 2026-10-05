@@ -59,7 +59,7 @@ test("a console administrator registers, rotates and removes a leader", async ({
 
   // The new leader has no fake behind it: it shows in the fleet (after the next 10 s
   // refresh) without figures, and the rest of the page is unaffected.
-  await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Fleet" }).click();
+  await page.getByRole("navigation", { name: "Console" }).getByRole("link", { name: "Fleet" }).click();
   await expect(page.getByRole("rowheader", { name: /ap-1/ })).toBeVisible({ timeout: 20_000 });
 
   await page.getByRole("link", { name: "Administration" }).click();

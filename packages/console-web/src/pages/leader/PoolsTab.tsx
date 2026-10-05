@@ -23,12 +23,12 @@ function PoolTable({ leader }: TabProps) {
           <thead>
             <tr>
               <th scope="col">Pool</th>
-              <th scope="col">Queued</th>
-              <th scope="col">Leased</th>
-              <th scope="col">Active followers</th>
-              <th scope="col">Draining</th>
-              <th scope="col">Revoked</th>
-              <th scope="col">Gone</th>
+              <th scope="col" className="num">Queued</th>
+              <th scope="col" className="num">Leased</th>
+              <th scope="col" className="num">Active followers</th>
+              <th scope="col" className="num">Draining</th>
+              <th scope="col" className="num">Revoked</th>
+              <th scope="col" className="num">Gone</th>
             </tr>
           </thead>
           <tbody>
@@ -92,7 +92,7 @@ export function PoolsTab({ leader }: TabProps) {
                     <th scope="col">Pool</th>
                     <th scope="col">State</th>
                     <th scope="col">Device</th>
-                    <th scope="col">Leases</th>
+                    <th scope="col" className="num">Leases</th>
                     <th scope="col">Last seen</th>
                     <th scope="col">Actions</th>
                   </tr>

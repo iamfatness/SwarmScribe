@@ -358,7 +358,7 @@ function TokenList({ leader }: TabProps) {
                     <th scope="col">Token</th>
                     <th scope="col">Pool</th>
                     <th scope="col">State</th>
-                    <th scope="col">Uses</th>
+                    <th scope="col" className="num">Uses</th>
                     <th scope="col">Expires</th>
                     <th scope="col">Created by</th>
                     <th scope="col">Actions</th>

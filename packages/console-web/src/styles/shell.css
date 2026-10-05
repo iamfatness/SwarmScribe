@@ -26,6 +26,7 @@ main {
   flex-direction: column;
   gap: var(--s-8);
   height: 100vh;
+  height: 100dvh;
   padding: 22px 18px;
   overflow-y: auto;
   border-right: 1px solid var(--line);
@@ -265,14 +266,25 @@ main {
     display: block;
   }
 
+  /* The bar stays at the top as the page scrolls. Open, its menu may be taller than a short
+     window: the bar then scrolls on its own, and the page behind does not scroll. */
   .rail {
-    position: static;
+    z-index: 10;
     height: auto;
+    max-height: 100vh;
+    max-height: 100dvh;
     gap: 0;
     padding: var(--s-3) var(--s-5);
-    overflow-y: visible;
     border-right: 0;
     border-bottom: 1px solid var(--line);
+  }
+
+  html {
+    scroll-padding-top: 72px;
+  }
+
+  html.menu-open {
+    overflow: hidden;
   }
 
   .menu-button {

@@ -43,7 +43,16 @@ test("the layout holds at tablet width", async ({ page }) => {
   await expect(page.getByRole("rowheader", { name: /eu-1/ })).toBeVisible();
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   expect(overflow).toBeLessThanOrEqual(0);
+  // Sign out is behind the Menu button at this width.
+  const menu = page.getByRole("button", { name: "Menu" });
+  await expect(menu).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByRole("button", { name: "Sign out" })).toBeHidden();
+  await menu.click();
+  await expect(menu).toHaveAttribute("aria-expanded", "true");
   await expect(page.getByRole("button", { name: "Sign out" })).toBeInViewport();
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeFocused();
+  await expect(page.getByRole("button", { name: "Sign out" })).toBeHidden();
   await expect(page.getByRole("region", { name: "Leaders" })).toBeVisible();
 });
 

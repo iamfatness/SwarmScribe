@@ -56,7 +56,8 @@ describe("leader drill-down", () => {
     renderApp("/")
       .on("GET /api/leaders/eu-1/history?hours=24", reply(200, history()))
       .on("GET /api/leaders/eu-1/followers", reply(200, []));
-    await userEvent.click(await screen.findByRole("link", { name: "eu-1" }));
+    const fleet = within(await screen.findByRole("main"));
+    await userEvent.click(await fleet.findByRole("link", { name: "eu-1" }));
     const heading = await screen.findByRole("heading", {
       level: 1,
       name: "eu-1",
@@ -133,7 +134,7 @@ describe("leader drill-down", () => {
       .on("GET /api/leaders/eu-1/followers", reply(200, []));
     const page = within(await screen.findByRole("main"));
     await userEvent.click(await page.findByRole("link", { name: "Fleet" }));
-    await userEvent.click(await screen.findByRole("link", { name: "us-1" }));
+    await userEvent.click(await page.findByRole("link", { name: "us-1" }));
     await userEvent.click(await screen.findByRole("link", { name: "Jobs" }));
     expect(await screen.findByText("This leader has no jobs.")).toBeInTheDocument();
     release();

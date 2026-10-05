@@ -176,10 +176,10 @@ export function FleetPage() {
               <tr>
                 <th scope="col">Leader</th>
                 <th scope="col">Health</th>
-                <th scope="col">Queued</th>
-                <th scope="col">Completed, last hour</th>
-                <th scope="col">Completed, last day</th>
-                <th scope="col">Failed attempts, last day</th>
+                <th scope="col" className="num">Queued</th>
+                <th scope="col" className="num">Completed, last hour</th>
+                <th scope="col" className="num">Completed, last day</th>
+                <th scope="col" className="num">Failed attempts, last day</th>
                 <th scope="col">Active followers by pool</th>
                 <th scope="col">Oldest queued job (since created)</th>
                 <th scope="col">Last scan errors</th>

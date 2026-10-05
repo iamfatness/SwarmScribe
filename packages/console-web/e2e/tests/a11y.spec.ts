@@ -97,5 +97,18 @@ for (const theme of THEMES) {
       await page.getByRole("button", { name: "Remove eu-1" }).click();
       await expectAccessible(page, `remove leader confirm dialog (${theme})`);
     });
+
+    test("the top bar and its open menu have no accessibility violations at tablet width", async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width: 768, height: 1024 });
+      await signIn(page, "admin");
+      await expect(page.getByRole("heading", { level: 1, name: "Fleet" })).toBeVisible();
+      await expect(page.getByText(/^Loading/)).toHaveCount(0);
+      await expectAccessible(page, `fleet at tablet width (${theme})`);
+      await page.getByRole("button", { name: "Menu" }).click();
+      await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
+      await expectAccessible(page, `fleet at tablet width, menu open (${theme})`);
+    });
   });
 }

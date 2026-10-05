@@ -155,8 +155,8 @@ test("with one leader down its tabs report it, and the other leader stays operab
   await expect(page.getByRole("alert")).toContainText("The leader cannot be reached right now.");
   await expect(page.getByRole("link", { name: "Locations" })).toBeVisible();
 
-  await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Fleet" }).click();
-  await page.getByRole("link", { name: "eu-1" }).click();
+  await page.getByRole("navigation", { name: "Console" }).getByRole("link", { name: "Fleet" }).click();
+  await page.getByRole("main").getByRole("link", { name: "eu-1", exact: true }).click();
   await page.getByRole("link", { name: "Jobs" }).click();
   await page
     .getByRole("button", { name: /^Cancel job / })

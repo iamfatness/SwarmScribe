@@ -74,6 +74,11 @@ td.num {
   text-align: right;
 }
 
+/* A numeric column's header sits over its figures; it keeps the header type. */
+th.num {
+  text-align: right;
+}
+
 .nowrap {
   white-space: nowrap;
 }

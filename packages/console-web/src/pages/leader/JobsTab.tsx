@@ -199,8 +199,8 @@ export function JobsTab({ leader }: TabProps) {
                       <th scope="col">State</th>
                       <th scope="col">Recording</th>
                       <th scope="col">Pool</th>
-                      <th scope="col">Priority</th>
-                      <th scope="col">Attempts</th>
+                      <th scope="col" className="num">Priority</th>
+                      <th scope="col" className="num">Attempts</th>
                       <th scope="col">Created</th>
                       <th scope="col">Detail</th>
                       <th scope="col">Actions</th>

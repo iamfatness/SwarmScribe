@@ -1,0 +1,8 @@
+# Added by `run_e2e.py run --gpu`: the followers get the machine's NVIDIA GPU. Needs the
+# NVIDIA container runtime (Docker Desktop on Windows has it; on Linux, the NVIDIA Container
+# Toolkit) and FOLLOWER_IMAGE set to a cuda image with large-v3 baked in. Never run in CI.
+services:
+  follower-1:
+    gpus: all
+  follower-2:
+    gpus: all

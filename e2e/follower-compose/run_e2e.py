@@ -57,6 +57,7 @@ from swarmscribe_protocol import SegmentsDocument
 
 HERE = Path(__file__).resolve().parent
 COMPOSE_FILE = HERE / "docker-compose.yml"
+GPU_FILE = HERE / "docker-compose.gpu.yml"
 WORK = HERE / "work"
 DATA = WORK / "data"  # mounted at /data in the leaders
 SECRETS = WORK / "secrets"  # mounted at /run/secrets in the followers
@@ -81,6 +82,9 @@ class Target:
 # CI, and the default. Four minutes of audio: on two cores tiny.en needs some 30 s for it
 # on a fast machine and about a minute on a CI runner.
 CPU = Target("cpu", "tiny.en", "int8", (COMPOSE_FILE,), 48)
+# `run --gpu`, on a machine with an NVIDIA GPU: FOLLOWER_IMAGE names a cuda image with
+# large-v3 baked in, and the followers are given the GPU. Eight minutes of audio.
+GPU = Target("cuda", "large-v3", "float16", (COMPOSE_FILE, GPU_FILE), 96)
 target = CPU
 
 # The fixture: the left channel says "The weather today is clear and bright", then the right
@@ -741,8 +745,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="SwarmScribe follower Compose scenario")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("prepare", help="write the recordings and folders (before up)")
-    commands.add_parser("run", help="run the scenario against the running Compose project")
+    scenario_command = commands.add_parser(
+        "run", help="run the scenario against the running Compose project"
+    )
+    scenario_command.add_argument(
+        "--gpu", action="store_true", help="the followers are a cuda image and get the GPU"
+    )
     args = parser.parse_args()
+    global target
+    target = GPU if getattr(args, "gpu", False) else CPU
     try:
         if args.command == "prepare":
             prepare()

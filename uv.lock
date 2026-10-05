@@ -11,6 +11,7 @@ members = [
     "swarmscribe",
     "swarmscribe-console",
     "swarmscribe-engine",
+    "swarmscribe-follower",
     "swarmscribe-leader",
     "swarmscribe-protocol",
 ]
@@ -1486,6 +1487,7 @@ dev = [
     { name = "ruff" },
     { name = "swarmscribe-console" },
     { name = "swarmscribe-engine" },
+    { name = "swarmscribe-follower" },
     { name = "swarmscribe-leader" },
     { name = "swarmscribe-protocol" },
 ]
@@ -1502,6 +1504,7 @@ dev = [
     { name = "ruff", specifier = ">=0.6" },
     { name = "swarmscribe-console", editable = "packages/console" },
     { name = "swarmscribe-engine", editable = "packages/engine" },
+    { name = "swarmscribe-follower", editable = "packages/follower" },
     { name = "swarmscribe-leader", editable = "packages/leader" },
     { name = "swarmscribe-protocol", editable = "packages/protocol" },
 ]
@@ -1552,6 +1555,25 @@ dependencies = [
 requires-dist = [
     { name = "av", specifier = ">=18,<19" },
     { name = "faster-whisper", specifier = ">=1.1,<2" },
+]
+
+[[package]]
+name = "swarmscribe-follower"
+version = "0.1.0"
+source = { editable = "packages/follower" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic-settings" },
+    { name = "swarmscribe-engine" },
+    { name = "swarmscribe-protocol" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "pydantic-settings", specifier = ">=2.4,<3" },
+    { name = "swarmscribe-engine", editable = "packages/engine" },
+    { name = "swarmscribe-protocol", editable = "packages/protocol" },
 ]
 
 [[package]]

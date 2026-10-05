@@ -27,10 +27,18 @@ describe("describeError", () => {
     expect(describeError(new ApiError(400, code, "x")).title).toBe(ERROR_TITLES[code]);
   });
 
-  it("shows leader_not_found as not visible to you", () => {
+  it("shows leader_not_found as a leader the person cannot see", () => {
     expect(describeError(new ApiError(404, "leader_not_found", "no leader with that name")).title).toBe(
-      "This leader is not visible to you.",
+      "You cannot see this leader.",
     );
+  });
+
+  it("says every title as a sentence, in the console's own words", () => {
+    for (const [code, title] of Object.entries(ERROR_TITLES)) {
+      expect(title, code).toMatch(/^[A-Z].*\.$/);
+      // The leader's and the protocol's words stay out of what a person reads.
+      expect(title, code).not.toMatch(/\b(poll|leased|queued|retr(y|ied)|unreachable|principal|scope|URL)\b/i);
+    }
   });
 
   it("keeps the server's message as the detail and adds Retry-After", () => {
@@ -50,13 +58,13 @@ describe("describeError", () => {
 
   it("falls back by status for an unknown code", () => {
     expect(describeError(new ApiError(409, "something_new", "it clashed")).title).toBe(
-      "That conflicts with the current state.",
+      "That no longer fits how things stand. Refresh, then look again.",
     );
     expect(describeError(new ApiError(504, "gateway_timeout", "slow")).title).toBe(
-      "The leader or the console failed to answer.",
+      "The leader or the console did not answer.",
     );
     expect(describeError(new ApiError(429, "slow_down", "wait")).title).toBe(
-      "Too many requests. Wait, then try again.",
+      "Too many requests. Wait a little, then try again.",
     );
   });
 
@@ -65,6 +73,6 @@ describe("describeError", () => {
   });
 
   it("never throws on something that is not an ApiError", () => {
-    expect(describeError(new Error("boom")).title).toBe("The console hit an unexpected error.");
+    expect(describeError(new Error("boom")).title).toBe("Something went wrong in the console.");
   });
 });

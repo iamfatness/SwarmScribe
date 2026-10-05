@@ -61,7 +61,7 @@ describe("leader administration requests", () => {
     await userEvent.type(url, "http://us-1.leaders.example");
     await userEvent.click(submit);
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
-      "That leader URL is not allowed.",
+      "The console may not call that address.",
     );
 
     await userEvent.clear(url);
@@ -277,7 +277,7 @@ describe("administrator and grant refusals", () => {
     await userEvent.type(within(form).getByRole("textbox", { name: "Principal" }), "a1");
     await userEvent.click(within(form).getByRole("button", { name: "Add grant" }));
     const alert = await within(form).findByRole("alert");
-    expect(alert).toHaveTextContent("That scope is not valid.");
+    expect(alert).toHaveTextContent("That is not a way to say which leaders.");
     expect(alert.querySelector("i")).toBeNull();
   });
 });

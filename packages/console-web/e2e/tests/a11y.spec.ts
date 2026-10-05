@@ -130,7 +130,7 @@ for (const theme of THEMES) {
         .first()
         .click();
       await expectAccessible(page, `cancel job confirm dialog (${theme})`);
-      await page.getByRole("button", { name: "Close" }).click();
+      await page.getByRole("button", { name: "No, go back" }).click();
       await page
         .getByRole("button", { name: /^Priority of job / })
         .first()

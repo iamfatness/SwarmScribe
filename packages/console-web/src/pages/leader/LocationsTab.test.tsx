@@ -205,7 +205,7 @@ describe("locations tab", () => {
       );
     await userEvent.click(await screen.findByRole("button", { name: "Scan now intake" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "The location is disabled. Enable it first.",
+      "The location is switched off. Switch it on first.",
     );
   });
 
@@ -217,7 +217,7 @@ describe("locations tab", () => {
     const dialog = screen.getByRole("alertdialog");
     await userEvent.click(within(dialog).getByRole("button", { name: "Disable location" }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
-      "The leader cannot be reached right now.",
+      "The leader is not answering right now.",
     );
   });
 

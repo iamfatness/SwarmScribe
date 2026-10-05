@@ -5,7 +5,8 @@ import { ErrorPanel } from "./ErrorPanel";
 
 /**
  * Asks before a destructive action; shows the action's error in place if it fails. The safe
- * choice comes first, so the dialog puts focus on it and a stray Enter never confirms.
+ * choice ("No, go back") comes first, so the dialog puts focus on it and a stray Enter
+ * never confirms.
  *
  * The close and the action's result belong to this dialog instance (useDialogAction). While
  * the action runs the confirm button is aria-disabled, not disabled, so focus stays put and a
@@ -33,7 +34,7 @@ export function ConfirmDialog({
       {action.error !== null && <ErrorPanel error={action.error} />}
       <div className="dialog-buttons">
         <button type="button" className="button" onClick={action.close}>
-          Close
+          No, go back
         </button>
         <button
           type="button"

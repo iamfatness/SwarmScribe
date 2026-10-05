@@ -83,7 +83,9 @@ describe("SessionProvider", () => {
         <Who />
       </SessionProvider>,
     );
-    expect(await screen.findByRole("alert")).toHaveTextContent("temporarily unavailable");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The console is not answering just now. Try again shortly.",
+    );
     await userEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("signed in as person@example.org")).toBeInTheDocument();
   });

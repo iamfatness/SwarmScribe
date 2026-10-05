@@ -79,7 +79,7 @@ test("the console refuses a leader address it may not call", async ({ page }) =>
   await dialog.getByRole("textbox", { name: "Address (https://)" }).fill("https://localhost");
   await dialog.getByLabel("Console credential").fill(CREDENTIAL);
   await dialog.getByRole("button", { name: "Add leader" }).click();
-  await expect(dialog.getByRole("alert")).toContainText("That leader URL is not allowed.");
+  await expect(dialog.getByRole("alert")).toContainText("The console may not call that address.");
 });
 
 test("the last console administrator cannot be removed", async ({ page }) => {

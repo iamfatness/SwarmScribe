@@ -31,7 +31,7 @@ test("an operator retries a failed job and cancels a queued one with the keyboar
   await page.keyboard.press("Enter");
   const dialog = page.getByRole("alertdialog", { name: /^Cancel job \w{8}\?$/ });
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByRole("button", { name: "Close" })).toBeFocused();
+  await expect(dialog.getByRole("button", { name: "No, go back" })).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(dialog.getByRole("button", { name: "Cancel job" })).toBeFocused();
   await page.keyboard.press("Enter");
@@ -152,7 +152,7 @@ test("with one leader down its tabs report it, and the other leader stays operab
   await signIn(page, "operator", "/leaders/us-1/jobs");
   await setLeaderMode(request, "us-1", "down");
   await page.getByRole("button", { name: "Refresh" }).click();
-  await expect(page.getByRole("alert")).toContainText("The leader cannot be reached right now.");
+  await expect(page.getByRole("alert")).toContainText("The leader is not answering right now.");
   await expect(page.getByRole("link", { name: "Locations" })).toBeVisible();
 
   await page.getByRole("navigation", { name: "Console" }).getByRole("link", { name: "Fleet" }).click();

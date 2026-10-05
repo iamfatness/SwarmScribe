@@ -140,7 +140,7 @@ describe("jobs tab", () => {
     const dialog = screen.getByRole("dialog", { name: "Priority of job 22222222" });
     await userEvent.click(within(dialog).getByRole("button", { name: "Set priority" }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
-      "Only queued or leased jobs can be changed.",
+      "Only jobs that are waiting or being worked on can be changed.",
     );
     expect(screen.getByRole("dialog", { name: "Priority of job 22222222" })).toBeInTheDocument();
   });
@@ -179,7 +179,7 @@ describe("jobs tab", () => {
       headers: { "Retry-After": "15" },
     });
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "The leader cannot be reached right now.",
+      "The leader is not answering right now.",
     );
     expect(screen.getByText(/The console cannot reach eu-1/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Pools and followers" })).toBeInTheDocument();
@@ -195,7 +195,7 @@ describe("jobs tab", () => {
       );
     await userEvent.click(await screen.findByRole("button", { name: "Retry job 11111111" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Only failed or cancelled jobs can be retried.",
+      "Only failed or cancelled jobs can be tried again.",
     );
   });
 
@@ -207,7 +207,7 @@ describe("jobs tab", () => {
     const dialog = screen.getByRole("alertdialog", { name: "Cancel job 22222222?" });
     await userEvent.click(within(dialog).getByRole("button", { name: "Cancel job" }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
-      "Only queued or leased jobs can be changed.",
+      "Only jobs that are waiting or being worked on can be changed.",
     );
   });
 

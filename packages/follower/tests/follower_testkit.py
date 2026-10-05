@@ -7,7 +7,14 @@ follower can tell: statuses, codes and headers; leases that links are bound to; 
 fresh links once per lease per interval, then 429; the drain directive; submit verifying the
 three outputs' checksums, accepting a repeat of a completed submit, and answering
 `stale_lease` otherwise. The source checksum is NOT verified, as in the real leader (it only
-records it). `push` scripts the next answers of one kind of request; `on` hooks run before a
+records it).
+Registration is as strict as the real leader's: the protocol version is checked first; a
+join token is single use (`join_max_uses`, default 1) and a registration with it makes a new
+follower; a pool token is never used up, and it reuses the row of a gone follower that
+holds nothing, which replaces that row's credential (the old one answers 401). Revoking
+(`state = "revoked"`) releases the follower's leases at once, so its links stop working
+before it hears 403. A bearer credential must be sent as `Bearer <credential>`.
+`push` scripts the next answers of one kind of request; `on` hooks run before a
 request is handled. Requests are recorded by kind, never by URL."""
 
 import hashlib
@@ -49,7 +56,8 @@ from swarmscribe_protocol import (
 )
 
 BASE = "https://leader.test"
-JOIN_TOKEN = "join-token-SECRET"
+JOIN_TOKEN = "join-token-SECRET"  # single use, as a real join token is by default
+POOL_TOKEN = "pool-token-SECRET"  # never used up; the row of a gone follower is reused
 SPOKEN = "Welcome to Ashford."
 CPU = DeviceChoice(device="cpu", model="distil-large-v3", compute_type="int8")
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
@@ -97,7 +105,10 @@ class FakeLeader:
         self.lock = threading.RLock()
         self.kinds: list[str] = []  # every request, by kind, in order
         self.bearer_on_links = False
-        self.state = "active"  # of the one follower: active, draining, revoked or gone
+        self._state = "active"  # of the one follower: active, draining, revoked or gone
+        self.join_max_uses = 1
+        self.join_uses = 0
+        self.pool_token_revoked = False
         self.credentials: set[str] = set()
         self.registrations = 0
         self.deregistrations = 0
@@ -116,6 +127,19 @@ class FakeLeader:
         self.max_attempts = 3
         self.issued: dict[str, dict] = {}  # link token -> what it is bound to
         self.transport = httpx.MockTransport(self._handle)
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    @state.setter
+    def state(self, value: str) -> None:
+        with self.lock:
+            self._state = value
+            if value == "revoked":  # the real revoke_follower: release_all, nobody is told
+                for job_id, job in self.jobs.items():
+                    if job["state"] == "leased":
+                        self._release(job_id, record=False)
 
     # --- arranging -----------------------------------------------------------------------
 
@@ -223,7 +247,9 @@ class FakeLeader:
             return error(422, "invalid_request")
         if kind == "register":
             return self._register(body)
-        credential = request.headers.get("authorization", "").removeprefix("Bearer ")
+        scheme, _, credential = request.headers.get("authorization", "").partition(" ")
+        if scheme != "Bearer" or not credential:  # no usable credential: just the scheme
+            return error(401, "unauthorized", **{"WWW-Authenticate": "Bearer"})
         if credential not in self.credentials:
             challenge = {"WWW-Authenticate": 'Bearer error="invalid_token"'}
             return error(401, "unauthorized", **challenge)
@@ -244,18 +270,31 @@ class FakeLeader:
         return error(404, "not_found")
 
     def _register(self, body: dict) -> httpx.Response:
+        invalid = {"WWW-Authenticate": 'Bearer error="invalid_token"'}
         try:
             RegisterRequest.model_validate(body)
         except ValidationError:
             return error(422, "invalid_request")
-        if body["join_token"] != JOIN_TOKEN:
-            return error(401, "unauthorized")
-        if body["protocol_version"] != 1:
+        if body["protocol_version"] != 1:  # the real register checks the version first
             return error(409, "protocol_version")
+        token = body["join_token"]
+        reuse = False
+        if token == JOIN_TOKEN:
+            if self.join_uses >= self.join_max_uses:
+                return error(401, "unauthorized", **invalid)
+            self.join_uses += 1
+        elif token == POOL_TOKEN and not self.pool_token_revoked:
+            holding = any(job["state"] == "leased" for job in self.jobs.values())
+            reuse = self.registrations > 0 and self._state == "gone" and not holding
+        else:
+            return error(401, "unauthorized", **invalid)
         self.registrations += 1
         self.capabilities.append(body["capabilities"])
         credential = f"credential-SECRET-{self.registrations}"
+        if reuse:  # a reused row's old credential stops working: its hash is replaced
+            self.credentials.clear()
         self.credentials.add(credential)
+        self._state = "active"
         answer = {
             "follower_id": str(uuid.uuid4()),
             "credential": credential,
@@ -269,8 +308,8 @@ class FakeLeader:
         for job_id, job in self.jobs.items():  # the real release_all
             if job["state"] == "leased":
                 self._release(job_id)
-        if self.state == "active":  # the real leader: a draining follower stays draining
-            self.state = "gone"
+        if self._state == "active":  # the real leader: a draining follower stays draining
+            self._state = "gone"
         return httpx.Response(204)
 
     def _claim(self) -> httpx.Response:
@@ -299,17 +338,16 @@ class FakeLeader:
     def _mine(job: dict, lease_id: str | None) -> bool:
         return lease_id is not None and lease_id == job["lease"]
 
-    def _release(self, job_id: str) -> None:
+    def _release(self, job_id: str, *, record: bool = True) -> None:
+        """Give a job back. `record`: the follower asked for it (`released` lists those)."""
         job = self.jobs[job_id]
         job.update(state="queued", lease=None)
         job["attempts"] = max(0, job["attempts"] - 1)
         self.queue.append(job_id)
-        self.released.append(job_id)
+        if record:
+            self.released.append(job_id)
 
     def _job(self, kind: str, job_id: str, body: dict) -> httpx.Response:
-        job = self.jobs.get(job_id)
-        if job is None:
-            return error(404, "not_found")
         models = {
             "heartbeat": HeartbeatRequest,
             "links": LinksRequest,
@@ -323,6 +361,9 @@ class FakeLeader:
             models[kind].model_validate(body)
         except ValidationError:
             return error(422, "invalid_request")
+        job = self.jobs.get(job_id)  # the real route validates the body before it looks
+        if job is None:
+            return error(404, "not_found")
         mine = self._mine(job, body["lease_id"])
         stale = error(409, "stale_lease")
         if kind == "heartbeat":

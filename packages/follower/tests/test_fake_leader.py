@@ -4,7 +4,15 @@ against the real leader, so a difference found there is a defect of the fake."""
 
 import httpx
 import pytest
-from follower_testkit import BASE, FakeEngine, FakeLeader, make_runner, sha
+from follower_testkit import (
+    BASE,
+    JOIN_TOKEN,
+    POOL_TOKEN,
+    FakeEngine,
+    FakeLeader,
+    make_runner,
+    sha,
+)
 from swarmscribe_follower.leader import LeaderClient, NoWork, Refused, Transient
 from swarmscribe_follower.lease import JobControl
 from swarmscribe_follower.transfer import LeaseLost, LinkExpired
@@ -225,3 +233,118 @@ def test_a_job_runner_never_sends_its_credential_to_a_link(tmp_path):
     leader.add_job()
     runner.run(client.claim(), JobControl())
     assert leader.bearer_on_links is False
+
+
+# --- registration and revocation as the real leader does them (auth/followers.py) -----------
+
+
+def register(leader, token, version=1):
+    from swarmscribe_protocol import Capabilities
+
+    client = LeaderClient(BASE, transport=leader.transport)
+    capabilities = Capabilities(device="cpu", models=[], engine_version="1", pool="default")
+    if version == 1:
+        return client.register(token, capabilities)
+    body = {
+        "join_token": token,
+        "protocol_version": version,
+        "capabilities": capabilities.model_dump(mode="json"),
+    }
+    return httpx.Client(transport=leader.transport).post(f"{BASE}/v1/followers/register", json=body)
+
+
+def claim_with(leader, credential):
+    return httpx.Client(transport=leader.transport).post(
+        f"{BASE}/v1/jobs/claim", headers={"Authorization": f"Bearer {credential}"}
+    )
+
+
+def test_a_join_token_is_single_use_by_default_and_a_pool_token_is_not():
+    leader = FakeLeader()
+    register(leader, JOIN_TOKEN)
+    with pytest.raises(Refused) as refused:
+        register(leader, JOIN_TOKEN)
+    assert refused.value.status == 401
+    for _ in range(3):
+        register(leader, POOL_TOKEN)
+    assert leader.registrations == 4
+
+
+def test_a_join_token_can_be_given_more_uses_and_a_refusal_carries_the_challenge():
+    leader = FakeLeader()
+    leader.join_max_uses = 2
+    register(leader, JOIN_TOKEN)
+    register(leader, JOIN_TOKEN)
+    response = register(leader, "unknown", version=2)
+    assert response.status_code == 409  # the version is checked before the token
+    refused = httpx.Client(transport=leader.transport).post(
+        f"{BASE}/v1/followers/register",
+        json={
+            "join_token": JOIN_TOKEN,
+            "protocol_version": 1,
+            "capabilities": {"device": "cpu", "models": [], "engine_version": "1", "pool": "p"},
+        },
+    )
+    assert refused.status_code == 401
+    assert refused.headers["www-authenticate"] == 'Bearer error="invalid_token"'
+
+
+def test_a_pool_token_reuses_the_row_of_a_gone_follower_and_kills_its_credential():
+    leader = FakeLeader()
+    first = register(leader, POOL_TOKEN)
+    assert claim_with(leader, first.credential).status_code == 204
+    # Still active: another machine gets a row of its own, the first credential keeps working.
+    second = register(leader, POOL_TOKEN)
+    assert claim_with(leader, first.credential).status_code == 204
+    assert claim_with(leader, second.credential).status_code == 204
+    # A gone follower's row is given to the next registration: its old credential is dead.
+    LeaderClient(BASE, credential=second.credential, transport=leader.transport).deregister()
+    assert leader.state == "gone"
+    third = register(leader, POOL_TOKEN)
+    assert claim_with(leader, second.credential).status_code == 401
+    assert claim_with(leader, first.credential).status_code == 401
+    assert claim_with(leader, third.credential).status_code == 204
+
+
+def test_a_join_token_never_reuses_a_row_so_the_old_credential_lives():
+    leader = FakeLeader()
+    leader.join_max_uses = 2
+    first = register(leader, JOIN_TOKEN)
+    LeaderClient(BASE, credential=first.credential, transport=leader.transport).deregister()
+    second = register(leader, JOIN_TOKEN)
+    assert claim_with(leader, first.credential).status_code == 204
+    assert claim_with(leader, second.credential).status_code == 204
+
+
+def test_revoking_a_follower_releases_its_leases_so_its_links_stop_working(world):
+    leader, links, client, tmp_path = world
+    job_id = leader.add_job()
+    claim = client.claim()
+    assert leader.jobs[job_id]["state"] == "leased"
+    leader.state = "revoked"
+    assert leader.jobs[job_id]["state"] == "queued" and leader.jobs[job_id]["lease"] is None
+    assert leader.released == []  # nobody asked for it: the leader did it
+    with pytest.raises(LeaseLost):  # the link answers 409 stale_lease before any 403 is heard
+        links.download(claim.download_url, tmp_path / "source", lambda: None)
+    with pytest.raises(Refused) as refused:
+        client.heartbeat(job_id, claim.lease_id, 0.5)
+    assert refused.value.status == 403
+
+
+def test_a_credential_must_be_sent_as_a_bearer_token(world):
+    leader, _, _, _ = world
+    http = httpx.Client(transport=leader.transport)
+    for header in ("credential-SECRET-0", "Basic credential-SECRET-0", ""):
+        response = http.post(f"{BASE}/v1/jobs/claim", headers={"Authorization": header})
+        assert response.status_code == 401 and response.headers["www-authenticate"] == "Bearer"
+    assert http.post(f"{BASE}/v1/jobs/claim").status_code == 401
+
+
+def test_a_body_that_is_not_valid_is_refused_before_the_job_is_looked_up(world):
+    leader, _, _, _ = world
+    response = httpx.Client(transport=leader.transport).post(
+        f"{BASE}/v1/jobs/{'0' * 8}-0000-4000-8000-{'0' * 12}/heartbeat",
+        headers={"Authorization": "Bearer credential-SECRET-0"},
+        json={"nonsense": True},
+    )
+    assert response.status_code == 422  # not 404: the real route validates the body first

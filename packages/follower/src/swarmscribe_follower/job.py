@@ -32,6 +32,7 @@ from .lease import (
     CANCELLED,
     LEASE_GONE,
     LEASE_LOST,
+    REFUSED_REQUEST,
     REVOKED,
     SHUTDOWN,
     UNAUTHORISED,
@@ -141,6 +142,12 @@ class JobRunner:
 
     # --- for the agent's shutdown decision ------------------------------------------------
 
+    @property
+    def finishing(self) -> bool:
+        """True while the finished transcript is being uploaded or submitted: a first stop
+        lets that finish (spec 5.6, step 3), however short the grace period."""
+        return self._control is not None and self._phase in ("upload", "submit")
+
     def remaining(self) -> float | None:
         """About how many seconds the current job still needs; None when that is unknown
         (follower spec 5.6). 0 when no job is running."""
@@ -168,9 +175,9 @@ class JobRunner:
         keeper = LeaseKeeper(self._client, claim.job_id, claim.lease_id, self._interval, control)
         folder: Path | None = None
         self._control, self._phase = control, "starting"
-        keeper.start()
         try:
             try:
+                keeper.start()
                 folder = self._scratch.job_dir(claim.job_id)
                 self._work(claim, control, folder)
                 result = JobResult(COMPLETED)
@@ -322,15 +329,23 @@ class JobRunner:
             sent = self._with_fresh_links(claim, control, links, upload)
             checksums = OutputChecksums(source=downloaded, **sent)
             self._phase = "submit"
+            answered_500 = 0
+
+            def give_up(error: Transient) -> bool:
+                # Only answers of 500 count (spec 6.4): a connection that was refused, a
+                # timeout or a 502/503/504 (a leader that is restarting) never add to it.
+                nonlocal answered_500
+                if error.status == 500:
+                    answered_500 += 1
+                return answered_500 >= SUBMIT_500_LIMIT
+
             try:
                 retrying(
                     lambda checksums=checksums: self._client.submit(
                         claim.job_id, claim.lease_id, checksums
                     ),
                     pause=lambda seconds: self._pause_for_submit(control, seconds),
-                    give_up=lambda error, failures: (
-                        error.status == 500 and failures >= SUBMIT_500_LIMIT
-                    ),
+                    give_up=lambda error, _failures: give_up(error),
                 )
                 return
             except Transient:
@@ -353,12 +368,17 @@ class JobRunner:
         not interrupt it: once the leader has completed the job, a heartbeat is answered
         `stale_lease` too, and the answer to the submit that completed it may have been lost.
         Only submit's own answer says whether the job was accepted (it repeats its `200` to
-        the same checksums, and says `stale_lease` to anything else). Any other stop does."""
+        the same checksums, and says `stale_lease` to anything else). Any other stop does,
+        and so does a shutdown whatever reason was recorded first (`hard_stopped`): nothing
+        masks it, so the worker always returns within the wait."""
+        if control.hard_stopped:
+            return True
         started = self._clock()
+        if control.reason == LEASE_LOST:
+            return control.pause_hard(seconds)
         if control.pause(seconds) and control.reason == LEASE_LOST:
             # The stop came during this very wait: serve out what is left of it.
-            self._sleep(max(0.0, seconds - (self._clock() - started)))
-            return False
+            return control.pause_hard(max(0.0, seconds - (self._clock() - started)))
         return control.stopped
 
     # --- what the leader is told ----------------------------------------------------------
@@ -430,6 +450,10 @@ class JobRunner:
             gone_now = self._tell(lambda: self._client.release(job, lease), "release", claim)
             return self._abandoned(gone_now) if gone_now is not None else JobResult(outcome, detail)
 
+        if control.reason == REFUSED_REQUEST:
+            # Our heartbeat was refused 400/422: the sides disagree about the protocol, which
+            # is the job's `fail` `other` (spec 6.2), not a lost lease.
+            error = _Fail("other", control.detail or "the leader refused a heartbeat", True)
         if isinstance(error, JobStopped | Interrupted):
             reason = error.reason if isinstance(error, JobStopped) else control.reason
             return release(reason or SHUTDOWN)  # a shutdown, or a keeper that broke

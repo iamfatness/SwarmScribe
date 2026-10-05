@@ -23,6 +23,8 @@ UNAUTHORISED = "unauthorised"  # the leader does not know the credential
 KEEPER_FAILED = "keeper_failed"  # the keeper itself broke: the lease may still be ours, so
 # the job is released, never kept without a keeper
 SHUTDOWN = "shutdown"  # the follower is stopping: release the job
+REFUSED_REQUEST = "refused_request"  # the leader answered a heartbeat 400/422: we disagree
+# about the protocol (spec 6.2: `fail` `other`, retryable, with an error log)
 LEASE_GONE = frozenset({CANCELLED, LEASE_LOST, REVOKED, UNAUTHORISED})
 
 
@@ -37,16 +39,33 @@ class JobControl:
 
     def __init__(self) -> None:
         self._stopped = threading.Event()
+        self._hard = threading.Event()
         self._lock = threading.Lock()
         self.reason: str | None = None
+        self.detail: str | None = None
         self.progress: float | None = None
         self.draining = False
 
-    def stop(self, reason: str) -> None:
+    def stop(self, reason: str, detail: str | None = None) -> None:
+        """Ask the job to stop. The first reason given is the one reported. A SHUTDOWN is
+        also kept apart, as a hard stop that no earlier reason can mask: waits that are
+        deliberately deaf to some reasons (a submit retried after the lease was lost) still
+        end on it."""
         with self._lock:
             if self.reason is None:
-                self.reason = reason
+                self.reason, self.detail = reason, detail
+        if reason == SHUTDOWN:
+            self._hard.set()
         self._stopped.set()
+
+    @property
+    def hard_stopped(self) -> bool:
+        return self._hard.is_set()
+
+    def pause_hard(self, seconds: float) -> bool:
+        """Wait, or less if the follower is shutting down meanwhile (whatever reason was
+        recorded first). True means: hard stop."""
+        return self._hard.wait(seconds)
 
     @property
     def stopped(self) -> bool:
@@ -90,8 +109,11 @@ class LeaseKeeper(threading.Thread):
         self.failures = 0
 
     def finish(self) -> None:
+        """Stop heartbeating. Waits at most 5 s, once: a second call (the worker calls it on
+        the way out of every path) never waits again for a heartbeat still in flight."""
+        already = self._done.is_set()
         self._done.set()
-        if self.is_alive() and threading.current_thread() is not self:
+        if not already and self.is_alive() and threading.current_thread() is not self:
             self.join(timeout=5)
 
     def run(self) -> None:
@@ -139,8 +161,12 @@ class LeaseKeeper(threading.Thread):
                 continue
             except Refused as refused:
                 reason = {403: REVOKED, 401: UNAUTHORISED}.get(refused.status, LEASE_LOST)
+                if refused.status in (400, 422) or refused.code == "invalid_answer":
+                    reason = REFUSED_REQUEST  # not a lost lease: the two sides disagree
                 logger.warning("heartbeat refused (%s): %s", refused.code, reason, extra=extra)
-                self._control.stop(reason)
+                self._control.stop(
+                    reason, f"the leader refused a heartbeat: {refused.status} {refused.code}"
+                )
                 return
             if self.failures:
                 logger.info("heartbeat recovered after %d failures", self.failures, extra=extra)

@@ -2,17 +2,26 @@
 spec 5.2, 5.3, 5.5, 5.6).
 
 `serve()` is the worker loop and runs on a thread of its own. `stop()` may be called from any
-thread, including a signal handler on the main thread: it never waits and never talks to the
-leader. Its lock is re-entrant, because a second signal can interrupt the handler of the
-first on the same thread.
+thread EXCEPT a signal handler: it takes locks (the agent's, `Event.set`, `JobControl`'s), and
+a second signal can interrupt the first handler on the same thread while it holds one, which
+would hang the process for good. A signal handler therefore only appends to a list
+(`StopSignals`: one C call, nothing to deadlock on, and a nested handler cannot lose a count
+as `n += 1` could); `run_supervised()` polls it from the main thread, in normal context, and
+calls `stop(now=count >= 2)`.
 
-Signals are installed by the command line, not here. POSIX has SIGTERM and SIGINT; Windows has
-SIGINT (Ctrl+C) and SIGBREAK (Ctrl+Break, and what a console close or a wrapper such as
-winsw can send), and no SIGTERM. A Windows service does not receive a signal at all: its stop
-arrives as the service control handler's `SERVICE_CONTROL_STOP`. The F4 service wrapper must
-call `agent.stop()` from that handler (any thread is fine: `stop` never blocks), report
-`SERVICE_STOP_PENDING` with a wait hint longer than `shutdown_grace_seconds`, and report
-`SERVICE_STOPPED` only when `serve()` has returned.
+POSIX has SIGTERM and SIGINT; Windows has SIGINT (Ctrl+C) and SIGBREAK (Ctrl+Break, and what
+a console close or a wrapper such as winsw can send), and no SIGTERM. A Windows service does
+not receive a signal at all: its stop arrives as the service control handler's
+`SERVICE_CONTROL_STOP`. The F4 service wrapper calls `agent.stop()` from that handler (a normal
+thread, so that is fine: `stop` never blocks), reports `SERVICE_STOP_PENDING` with a wait hint
+longer than `shutdown_grace_seconds`, and reports `SERVICE_STOPPED` only when `serve()` has
+returned.
+
+Stops that can take longer than the default grace (8 s), none of them for ever: a model load
+or download cannot be interrupted; a stalled download is noticed after the transfer client's
+read timeout; a heartbeat in flight delays the worker's exit by at most 5 s; telling the leader
+`fail` or `release` against a silent leader takes up to three tries of the client's timeout. A
+platform that kills the follower first costs one counted attempt (spec 6.6).
 
 The credential: a join or pool token is read (from its file, if that is how it is
 configured) only inside `register()`, held in a local variable for the one request and
@@ -20,6 +29,7 @@ dropped; it is never logged, put in an exception or kept on the agent."""
 
 import logging
 import random
+import signal
 import threading
 import time
 import traceback
@@ -63,9 +73,49 @@ EXIT_UNEXPECTED = 1  # a bug: the follower stopped on an error nobody planned fo
 IDLE_JITTER = 0.2  # an idle follower waits Retry-After plus up to this fraction of it
 PARKED_POLL_SECONDS = 60.0  # how often a drained, parked follower asks again
 REFUSED_CLAIM_WAIT_SECONDS = 60.0
-SCRATCH_RETRY_WAITS = (5.0, 15.0, 45.0)  # after the 1st, 2nd failure to use the scratch folder
-SCRATCH_FAILURE_LIMIT = len(SCRATCH_RETRY_WAITS)  # the 3rd in a row ends the follower (exit 2)
+# The ruling: three failures to use the scratch folder in a row, with a wait of 5 s after the
+# first and 15 s after the second; the third ends the follower (exit 2). A failed job and the
+# failed prepares after it are counted together: all are failures of the one folder.
+SCRATCH_RETRY_WAITS = (5.0, 15.0)
+SCRATCH_FAILURE_LIMIT = len(SCRATCH_RETRY_WAITS) + 1
+# A stop during the upload or submit phase lets the finished job finish, whatever the grace
+# period (spec 5.6, step 3: "Uploading or submitting: finish"). The spec gives no bound for
+# that, so the wait is the larger of the grace period and this: upload and submit have a
+# 30 s allowance in the estimate, and four times that covers a slow link.
+FINISH_CAP_SECONDS = 120.0
+POLL_SECONDS = 0.1  # how often the main thread looks at the signal counter
 SCRATCH_FATAL = frozenset({ScratchNotOurs.__name__, ScratchOutside.__name__})
+
+
+class StopSignals:
+    """What the signal handlers do: count. Nothing else (no lock, no logging, no `Event`):
+    see the module docstring. `count` is how many signals have arrived."""
+
+    NAMES = ("SIGINT", "SIGTERM", "SIGBREAK")  # whichever the platform has
+
+    def __init__(self) -> None:
+        self._arrived: list[None] = []
+
+    @property
+    def count(self) -> int:
+        return len(self._arrived)
+
+    def handler(self, _signum, _frame) -> None:
+        self._arrived.append(None)  # one C call: a nested handler cannot interleave in it
+
+    def install(self) -> dict[int, object]:
+        """Install the handler (main thread only); returns what to give `restore`."""
+        previous = {}
+        for name in self.NAMES:
+            number = getattr(signal, name, None)
+            if number is not None:
+                previous[number] = signal.signal(number, self.handler)
+        return previous
+
+    @staticmethod
+    def restore(previous: dict[int, object]) -> None:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
 
 
 class Agent:
@@ -321,9 +371,7 @@ class Agent:
         if result.outcome == REVOKED_FOLLOWER:
             self._exit_revoked()
         elif result.outcome == UNKNOWN_CREDENTIAL:
-            # The job was stopped and its folder removed; wipe whatever else is there.
-            self._quietly(self._scratch.wipe, "wiping scratch")
-            self._register_again()
+            self._register_again()  # wipes scratch first
         elif result.outcome == UNFIT:
             raise FollowerExit(EXIT_UNFIT, f"this machine cannot serve its pool: {result.detail}")
         elif result.outcome == SCRATCH_BROKEN:
@@ -380,6 +428,9 @@ class Agent:
         the registration was given to another machine): register once more, if there is a
         token to do it with."""
         self._skip_deregister = True  # until it is known again, a deregister would be a 401
+        # Whatever the job that was running left (the runner removed its folder already) goes
+        # before the new registration, not after.
+        self._quietly(self._scratch.wipe, "wiping scratch")
         if self._registered_again:
             raise FollowerExit(
                 EXIT_UNAUTHORISED, "the leader does not know this follower's credential"
@@ -422,9 +473,34 @@ class Agent:
 
     # --- stopping ------------------------------------------------------------------------
 
+    def run_supervised(self, *, poll: float = POLL_SECONDS) -> int:
+        """Serve on a worker thread while this (the main) thread watches for signals; returns
+        the exit code. The first signal calls `stop()`, the second `stop(now=True)`. The
+        handlers only count; every lock is taken here, in normal context. Must be called on
+        the main thread. However it ends, the handlers are put back and the worker has ended."""
+        signals = StopSignals()
+        previous = signals.install()
+        codes: list[int] = []
+        worker = threading.Thread(target=lambda: codes.append(self.serve()), name="worker")
+        worker.start()
+        seen = 0
+        try:
+            while worker.is_alive():
+                worker.join(poll)
+                arrived = signals.count
+                if arrived > seen:
+                    seen = arrived
+                    self.stop(now=arrived >= 2)
+        finally:
+            worker.join()
+            signals.restore(previous)
+        return codes[0] if codes else EXIT_UNEXPECTED
+
     def stop(self, *, now: bool = False) -> None:
-        """Stop claiming. A job in progress is finished only if its estimated time left
-        fits the grace period; otherwise, and on a second call, it is released."""
+        """Stop claiming. A job in progress is finished if its estimated time left fits the
+        grace period, or if it is already being uploaded or submitted (then the wait is bounded
+        by FINISH_CAP_SECONDS or the grace, whichever is longer); otherwise, and on a second
+        call, it is released. From any thread but a signal handler (module docstring)."""
         with self._lock:
             again = self._stopping.is_set()
             self._stopping.set()
@@ -436,11 +512,15 @@ class Agent:
                 return
             grace = self._settings.shutdown_grace_seconds
             remaining = runner.remaining()
-            # 0 means the runner has not taken the job up yet (or has just finished it): the
-            # job is unknown, so it is released rather than waited for.
-            if remaining is not None and 0 < remaining <= grace:
-                logger.info("stopping after the current job (about %d s left)", remaining)
-                timer = threading.Timer(grace, control.stop, args=(SHUTDOWN,))
+            if runner.finishing:
+                wait = max(grace, FINISH_CAP_SECONDS)
+            elif remaining is not None and 0 < remaining <= grace:
+                wait = grace
+            else:
+                wait = None  # unknown (or 0: the runner has not taken the job up yet)
+            if wait is not None:
+                logger.info("stopping after the current job (about %d s left)", remaining or 0)
+                timer = threading.Timer(wait, control.stop, args=(SHUTDOWN,))
                 timer.daemon = True
                 self._timer = timer
                 timer.start()

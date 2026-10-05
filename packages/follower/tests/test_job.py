@@ -740,3 +740,112 @@ def test_no_lease_keeper_outlives_its_job(tmp_path, leader, engine):
         leader.add_job()
         run_one(tmp_path / str(index), leader, engine)
     assert threading.active_count() == before
+
+
+# --- fix round 1 ---------------------------------------------------------------------------
+
+
+def test_only_answers_of_500_count_towards_the_five_a_restarting_leader_fails_nothing(
+    tmp_path, leader, engine
+):
+    """A leader that restarts refuses connections, answers 503, then 500 while it starts: a
+    finished transcription must not be thrown away for that (spec 6.4, ruling 2)."""
+    job_id = leader.add_job()
+    retry_now = {"Retry-After": "0"}
+    leader.push(
+        "submit",
+        httpx.ConnectError("refused"),
+        error(503, "unavailable", **retry_now),
+        error(502, "bad_gateway", **retry_now),
+        error(504, "timeout", **retry_now),
+        error(500, "internal", **retry_now),
+    )
+    result, _, _ = run_one(tmp_path, leader, engine)
+    assert result.outcome == "completed" and leader.failed == []
+    assert leader.count("submit") == 6 and leader.jobs[job_id]["state"] == "completed"
+
+
+def test_a_500_after_four_other_failures_is_the_first_500_not_the_fifth(
+    tmp_path, leader, engine
+):
+    leader.add_job()
+    retry_now = {"Retry-After": "0"}
+    unavailable = error(503, "unavailable", **retry_now)
+    internal = error(500, "internal", **retry_now)
+    answers = [unavailable] * 4 + [internal] * 4
+    leader.push("submit", *answers)
+    result, _, _ = run_one(tmp_path, leader, engine)
+    assert result.outcome == "completed" and leader.failed == []  # 4 x 500 only: not five
+
+
+def test_a_heartbeat_the_leader_cannot_accept_fails_the_job_other_and_says_why(
+    tmp_path, leader, engine, caplog
+):
+    job_id = leader.add_job()
+    leader.push("heartbeat", error(422, "invalid_request"))
+
+    def wait_for_the_keeper(fraction):
+        if fraction == 0.5:
+            keeper_has_stopped_the_job()
+
+    engine.on_step = wait_for_the_keeper
+    result, _, _ = run_one(tmp_path, leader, engine)
+    assert (result.outcome, result.detail) == ("failed", "other")
+    assert (leader.failed[0]["code"], leader.failed[0]["retryable"]) == ("other", True)
+    assert "422 invalid_request" in leader.failed[0]["reason"]
+    assert leader.jobs[job_id]["state"] == "queued"  # a retryable failure: another attempt
+    assert any(record.levelno >= logging.ERROR for record in caplog.records)
+
+
+def run_on_a_thread(runner, claim, control):
+    outcome = []
+    thread = threading.Thread(target=lambda: outcome.append(runner.run(claim, control)))
+    thread.start()
+    return thread, outcome
+
+
+def test_a_shutdown_ends_a_submit_retried_after_the_lease_was_lost_and_the_leader_vanished(
+    tmp_path, leader, engine
+):
+    """The worst case of the masked-stop defect: the leader completed the job, the answer was
+    lost, the keeper recorded LEASE_LOST, and now nobody answers. The first reason stays
+    LEASE_LOST for the report, yet a shutdown must still end the worker within the wait."""
+    leader.add_job()
+    leader.push("submit", LOST, *[error(503, "unavailable", **{"Retry-After": "3000"})] * 5)
+    runner, client = make_runner(tmp_path, leader, engine)
+    claim, control = client.claim(), JobControl()
+    thread, outcome = run_on_a_thread(runner, claim, control)
+    try:
+        deadline_loop(
+            lambda: control.reason == "lease_lost" and leader.count("submit") >= 2,
+            "the lease to be lost during the submit retries",
+        )
+        assert thread.is_alive()  # waiting out a 3000 s Retry-After, deaf to the lost lease
+        began = time.monotonic()
+        control.stop(SHUTDOWN)
+        thread.join(5)
+        assert not thread.is_alive(), "the worker was not stopped by the shutdown"
+        assert time.monotonic() - began < 5
+    finally:
+        control.stop(SHUTDOWN)
+        thread.join(5)
+    assert outcome[0].outcome == "abandoned" and control.reason == "lease_lost"
+    assert (leader.failed, leader.released) == ([], [])
+    assert scratch_is_empty(tmp_path)
+
+
+def test_a_shutdown_that_comes_first_still_ends_a_deaf_submit_wait(tmp_path, leader, engine):
+    leader.add_job()
+    leader.push("submit", error(503, "unavailable", **{"Retry-After": "3000"}))
+    runner, client = make_runner(tmp_path, leader, engine)
+    claim, control = client.claim(), JobControl()
+    thread, outcome = run_on_a_thread(runner, claim, control)
+    try:
+        deadline_loop(lambda: leader.count("submit") >= 1, "the first submit")
+        control.stop(SHUTDOWN)
+        thread.join(5)
+        assert not thread.is_alive()
+    finally:
+        control.stop(SHUTDOWN)
+        thread.join(5)
+    assert outcome[0].outcome == "released" and leader.released == [claim.job_id]

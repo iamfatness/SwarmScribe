@@ -8,6 +8,7 @@ from swarmscribe_follower.lease import (
     CANCELLED,
     KEEPER_FAILED,
     LEASE_LOST,
+    REFUSED_REQUEST,
     REVOKED,
     SHUTDOWN,
     UNAUTHORISED,
@@ -109,7 +110,11 @@ def test_drain_is_noted_and_the_job_carries_on(keeper_of):
         (404, "not_found", LEASE_LOST),
         (403, "forbidden", REVOKED),
         (401, "unauthorized", UNAUTHORISED),
-        (422, "invalid_request", LEASE_LOST),
+        # A request the leader cannot accept is not a lost lease: the two sides disagree
+        # about the protocol (spec 6.2), and the job is failed `other`, retryably.
+        (422, "invalid_request", REFUSED_REQUEST),
+        (400, "bad_request", REFUSED_REQUEST),
+        (200, "invalid_answer", REFUSED_REQUEST),
     ],
 )
 def test_a_refused_heartbeat_stops_the_job_with_the_reason(keeper_of, status, code, reason):
@@ -259,3 +264,36 @@ def test_a_drain_answer_does_not_end_the_keeper(keeper_of):
     keeper = keeper_of(client, control)
     client.wait_for(3)
     assert keeper.is_alive()
+
+
+# --- fix round 1: a shutdown can never be masked; finish() waits once ---------------------
+
+
+def test_a_shutdown_is_a_hard_stop_whatever_reason_was_recorded_first():
+    control = JobControl()
+    control.stop(LEASE_LOST)
+    assert control.reason == LEASE_LOST and not control.hard_stopped
+    assert control.pause_hard(0) is False  # a lost lease is not a hard stop
+    control.stop(SHUTDOWN)
+    assert control.reason == LEASE_LOST  # the first reason is still the one reported
+    assert control.hard_stopped and control.pause_hard(0) is True
+
+
+def test_a_refused_request_keeps_what_the_leader_said_for_the_report():
+    control = JobControl()
+    control.stop(REFUSED_REQUEST, "the leader refused a heartbeat: 422 invalid_request")
+    control.stop(SHUTDOWN)
+    assert control.detail == "the leader refused a heartbeat: 422 invalid_request"
+
+
+def test_finish_waits_for_a_heartbeat_in_flight_only_once(keeper_of):
+    client, control = Beats(), JobControl()
+    keeper = keeper_of(client, control)
+    client.wait_for(1)
+    waits = []
+    keeper.join = lambda timeout=None: waits.append(timeout)  # stands in for a stuck heartbeat
+    keeper.finish()
+    keeper.finish()  # the worker calls it again on its way out: it must not wait again
+    assert waits == [5]
+    del keeper.join
+    keeper.join(timeout=5)

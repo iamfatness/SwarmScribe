@@ -8,13 +8,15 @@ import httpx
 import pytest
 from follower_testkit import (
     JOIN_TOKEN,
+    LOST,
+    POOL_TOKEN,
     FakeEngine,
     FakeLeader,
     error,
 )
 from follower_testkit import make_agent as _make_agent
 from swarmscribe_engine import DeviceUnavailableError
-from swarmscribe_follower.agent import Agent
+from swarmscribe_follower.agent import FINISH_CAP_SECONDS, Agent, StopSignals
 from swarmscribe_follower.errors import FollowerExit
 from swarmscribe_follower.scratch import MARKER, ScratchNotOurs, ScratchWipeFailed
 from swarmscribe_follower.statelock import hold_state_lock
@@ -77,9 +79,9 @@ def start(tmp_path, leader, engine, **overrides) -> Served:
     return Served(agent)
 
 
-def start_and_stop(tmp_path, leader, engine) -> None:
+def start_and_stop(tmp_path, leader, engine, **overrides) -> None:
     """A first run of the follower that registered, was stopped and has fully ended."""
-    served = start(tmp_path, leader, engine)
+    served = start(tmp_path, leader, engine, **overrides)
     served.agent.stop()
     assert served.code() == 0
 
@@ -174,13 +176,13 @@ def test_a_registration_waits_out_a_leader_that_is_down(tmp_path, leader, engine
 
 
 def test_a_credential_for_another_leader_or_device_is_not_used(tmp_path, leader, engine):
-    start_and_stop(tmp_path, leader, engine)
+    start_and_stop(tmp_path, leader, engine, join_token=POOL_TOKEN)
     path = tmp_path / "state" / "credential.json"
     data = json.loads(path.read_text(encoding="utf-8"))
     path.write_text(json.dumps({**data, "leader_url": "https://other.test"}), encoding="utf-8")
     if hasattr(path, "chmod"):
         path.chmod(0o600)
-    make_agent(tmp_path, leader, engine).prepare()
+    make_agent(tmp_path, leader, engine, join_token=POOL_TOKEN).prepare()
     assert leader.registrations == 2
     assert stored_credential(tmp_path)["leader_url"] == "https://leader.test"
 
@@ -277,10 +279,11 @@ def test_a_drain_that_arrives_mid_job_lets_the_job_finish_first(tmp_path, leader
 def test_a_parked_follower_stays_up_takes_nothing_and_resumes_if_the_drain_ends(
     tmp_path, leader, engine
 ):
-    leader.state = "draining"
-    job_id = leader.add_job()
     served = start(tmp_path, leader, engine, on_drained="park")
-    until(lambda: leader.count("claim") >= 4, "the parked follower's polling")
+    until(lambda: leader.count("claim") >= 1, "the first claim")
+    leader.state = "draining"  # a drain is set on a registered follower, never at registration
+    job_id = leader.add_job()
+    until(lambda: leader.count("claim") >= 4 and served.agent.drained, "the parked polling")
     assert served.thread.is_alive() and served.agent.drained
     assert leader.jobs[job_id]["state"] == "queued"
     leader.state = "active"
@@ -323,7 +326,7 @@ def test_a_follower_revoked_mid_job_exits_4_without_a_call_for_the_job(tmp_path,
 
 
 def test_an_unknown_credential_registers_once_more_then_gives_up(tmp_path, leader, engine):
-    served = start(tmp_path, leader, engine)
+    served = start(tmp_path, leader, engine, join_token=POOL_TOKEN)
     until(lambda: leader.count("claim") >= 2, "idle polling")
     leader.credentials.clear()  # the leader's database was replaced
     until(lambda: served.agent._client.credential == "credential-SECRET-2", "registering again")
@@ -650,9 +653,10 @@ def test_a_stop_ends_even_a_long_idle_wait_at_once(tmp_path, leader, engine):
 def test_a_parked_follower_sends_no_heartbeat_and_deregisters_when_stopped(
     tmp_path, leader, engine
 ):
-    leader.state = "draining"
     served = start(tmp_path, leader, engine, on_drained="park")
-    until(lambda: leader.count("claim") >= 3, "parked polling")
+    until(lambda: leader.count("claim") >= 1, "the first claim")
+    leader.state = "draining"
+    until(lambda: leader.count("claim") >= 4 and served.agent.drained, "parked polling")
     assert leader.count("heartbeat") == 0  # heartbeats belong to a job's lease
     served.agent.stop()
     assert served.code() == 0
@@ -675,7 +679,7 @@ def test_an_unknown_credential_mid_job_stops_the_job_wipes_scratch_and_registers
             until(lambda: served.agent._control.reason is not None, "the keeper to notice")
 
     engine.on_step = forget
-    served = start(tmp_path, leader, engine)
+    served = start(tmp_path, leader, engine, join_token=POOL_TOKEN)
     until(lambda: leader.registrations == 2, "registering again")
     engine.on_step = None
     until(lambda: leader.count("claim") >= 3, "claims with the new credential")
@@ -929,31 +933,6 @@ def test_stop_is_safe_to_call_again_from_inside_itself_as_a_second_signal_would(
     assert agent._stopping.is_set()
 
 
-@pytest.mark.parametrize("name", ["SIGINT", "SIGTERM", "SIGBREAK"])
-def test_a_real_signal_on_the_main_thread_finishes_a_job_that_fits_and_a_second_releases_it(
-    tmp_path, leader, engine, name
-):
-    number = getattr(signal, name, None)
-    if number is None:
-        pytest.skip(f"{name} does not exist on this platform")
-    job_id = leader.add_job()
-    reached, release = blocked_at(engine, 0.5)
-    served = start(tmp_path, leader, engine, shutdown_grace_seconds=3600)
-    previous = signal.signal(number, lambda _signum, _frame: served.agent.stop())
-    try:
-        assert reached.wait(10)
-        signal.raise_signal(number)  # first: finish if it fits (it does)
-        until(lambda: served.agent._stopping.is_set(), "the first signal")
-        assert served.agent._control.reason is None
-        signal.raise_signal(number)  # second: release at once
-        until(lambda: served.agent._control.reason == "shutdown", "the second signal")
-        release.set()
-        assert served.code() == 0
-    finally:
-        signal.signal(number, previous)
-    assert leader.released == [job_id]
-
-
 def test_a_stop_during_the_grace_wait_leaves_no_timer_behind(tmp_path, leader, engine):
     leader.add_job()
     reached, release = blocked_at(engine, 0.5)
@@ -964,3 +943,311 @@ def test_a_stop_during_the_grace_wait_leaves_no_timer_behind(tmp_path, leader, e
     release.set()
     assert served.code() == 0
     assert served.agent._timer is None  # cancelled and joined: conftest checks the thread
+
+
+# =============================================================================================
+# Fix round 1: signals only count, a shutdown is never masked, upload and submit finish
+# =============================================================================================
+
+
+class Raiser(threading.Thread):
+    """Delivers signals from a helper thread when told, while the test's own thread (the main
+    thread) runs `run_supervised`. Whatever goes wrong in it is re-raised by `finish`."""
+
+    def __init__(self, steps):
+        super().__init__(name="raiser")
+        self.steps, self.error = steps, None
+
+    def run(self):
+        try:
+            for step in self.steps:
+                step()
+        except BaseException as error:  # noqa: BLE001 - handed to the test thread
+            self.error = error
+
+    def finish(self):
+        self.join(15)
+        assert not self.is_alive(), "the raiser did not finish"
+        if self.error is not None:
+            raise self.error
+
+
+def signal_number(name):
+    number = getattr(signal, name, None)
+    if number is None:
+        pytest.skip(f"{name} does not exist on this platform")
+    return number
+
+
+def test_the_signal_handler_only_counts():
+    signals = StopSignals()
+    assert signals.count == 0
+    signals.handler(2, None)
+    signals.handler(2, None)
+    assert signals.count == 2
+
+
+def test_run_supervised_puts_the_handlers_back(tmp_path, leader, engine):
+    before = {n: signal.getsignal(n) for n in map(signal_number, ("SIGINT",))}
+    agent = make_agent(tmp_path, leader, engine)
+    agent.prepare()
+    agent.stop()
+    assert agent.run_supervised(poll=0.02) == 0
+    assert {n: signal.getsignal(n) for n in before} == before
+
+
+@pytest.mark.parametrize("name", StopSignals.NAMES)
+def test_a_signal_stops_an_idle_agent_through_the_main_thread(tmp_path, leader, engine, name):
+    number = signal_number(name)
+    agent = make_agent(tmp_path, leader, engine)
+    agent.prepare()
+    raiser = Raiser(
+        [
+            lambda: until(lambda: leader.count("claim") >= 1, "the first claim"),
+            lambda: signal.raise_signal(number),
+        ]
+    )
+    raiser.start()
+    began = time.monotonic()
+    assert agent.run_supervised(poll=0.02) == 0
+    raiser.finish()
+    assert time.monotonic() - began < 10 and leader.deregistrations == 1
+    assert_left_clean(tmp_path)
+
+
+@pytest.mark.parametrize("name", StopSignals.NAMES)
+def test_the_first_signal_finishes_a_job_that_fits_and_the_second_releases_it(
+    tmp_path, leader, engine, name
+):
+    number = signal_number(name)
+    job_id = leader.add_job()
+    reached, release = blocked_at(engine, 0.5)
+    agent = make_agent(tmp_path, leader, engine, shutdown_grace_seconds=3600)
+    agent.prepare()
+
+    def second_signal_when_finishing():
+        until(lambda: agent._stopping.is_set(), "the first signal to be handled")
+        assert agent._control.reason is None  # finishing: not stopped
+        signal.raise_signal(number)
+        until(lambda: agent._control.reason == "shutdown", "the second signal to be handled")
+        release.set()
+
+    raiser = Raiser(
+        [
+            lambda: assert_true(reached.wait(10)),
+            lambda: signal.raise_signal(number),
+            second_signal_when_finishing,
+        ]
+    )
+    raiser.start()
+    assert agent.run_supervised(poll=0.02) == 0
+    raiser.finish()
+    assert leader.released == [job_id] and leader.submitted == []
+    assert_left_clean(tmp_path)
+
+
+def assert_true(value):
+    assert value
+
+
+def test_a_second_signal_that_lands_while_stop_is_half_way_still_forces_the_stop(
+    tmp_path, leader, engine
+):
+    """The old design called stop() from the handler, so a signal landing inside it hung the
+    process for good. Now stop() runs in normal context and the handler takes no lock."""
+    number = signal_number("SIGINT")
+    job_id = leader.add_job()
+    reached, release = blocked_at(engine, 0.5)
+    agent = make_agent(tmp_path, leader, engine, shutdown_grace_seconds=3600)
+    agent.prepare()
+    real_stop, calls = agent.stop, []
+
+    def stop_with_a_signal_inside(*, now=False):
+        calls.append(now)
+        if len(calls) == 1:
+            signal.raise_signal(number)  # lands here, on this (the main) thread, mid-stop
+        real_stop(now=now)
+
+    agent.stop = stop_with_a_signal_inside
+    raiser = Raiser(
+        [
+            lambda: assert_true(reached.wait(10)),
+            lambda: signal.raise_signal(number),
+            lambda: until(lambda: agent._control.reason == "shutdown", "the forced stop"),
+            release.set,
+        ]
+    )
+    raiser.start()
+    began = time.monotonic()
+    assert agent.run_supervised(poll=0.02) == 0
+    raiser.finish()
+    assert calls == [False, True]  # the second signal was seen by the loop: stop(now=True)
+    assert time.monotonic() - began < 15
+    assert leader.released == [job_id]
+
+
+# --- the upload and submit phases finish on a first stop (spec 5.6, step 3) ---------------
+
+
+def hold_request(leader, kind):
+    reached, release = threading.Event(), threading.Event()
+
+    def hold():
+        reached.set()
+        assert release.wait(10)
+
+    leader.on[kind] = hold
+    return reached, release
+
+
+@pytest.mark.parametrize("kind", ["upload:txt", "upload:segments_json", "submit"])
+def test_a_first_stop_while_uploading_or_submitting_finishes_the_job_whatever_the_grace(
+    tmp_path, leader, engine, kind
+):
+    job_id = leader.add_job()
+    reached, release = hold_request(leader, kind)
+    served = start(tmp_path, leader, engine, shutdown_grace_seconds=0)
+    assert reached.wait(10)
+    served.agent.stop()
+    assert served.agent._control.reason is None  # not stopped: finishing
+    assert served.agent._timer is not None  # bounded by a timer, never for ever
+    release.set()
+    assert served.code() == 0
+    assert leader.jobs[job_id]["state"] == "completed" and leader.released == []
+    assert leader.count("claim") == 1 and leader.deregistrations == 1
+
+
+@pytest.mark.parametrize(
+    ("grace", "expected"), [(0, FINISH_CAP_SECONDS), (8, FINISH_CAP_SECONDS), (870, 870.0)]
+)
+def test_the_wait_for_a_job_that_is_finishing_is_the_cap_or_the_grace_whichever_is_longer(
+    tmp_path, leader, engine, monkeypatch, grace, expected
+):
+    waits = []
+    real_timer = threading.Timer
+    monkeypatch.setattr(
+        threading,
+        "Timer",
+        lambda wait, function, args: waits.append(wait) or real_timer(wait, function, args),
+    )
+    leader.add_job()
+    reached, release = hold_request(leader, "submit")
+    served = start(tmp_path, leader, engine, shutdown_grace_seconds=grace)
+    assert reached.wait(10)
+    served.agent.stop()
+    release.set()
+    assert served.code() == 0
+    assert waits == [expected]
+
+
+@pytest.mark.parametrize("kind", ["upload:txt", "submit"])
+def test_a_second_signal_during_upload_or_submit_releases_the_job(tmp_path, leader, engine, kind):
+    job_id = leader.add_job()
+    if kind == "submit":  # the submit that is in flight is answered 503: the retry is cut short
+        leader.push("submit", error(503, "unavailable", **{"Retry-After": "3000"}))
+    reached, release = hold_request(leader, kind)
+    served = start(tmp_path, leader, engine, shutdown_grace_seconds=0)
+    assert reached.wait(10)
+    served.agent.stop()
+    served.agent.stop()
+    release.set()
+    assert served.code() == 0
+    assert leader.released == [job_id] and leader.submitted == []
+
+
+def test_the_second_signal_ends_a_worker_waiting_deaf_after_the_lease_was_lost(
+    tmp_path, leader, engine
+):
+    """I2 through the agent: the leader completed the job, the answer was lost, the lease is
+    'lost', and nobody answers. First stop: finishing (a timer). Second: out within seconds."""
+    leader.add_job()
+    leader.push("submit", LOST, *[error(503, "unavailable", **{"Retry-After": "3000"})] * 5)
+    served = start(tmp_path, leader, engine)
+    until(
+        lambda: served.agent._control is not None
+        and served.agent._control.reason == "lease_lost"
+        and leader.count("submit") >= 2,
+        "the lease to be lost during the submit retries",
+    )
+    served.agent.stop()
+    assert served.thread.is_alive()
+    began = time.monotonic()
+    served.agent.stop()
+    assert served.code(timeout=5) == 0
+    assert time.monotonic() - began < 5
+    assert (leader.failed, leader.released) == ([], [])
+
+
+# --- wipe scratch BEFORE registering again after a 401 (M7) --------------------------------
+
+
+def stray_in_scratch(tmp_path):
+    stray = tmp_path / "state" / "scratch" / "stray-file"
+    stray.write_text("left by the job that was running")
+    return stray
+
+
+def test_scratch_is_wiped_before_the_new_registration_after_a_401_mid_job(
+    tmp_path, leader, engine
+):
+    leader.add_job()
+    at_register = []
+    leader.on["register"] = lambda: at_register.append(
+        sorted(p.name for p in (tmp_path / "state" / "scratch").iterdir() if p.name != MARKER)
+    )
+
+    def forget(fraction):
+        if fraction == 0.5:
+            stray_in_scratch(tmp_path)
+            leader.credentials.clear()
+            until(lambda: served.agent._control.reason is not None, "the keeper to notice")
+
+    engine.on_step = forget
+    served = start(tmp_path, leader, engine, join_token=POOL_TOKEN)
+    until(lambda: leader.registrations == 2, "registering again")
+    served.agent.stop()
+    assert served.code() == 0
+    assert at_register[-1] == []  # the wipe came first: nothing of the job was left to register
+
+
+def test_scratch_is_wiped_before_the_new_registration_after_a_401_while_idle(
+    tmp_path, leader, engine
+):
+    served = start(tmp_path, leader, engine, join_token=POOL_TOKEN)
+    until(lambda: leader.count("claim") >= 1, "the first claim")
+    at_register = []
+    leader.on["register"] = lambda: at_register.append(
+        sorted(p.name for p in (tmp_path / "state" / "scratch").iterdir() if p.name != MARKER)
+    )
+    stray_in_scratch(tmp_path)
+    leader.credentials.clear()
+    until(lambda: leader.registrations == 2, "registering again")
+    served.agent.stop()
+    assert served.code() == 0
+    assert at_register[-1] == []
+
+
+# --- a lost registration answer spends a single-use token (M11: inherent) -------------------
+
+
+def test_a_registration_whose_answer_is_lost_cannot_be_retried_with_a_single_use_token(
+    tmp_path, leader, engine
+):
+    leader.push("register", LOST)  # the leader registers us; the answer never arrives
+    agent = make_agent(tmp_path, leader, engine)
+    agent._stopping.wait = lambda seconds: False
+    with pytest.raises(FollowerExit) as stop:
+        agent.prepare()
+    assert stop.value.code == 4 and leader.registrations == 1  # the retry found it spent
+    assert not (tmp_path / "state" / "credential.json").exists()
+
+
+def test_a_registration_whose_answer_is_lost_is_retried_with_a_pool_token(
+    tmp_path, leader, engine
+):
+    leader.push("register", LOST)
+    agent = make_agent(tmp_path, leader, engine, join_token=POOL_TOKEN)
+    agent._stopping.wait = lambda seconds: False
+    agent.prepare()
+    assert leader.registrations == 2  # the lost one's row is not gone: a second row
+    assert stored_credential(tmp_path)["credential"] == "credential-SECRET-2"

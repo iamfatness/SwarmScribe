@@ -404,3 +404,66 @@ def test_doctor_reports_joined_after_a_join_and_never_prints_the_credential(
     code, text = doctor(tmp_path, leader, engine, monkeypatch)
     assert code == 0 and "joined: yes" in text
     assert "credential-SECRET" not in text and JOIN_TOKEN not in text
+
+
+def test_join_takes_the_leader_from_its_own_flag_when_the_setting_is_absent(
+    tmp_path, leader, engine, monkeypatch
+):
+    monkeypatch.delenv("SWARMSCRIBE_LEADER_URL")
+    seen = []
+
+    def build(settings):
+        seen.append(settings.leader_url)
+        return make_agent(tmp_path, leader, engine)
+
+    out, err = io.StringIO(), io.StringIO()
+    code = cli.main(["join", "--leader", "http://127.0.0.1:9/"], build=build, out=out, err=err)
+    assert code == 0, err.getvalue()
+    assert seen == ["http://127.0.0.1:9"]
+    assert out.getvalue().startswith("joined as follower ")
+
+
+def test_the_leader_flag_wins_over_the_setting(tmp_path, leader, engine):
+    seen = []
+
+    def build(settings):
+        seen.append(settings.leader_url)
+        return make_agent(tmp_path, leader, engine)
+
+    argv = ["join", "--leader", "http://127.0.0.1:9"]
+    code = cli.main(argv, build=build, out=io.StringIO(), err=io.StringIO())
+    assert code == 0 and seen == ["http://127.0.0.1:9"]
+
+
+def test_a_bad_leader_flag_is_a_configuration_error_naming_the_field(
+    tmp_path, leader, engine, monkeypatch
+):
+    monkeypatch.delenv("SWARMSCRIBE_LEADER_URL")
+    code, _out, err, _ = run_cli(tmp_path, leader, engine, "join", "--leader", "not a url")
+    assert code == 2 and "leader_url" in err and "not a url" not in err
+
+
+def test_leave_uses_the_stored_leader_when_the_setting_is_absent(
+    tmp_path, leader, engine, monkeypatch
+):
+    assert run_cli(tmp_path, leader, engine, "join")[0] == 0
+    monkeypatch.delenv("SWARMSCRIBE_LEADER_URL")
+    urls = []
+
+    def client(url, **kw):
+        urls.append(url)
+        return LeaderClient(url, credential=kw.get("credential"), transport=leader.transport)
+
+    monkeypatch.setattr(cli, "LeaderClient", client)
+    code, out, err, _ = run_cli(tmp_path, leader, engine, "leave")
+    assert code == 0, err
+    assert (leader.deregistrations, urls) == (1, [BASE])
+    assert not (tmp_path / "state" / "credential.json").exists()
+
+
+def test_leave_without_a_setting_or_a_credential_is_not_an_error(
+    tmp_path, leader, engine, monkeypatch
+):
+    monkeypatch.delenv("SWARMSCRIBE_LEADER_URL")
+    code, out, _err, _ = run_cli(tmp_path, leader, engine, "leave")
+    assert code == 0 and "has not joined" in out

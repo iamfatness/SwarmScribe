@@ -6,6 +6,29 @@ route, a status or a header the follower depends on, these fail.
 If one of these fails, the follower (or the fake leader) is wrong, never this file: fix the
 side the specs support and make the fake leader behave as the real one does."""
 
+# ruff: noqa: E402
+# The contract tests need the leader's packages and a Postgres. Where either is missing (a
+# follower-only container) they are skipped, visibly, not ignored on the command line.
+import importlib.util
+import os
+
+import pytest
+
+for _needed in ("swarmscribe_leader", "uvicorn", "asyncpg", "sqlalchemy"):
+    if importlib.util.find_spec(_needed) is None:
+        pytest.skip(
+            f"the leader package's dependency {_needed!r} is not installed",
+            allow_module_level=True,
+        )
+if (
+    not os.environ.get("SWARMSCRIBE_TEST_DATABASE_URL")
+    and importlib.util.find_spec("pgserver") is None
+):
+    pytest.skip(
+        "no Postgres: set SWARMSCRIBE_TEST_DATABASE_URL or install pgserver",
+        allow_module_level=True,
+    )
+
 import asyncio
 import contextlib
 import socket
@@ -13,7 +36,6 @@ import threading
 import time
 import uuid
 
-import pytest
 import uvicorn
 from follower_testkit import CPU, SPOKEN, FakeEngine
 from leader_testkit import (

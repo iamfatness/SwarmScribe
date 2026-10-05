@@ -36,9 +36,9 @@ EXIT_UNEXPECTED = 1  # a bug; doctor also uses it for "the leader does not answe
 EXIT_INTERRUPTED = 130  # Ctrl+C outside `run` (which handles its own signals)
 
 
-def load_settings(err: TextIO) -> Settings | None:
+def load_settings(err: TextIO, **given: Any) -> Settings | None:
     try:
-        return Settings()
+        return Settings(**given)
     except ValidationError as error:
         # Field names and messages only: the default rendering echoes the values, and one
         # of them is the join token.
@@ -47,6 +47,19 @@ def load_settings(err: TextIO) -> Settings | None:
             field = ".".join(str(part) for part in problem["loc"]) or "settings"
             print(f"  {field}: {problem['msg']}", file=err)
         return None
+
+
+def stored_leader_url() -> str | None:
+    """The leader URL stored with the credential, for `leave` when the setting is absent.
+    None when there is no readable credential (the state folder comes from the same
+    settings, with a placeholder leader that is never contacted)."""
+    try:
+        stored = CredentialStore(
+            Settings(leader_url="https://placeholder.invalid").credential_file
+        ).load()
+    except (ValidationError, CredentialFileError):
+        return None
+    return stored.leader_url if stored is not None else None
 
 
 def configure_environment(settings: Settings) -> None:
@@ -262,6 +275,11 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("run", help="join if needed, then work until stopped")
     join = commands.add_parser("join", help="register with the leader and store the credential")
     join.add_argument(
+        "--leader",
+        metavar="URL",
+        help="the leader's address (instead of SWARMSCRIBE_LEADER_URL; this one wins)",
+    )
+    join.add_argument(
         "--token-stdin", action="store_true", help="read the join token from standard input"
     )
     commands.add_parser("leave", help="deregister and delete the stored credential")
@@ -282,7 +300,17 @@ def main(
 ) -> int:
     out, err, stdin = out or sys.stdout, err or sys.stderr, stdin or sys.stdin
     args = parser().parse_args(argv)
-    settings = load_settings(err)
+    given: dict[str, Any] = {}
+    if args.command == "join" and args.leader:
+        given["leader_url"] = args.leader
+    elif args.command == "leave" and not os.environ.get("SWARMSCRIBE_LEADER_URL", "").strip():
+        # The credential remembers where it was issued; leaving needs nothing else.
+        stored = stored_leader_url()
+        if stored is None:
+            print("this follower has not joined a leader", file=out)
+            return EXIT_OK
+        given["leader_url"] = stored
+    settings = load_settings(err, **given)
     if settings is None:
         return EXIT_CONFIGURATION
     logs.configure(settings.log_format, stream=err)

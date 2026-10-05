@@ -213,10 +213,25 @@ function CreateTokenDialog({
 }
 
 /**
+ * Selects the whole token with the caret at its start, so the field keeps showing it from its
+ * first character (a selection made forwards scrolls to its end, and cut the start off).
+ */
+function selectWhole(field: HTMLTextAreaElement | null): void {
+  if (field === null) return;
+  field.setSelectionRange(0, field.value.length, "backward");
+  field.scrollTop = 0;
+  field.scrollLeft = 0;
+}
+
+/**
  * The join token's plaintext, shown once. It lives only in this dialog's props: the parent
  * drops it when the dialog closes, and nothing writes it to the URL, storage, the title or a
  * log. It cannot be dismissed by accident: until the token is copied, Escape and "I have
  * stored it" both ask first and close on the second go; focus starts on the token itself.
+ * The token is 47 characters: its field takes the dialog's whole width, where it fits on one
+ * line, and is a read-only box that wraps where it does not, so every character is in view at
+ * every width with nothing to scroll. Copy sits beneath it, beside the line that says whether
+ * it has been copied.
  * Layout: docs/superpowers/design/TokenDialog.dc.html.
  */
 export function TokenCreatedDialog({
@@ -228,7 +243,7 @@ export function TokenCreatedDialog({
 }) {
   const [copied, setCopied] = useState<"no" | "yes" | "failed">("no");
   const [asked, setAsked] = useState(false);
-  const tokenRef = useRef<HTMLInputElement>(null);
+  const tokenRef = useRef<HTMLTextAreaElement>(null);
   const warningId = useId();
   const tokenId = useId();
 
@@ -236,7 +251,7 @@ export function TokenCreatedDialog({
   // is one keystroke. (Dialog focuses its first control; this runs after it.)
   useEffect(() => {
     tokenRef.current?.focus();
-    tokenRef.current?.select();
+    selectWhole(tokenRef.current);
   }, []);
 
   const copy = async () => {
@@ -247,7 +262,7 @@ export function TokenCreatedDialog({
       // Unavailable or denied: leave the text selected so the person can copy it by hand.
       setCopied("failed");
       tokenRef.current?.focus();
-      tokenRef.current?.select();
+      selectWhole(tokenRef.current);
     }
   };
 
@@ -278,24 +293,25 @@ export function TokenCreatedDialog({
       <label className="field" htmlFor={tokenId}>
         Join token
       </label>
+      <textarea
+        id={tokenId}
+        ref={tokenRef}
+        className="mono token-field"
+        readOnly
+        rows={1}
+        autoComplete="off"
+        spellCheck={false}
+        value={created.token}
+        onFocus={(event) => selectWhole(event.target)}
+      />
       <div className="token-row">
-        <input
-          id={tokenId}
-          ref={tokenRef}
-          className="mono token-field"
-          readOnly
-          autoComplete="off"
-          spellCheck={false}
-          value={created.token}
-          onFocus={(event) => event.target.select()}
-        />
         <button type="button" className="button button-primary" onClick={() => void copy()}>
           Copy
         </button>
+        <p className="token-status" role="status">
+          {status}
+        </p>
       </div>
-      <p className="token-status" role="status">
-        {status}
-      </p>
       <p className="token-status" role="status">
         {question}
       </p>

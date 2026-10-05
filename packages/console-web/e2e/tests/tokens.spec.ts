@@ -260,3 +260,46 @@ test("a slow create that fails shows its error and Create works again", async ({
   await expect(shown.getByRole("textbox", { name: "Join token" })).toHaveValue(/^sst_/);
 });
 
+
+for (const theme of ["dark", "light"] as const) {
+  for (const width of [1280, 900, 768, 390, 320]) {
+    test(`the whole join token can be read in its field: ${theme} at ${width}px`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: theme });
+      await page.setViewportSize({ width, height: 900 });
+      await signIn(page, "admin", "/leaders/eu-1/tokens");
+      await openCreate(page);
+      await page.keyboard.press("Enter");
+      const shown = page.getByRole("dialog", { name: "Here is the join token. It is shown once." });
+      const field = shown.getByRole("textbox", { name: "Join token" });
+      await expect(field).toHaveValue(/^sst_/);
+      await expect(field).toBeFocused();
+      const read = () =>
+        field.evaluate((el) => {
+          const box = el as HTMLTextAreaElement;
+          return {
+            length: box.value.length,
+            hiddenAcross: box.scrollWidth - box.clientWidth,
+            hiddenDown: box.scrollHeight - box.clientHeight,
+            scrolled: box.scrollLeft + box.scrollTop,
+            selected: box.selectionEnd - box.selectionStart,
+          };
+        });
+      // 47 characters, all of them inside the field's own box: none past its right edge or
+      // below its bottom, and focus (which selects it) has not scrolled its start away.
+      const first = await read();
+      expect(first.length).toBe(47);
+      expect(first.hiddenAcross).toBeLessThanOrEqual(0);
+      expect(first.hiddenDown).toBeLessThanOrEqual(0);
+      expect(first.scrolled).toBe(0);
+      expect(first.selected).toBe(47);
+      // The same after focus leaves and comes back, and after a copy.
+      await shown.getByRole("button", { name: "Copy", exact: true }).focus();
+      await field.focus();
+      const again = await read();
+      expect(again.scrolled).toBe(0);
+      expect(again.selected).toBe(47);
+      await expect(field).toBeInViewport({ ratio: 1 });
+      await expect(shown.getByRole("button", { name: "Copy", exact: true })).toBeInViewport({ ratio: 1 });
+    });
+  }
+}

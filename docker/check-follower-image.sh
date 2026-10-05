@@ -51,7 +51,9 @@ installed="$(docker run --rm --entrypoint python "$image" -c \
 [ -n "$installed" ] || fail "the image does not say which version of the follower it holds"
 [ "$(label org.opencontainers.image.version)" = "$installed" ] \
   || fail "the version label is '$(label org.opencontainers.image.version)', the follower in the image is $installed"
-docker run --rm "$image" --version | grep -q -x "swarmscribe-follower $installed" \
+version_said="$(docker run --rm "$image" --version)" \
+  || fail "swarmscribe-follower --version does not run"
+grep -q -x "swarmscribe-follower $installed" <<<"$version_said" \
   || fail "swarmscribe-follower --version does not say $installed"
 
 # --- who it runs as, and where it may write --------------------------------------------
@@ -72,7 +74,8 @@ volumes="$(docker inspect --format '{{range $path, $_ := .Config.Volumes}}{{prin
 # The listener for /healthz and /metrics is on loopback only, and the image probes it.
 [ "$(setting SWARMSCRIBE_FOLLOWER_HEALTH_ADDR)" = "127.0.0.1:9108" ] \
   || fail "the health listener is not on 127.0.0.1:9108"
-docker inspect --format '{{json .Config.Healthcheck}}' "$image" | grep -q '/healthz' \
+healthcheck="$(docker inspect --format '{{json .Config.Healthcheck}}' "$image")"
+grep -q '/healthz' <<<"$healthcheck" \
   || fail "the image has no HEALTHCHECK on /healthz"
 
 # The credential is refused in a folder that others can write to, or that is not its own.
@@ -159,11 +162,13 @@ fi
 
 # The three writable paths as tmpfs, as a chart would give them: the state folder needs its
 # owner and mode said (a plain tmpfs is root's and world-writable, and is refused).
-docker run --rm "${locked[@]}" "${leader[@]}" -e SWARMSCRIBE_FOLLOWER_DEVICE=cpu \
+ready="$(docker run --rm "${locked[@]}" "${leader[@]}" -e SWARMSCRIBE_FOLLOWER_DEVICE=cpu \
   --tmpfs "$state:uid=10001,gid=10001,mode=0700" \
   --tmpfs /scratch:uid=10001,gid=10001,mode=0700 \
   --tmpfs /models:uid=10001,gid=10001,mode=0755 \
-  "$image" doctor --no-model --no-leader | grep -q '^result: ready$' \
+  "$image" doctor --no-model --no-leader)" \
+  || fail "doctor does not pass on a read-only root with tmpfs on the three writable paths"
+grep -q '^result: ready$' <<<"$ready" \
   || fail "doctor does not pass on a read-only root with tmpfs on the three writable paths"
 
 # --- the device ------------------------------------------------------------------------------
@@ -195,8 +200,10 @@ else
   [ "$(setting SWARMSCRIBE_FOLLOWER_STARTUP_MODEL)" = "$baked" ] \
     || fail "the start-up model is '$(setting SWARMSCRIBE_FOLLOWER_STARTUP_MODEL)', not $baked"
   [ "$(setting SWARMSCRIBE_FOLLOWER_OFFLINE)" = "1" ] || fail "a baked image is not offline"
-  docker run --rm "${locked[@]}" "${leader[@]}" -e SWARMSCRIBE_FOLLOWER_DEVICE=cpu \
-    "$image" doctor --no-model --no-leader | grep -E -q "^cached models: (.*, )?$baked(,|\$)" \
+  cached="$(docker run --rm "${locked[@]}" "${leader[@]}" -e SWARMSCRIBE_FOLLOWER_DEVICE=cpu \
+    "$image" doctor --no-model --no-leader)" \
+    || fail "the baked model $baked is not in /models"
+  grep -E -q "^cached models: (.*, )?$baked(,|\$)" <<<"$cached" \
     || fail "the baked model $baked is not in /models"
 
   # The files in the image are the files the lock file names, hashed again INSIDE the image
@@ -264,7 +271,8 @@ if ref != entry["revision"]:
         *) fail "a stop $delay s after the start exited $status, not 0 or 143 (137: the stop was lost and it was killed)" ;;
       esac
       [ "$took" -lt "$early_limit" ] || fail "a stop $delay s after the start took $took s"
-      if docker logs "$name-early" 2>&1 | grep -q 'Traceback'; then
+      early_log="$(docker logs "$name-early" 2>&1)"
+      if grep -q 'Traceback' <<<"$early_log"; then
         fail "a stop $delay s after the start ended in a traceback"
       fi
       docker rm -f "$name-early" >/dev/null
@@ -276,13 +284,16 @@ if ref != entry["revision"]:
       --health-interval 2s --health-start-period 1s \
       -e SWARMSCRIBE_JOIN_TOKEN=not-a-token "$image" >/dev/null
     for _ in $(seq 1 60); do
-      docker logs "$name" 2>&1 | grep -q 'loaded on' && break
+      logs="$(docker logs "$name" 2>&1)"
+      grep -q 'loaded on' <<<"$logs" && break
       sleep 1
     done
-    docker logs "$name" 2>&1 | grep -q 'loaded on' || fail "the follower never loaded its model"
+    logs="$(docker logs "$name" 2>&1)"
+    grep -q 'loaded on' <<<"$logs" || fail "the follower never loaded its model"
     # PID 1 is the init, and the follower is the only thing it started.
-    docker exec "$name" cat /proc/1/cmdline | xargs -0 echo \
-      | grep -q -x '/usr/bin/tini -- swarmscribe-follower run' \
+    pid1="$(docker exec "$name" cat /proc/1/cmdline | xargs -0 echo)" \
+      || fail "PID 1 is not tini running the follower"
+    grep -q -x '/usr/bin/tini -- swarmscribe-follower run' <<<"$pid1" \
       || fail "PID 1 is not tini running the follower"
     children="$(docker exec "$name" sh -c \
       'for s in /proc/[0-9]*/status; do grep -q "^PPid:[[:space:]]*1\$" "$s" && tr "\0" " " <"${s%status}cmdline" && echo; done; true')"
@@ -310,7 +321,8 @@ if ref != entry["revision"]:
     status="$(docker inspect --format '{{.State.ExitCode}}' "$name")"
     [ "$status" = "0" ] || fail "docker stop during start-up exited $status, not 0 (137 is a kill)"
     [ "$took" -lt 3 ] || fail "docker stop during start-up took $took s"
-    if docker logs "$name" 2>&1 | grep -q 'not-a-token'; then
+    logs="$(docker logs "$name" 2>&1)"
+    if grep -q 'not-a-token' <<<"$logs"; then
       fail "the join token is in the log"
     fi
   fi

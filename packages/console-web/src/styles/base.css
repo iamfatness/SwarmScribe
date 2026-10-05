@@ -125,12 +125,12 @@ strong {
   padding: var(--s-2) var(--s-4);
   border-radius: var(--r);
   background: var(--amber);
-  color: #14110d;
+  color: var(--ink);
   font-weight: 600;
 }
 
 .skip-link:hover {
-  color: #14110d;
+  color: var(--ink);
 }
 
 .skip-link:focus {
@@ -142,4 +142,19 @@ strong {
     scroll-behavior: auto;
     transition: none;
   }
+}
+
+/* No word left alone on the last line: prose wraps for the better, headings balance. */
+p,
+li,
+dd {
+  text-wrap: pretty;
+}
+
+h1,
+h2,
+h3,
+.sheet-title,
+.dialog-title {
+  text-wrap: balance;
 }

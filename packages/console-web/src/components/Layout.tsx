@@ -208,7 +208,7 @@ export function Layout({
         <div ref={panel} id={panelId} className="rail-panel" data-open={open ? "true" : "false"}>
           <nav aria-label="Console">
             <ul className="nav-list">
-              <li>
+              <li className="nav-fleet">
                 <Link to="/" className="nav-link" aria-current={onFleet ? "page" : undefined}>
                   <span className={onFleet ? "mark mark-hex" : "mark mark-hex mark-quiet"} aria-hidden="true" />
                   Fleet

@@ -11,15 +11,19 @@ import {
   oldestQueuedAge,
 } from "./format";
 
+// The words as a person reads them: the no-break spaces (a figure and its unit) are spaces.
+// src/lib/nbsp.test.ts checks the no-break space itself.
+const words = (text: string): string => text.replaceAll("\u00a0", " ");
+
 describe("format", () => {
   it("formats durations", () => {
-    expect(formatDuration(0)).toBe("0 s");
-    expect(formatDuration(59.9)).toBe("59 s");
-    expect(formatDuration(60)).toBe("1 min");
-    expect(formatDuration(3600)).toBe("1 h");
-    expect(formatDuration(3600 + 5 * 60)).toBe("1 h 5 min");
-    expect(formatDuration(2 * 86400 + 4 * 3600)).toBe("2 d 4 h");
-    expect(formatDuration(-5)).toBe("0 s");
+    expect(words(formatDuration(0))).toBe("0 s");
+    expect(words(formatDuration(59.9))).toBe("59 s");
+    expect(words(formatDuration(60))).toBe("1 min");
+    expect(words(formatDuration(3600))).toBe("1 h");
+    expect(words(formatDuration(3600 + 5 * 60))).toBe("1 h 5 min");
+    expect(words(formatDuration(2 * 86400 + 4 * 3600))).toBe("2 d 4 h");
+    expect(words(formatDuration(-5))).toBe("0 s");
   });
 
   it("adds the time since the snapshot to the oldest queued age", () => {
@@ -44,9 +48,9 @@ describe("format", () => {
     expect(formatCount(Number.POSITIVE_INFINITY)).toBe("–");
     expect(formatCount(-3)).toBe("-3");
     expect(formatCount(1_234_567_890_123)).not.toMatch(/NaN|undefined/);
-    expect(formatDuration(Number.NaN)).toBe("0 s");
-    expect(formatDuration(Number.POSITIVE_INFINITY)).toBe("0 s");
-    expect(formatDuration(-Infinity)).toBe("0 s");
+    expect(words(formatDuration(Number.NaN))).toBe("0 s");
+    expect(words(formatDuration(Number.POSITIVE_INFINITY))).toBe("0 s");
+    expect(words(formatDuration(-Infinity))).toBe("0 s");
     expect(formatDuration(1e15)).not.toMatch(/NaN|undefined|Infinity/);
     expect(formatTime("garbage", 0)).toBe("garbage");
     expect(oldestQueuedAge(5, "garbage", 0)).toBe(5);
@@ -56,20 +60,20 @@ describe("format", () => {
   });
 
   it("says a small number of tries in words and a large one in digits", () => {
-    expect(formatTries(1)).toBe("one try");
-    expect(formatTries(3)).toBe("three tries");
-    expect(formatTries(9)).toBe("nine tries");
-    expect(formatTries(10)).toBe("10 tries");
-    expect(formatTries(0)).toBe("no tries");
-    expect(formatTries(Number.NaN)).toBe("no tries");
-    expect(formatTries(-2)).toBe("no tries");
-    expect(formatTries(2.9)).toBe("two tries");
+    expect(words(formatTries(1))).toBe("one try");
+    expect(words(formatTries(3))).toBe("three tries");
+    expect(words(formatTries(9))).toBe("nine tries");
+    expect(words(formatTries(10))).toBe("10 tries");
+    expect(words(formatTries(0))).toBe("no tries");
+    expect(words(formatTries(Number.NaN))).toBe("no tries");
+    expect(words(formatTries(-2))).toBe("no tries");
+    expect(words(formatTries(2.9))).toBe("two tries");
   });
 
   it("counts a noun in the singular and the plural", () => {
-    expect(countOf(1, "leader")).toBe("1 leader");
-    expect(countOf(0, "follower")).toBe("0 followers");
-    expect(countOf(1234, "follower")).toBe(`${formatCount(1234)} followers`);
+    expect(words(countOf(1, "leader"))).toBe("1 leader");
+    expect(words(countOf(0, "follower"))).toBe("0 followers");
+    expect(words(countOf(1234, "follower"))).toBe(`${formatCount(1234)} followers`);
   });
 
   it("formats a recent time as a clock and an old one with its date", () => {

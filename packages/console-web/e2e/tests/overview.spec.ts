@@ -3,9 +3,7 @@ import { expect, setLeaderMode, signIn, test } from "./support";
 
 /** How far the page is wider than the window: more than 0 means it scrolls sideways. */
 function sidewaysOverflow(page: Page): Promise<number> {
-  return page.evaluate(
-    () => document.documentElement.scrollWidth - window.innerWidth,
-  );
+  return page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
 }
 
 /**
@@ -16,22 +14,12 @@ function sidewaysOverflow(page: Page): Promise<number> {
 function brokenWords(page: Page): Promise<string[]> {
   return page.evaluate(() => {
     const broken: string[] = [];
-    const roots = document.querySelectorAll(
-      "th, td, .leader-card, .stat-tile, .needs-look, .rail, .page-head",
-    );
+    const roots = document.querySelectorAll("th, td, .leader-card, .stat-tile, .needs-look, .rail, .page-head");
     for (const root of roots) {
       const cell = root.matches("th, td");
-      if (
-        cell &&
-        (root.classList.contains("long") || root.querySelector(".long"))
-      )
-        continue;
+      if (cell && (root.classList.contains("long") || root.querySelector(".long"))) continue;
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-      for (
-        let node = walker.nextNode();
-        node !== null;
-        node = walker.nextNode()
-      ) {
+      for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
         if (node.parentElement?.closest(".long, .visually-hidden")) continue;
         const text = node.textContent ?? "";
         for (const match of text.matchAll(/\S+/g)) {
@@ -39,25 +27,20 @@ function brokenWords(page: Page): Promise<string[]> {
           range.setStart(node, match.index);
           range.setEnd(node, match.index + match[0].length);
           // A word that wraps in the middle has client rects on more than one line.
-          const tops = new Set(
-            Array.from(range.getClientRects()).map((r) => Math.round(r.top)),
-          );
+          const tops = new Set(Array.from(range.getClientRects()).map((r) => Math.round(r.top)));
           if (tops.size > 1) broken.push(`${root.tagName} "${match[0]}"`);
         }
       }
     }
     for (const head of document.querySelectorAll("thead th")) {
       const wraps = getComputedStyle(head).whiteSpace;
-      if (wraps !== "nowrap")
-        broken.push(`header ${head.textContent} is ${wraps}`);
+      if (wraps !== "nowrap") broken.push(`header ${head.textContent} is ${wraps}`);
     }
     return broken;
   });
 }
 
-test("the overview shows each leader's figures and 24-hour chart", async ({
-  page,
-}) => {
+test("the overview shows each leader's figures and 24-hour chart", async ({ page }) => {
   await signIn(page, "viewer");
   const eu = page.getByRole("article", { name: "eu-1" });
   await expect(eu.getByText("Answering", { exact: true })).toBeVisible();
@@ -70,23 +53,20 @@ test("the overview shows each leader's figures and 24-hour chart", async ({
   ]);
   await expect(eu.getByRole("definition")).toHaveText(["2", "7", "30", "1"]);
   await expect(eu.getByText(/oldest waiting/)).toHaveText(
-    /^2 followers · default 1, gpu 1 · oldest waiting 1\d min$/,
+    /^2\sfollowers · default 1, gpu 1 · oldest waiting 1\d\smin$/,
   );
-  await expect(
-    eu.getByRole("list", { name: "Labels" }).getByRole("listitem"),
-  ).toHaveText(["env=prod", "region=eu"]);
+  await expect(eu.getByRole("list", { name: "Labels" }).getByRole("listitem")).toHaveText([
+    "env=prod",
+    "region=eu",
+  ]);
   await expect(eu.getByRole("img")).toHaveAccessibleName(
     /^eu-1: Finished per hour over the last 24 hours/,
   );
   const us = page.getByRole("article", { name: "us-1" });
-  await expect(us.getByRole("img")).toHaveAccessibleName(
-    /No answer in 4 five-minute periods/,
-  );
+  await expect(us.getByRole("img")).toHaveAccessibleName(/No answer in 4 five-minute periods/);
 });
 
-test("the overview adds up the fleet and lists what needs a look", async ({
-  page,
-}) => {
+test("the overview adds up the fleet and lists what needs a look", async ({ page }) => {
   await signIn(page, "viewer");
   const totals = page.getByRole("region", { name: "Totals" });
   await expect(totals.getByRole("term")).toHaveText([
@@ -95,41 +75,27 @@ test("the overview adds up the fleet and lists what needs a look", async ({
     "Finished, last day",
     "Followers at work",
   ]);
-  await expect(totals.getByRole("definition")).toHaveText([
-    "4",
-    "10",
-    "42",
-    "4",
-  ]);
+  await expect(totals.getByRole("definition")).toHaveText(["4", "10", "42", "4"]);
   const look = page.getByRole("region", { name: "Needs a look" });
-  await expect(
-    look.getByRole("heading", { level: 2, name: "Needs a look" }),
-  ).toBeVisible();
+  await expect(look.getByRole("heading", { level: 2, name: "Needs a look" })).toBeVisible();
+  // Most serious first: failed tries, then the scan error.
   await expect(look.getByRole("listitem")).toHaveText([
-    "eu-1 could not scan archive. the root folder is not readable",
     "2 tries failed in the last day. 1 on eu-1, 1 on us-1.",
+    "eu-1 could not scan archive. the root folder is not readable",
   ]);
-  await look
-    .getByRole("link", { name: "eu-1 could not scan archive." })
-    .click();
+  await look.getByRole("link", { name: "eu-1 could not scan archive." }).click();
   await expect(page).toHaveURL("/leaders/eu-1/locations");
 });
 
 test("the label filter narrows the cards", async ({ page }) => {
   await signIn(page, "viewer");
-  const pills = page.getByRole("group", {
-    name: "Show leaders with the label",
-  });
-  await expect(
-    pills.getByRole("button", { name: "All leaders" }),
-  ).toHaveAttribute("aria-pressed", "true");
+  const pills = page.getByRole("group", { name: "Show leaders with the label" });
+  await expect(pills.getByRole("button", { name: "All leaders" })).toHaveAttribute("aria-pressed", "true");
   await pills.getByRole("button", { name: "region = us" }).click();
   await expect(page.getByRole("article", { name: "us-1" })).toBeVisible();
   await expect(page.getByRole("article", { name: "eu-1" })).toHaveCount(0);
   await expect(page).toHaveURL("/?label=region%3Dus");
-  await expect(
-    pills.getByRole("button", { name: "region = us" }),
-  ).toHaveAttribute("aria-pressed", "true");
+  await expect(pills.getByRole("button", { name: "region = us" })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByText("1 of 2 leaders")).toBeVisible();
 });
 
@@ -140,34 +106,22 @@ test("a leader that stops answering is shown not answering while the other keeps
   await signIn(page, "viewer");
   await setLeaderMode(request, "us-1", "down");
   const us = page.getByRole("article", { name: "us-1" });
-  await expect(us.getByText("Not answering", { exact: true })).toBeVisible({
-    timeout: 30_000,
-  });
-  await expect(
-    us.getByText(/^No answer since .+, after \w+ tries\.$/),
-  ).toBeVisible();
+  await expect(us.getByText("Not answering", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(us.getByText(/^No answer since .+, after \w+\stries\.$/)).toBeVisible();
   await expect(us.getByText(/The last figures are from/)).toBeVisible();
+  await expect(us.getByRole("link", { name: "See what us-1 last reported" })).toBeVisible();
   await expect(
-    us.getByRole("link", { name: "See what us-1 last reported" }),
+    page.getByRole("navigation", { name: "Console" }).getByRole("link", { name: "us-1 no answer" }),
   ).toBeVisible();
   await expect(
-    page
-      .getByRole("navigation", { name: "Console" })
-      .getByRole("link", { name: "us-1 no answer" }),
-  ).toBeVisible();
-  await expect(
-    page
-      .getByRole("article", { name: "eu-1" })
-      .getByText("Answering", { exact: true }),
+    page.getByRole("article", { name: "eu-1" }).getByText("Answering", { exact: true }),
   ).toBeVisible();
   await expect(page.getByRole("region", { name: "Totals" })).toContainText(
     "These include the last figures from us-1, which the console cannot check right now.",
   );
 });
 
-test("the layout holds at tablet width: the rail is a top bar with a menu", async ({
-  page,
-}) => {
+test("the layout holds at tablet width: the rail is a top bar with a menu", async ({ page }) => {
   await page.setViewportSize({ width: 768, height: 1024 });
   await signIn(page, "viewer");
   const eu = page.getByRole("article", { name: "eu-1" });
@@ -183,11 +137,7 @@ test("the layout holds at tablet width: the rail is a top bar with a menu", asyn
 
   await menu.click();
   await expect(menu).toHaveAttribute("aria-expanded", "true");
-  await expect(
-    page
-      .getByRole("navigation", { name: "Console" })
-      .getByRole("link", { name: "Fleet" }),
-  ).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Console" }).getByRole("link", { name: "Fleet" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Sign out" })).toBeInViewport();
   await expect(page.getByRole("combobox", { name: "Theme" })).toBeVisible();
   expect(await sidewaysOverflow(page)).toBeLessThanOrEqual(0);
@@ -199,50 +149,38 @@ test("the layout holds at tablet width: the rail is a top bar with a menu", asyn
 
   // Following a link from the menu closes it.
   await menu.click();
-  await page
-    .getByRole("navigation", { name: "Console" })
-    .getByRole("link", { name: "eu-1" })
-    .click();
-  await expect(
-    page.getByRole("heading", { level: 1, name: "eu-1" }),
-  ).toBeVisible();
+  await page.getByRole("navigation", { name: "Console" }).getByRole("link", { name: "eu-1" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "eu-1" })).toBeVisible();
   await expect(menu).toHaveAttribute("aria-expanded", "false");
 });
 
-test("at tablet width the cards sit two across and nothing is cut off", async ({
-  page,
-}) => {
+test("at tablet width the cards sit two across and nothing is cut off", async ({ page }) => {
   await page.setViewportSize({ width: 768, height: 1024 });
   await signIn(page, "viewer");
-  const look = await page
-    .getByRole("region", { name: "Needs a look" })
-    .boundingBox();
+  const look = await page.getByRole("region", { name: "Needs a look" }).boundingBox();
   const eu = await page.getByRole("article", { name: "eu-1" }).boundingBox();
   const us = await page.getByRole("article", { name: "us-1" }).boundingBox();
-  if (look === null || eu === null || us === null)
-    throw new Error("a card is not on the page");
-  // "Needs a look" first, the first leader beside it, the next leader on the row below.
-  expect(Math.round(eu.y)).toBe(Math.round(look.y));
-  expect(eu.x).toBeGreaterThan(look.x + look.width);
-  expect(us.y).toBeGreaterThanOrEqual(look.y + look.height);
+  if (look === null || eu === null || us === null) throw new Error("a card is not on the page");
+  // "Needs a look" is a band across the top, as tall as its items; the cards sit two across below it.
+  const main = await page.getByRole("main").boundingBox();
+  if (main === null) throw new Error("the page has no main region");
+  expect(look.x + look.width).toBeGreaterThan(main.x + main.width - 40);
+  expect(eu.y).toBeGreaterThanOrEqual(look.y + look.height);
+  expect(Math.round(us.y)).toBe(Math.round(eu.y));
+  expect(us.x).toBeGreaterThan(eu.x + eu.width);
   for (const box of [look, eu, us]) {
     expect(box.x).toBeGreaterThanOrEqual(0);
     expect(box.x + box.width).toBeLessThanOrEqual(768);
   }
   // The chart fills its card and keeps its height.
-  const chart = await page
-    .getByRole("article", { name: "eu-1" })
-    .getByRole("img")
-    .boundingBox();
+  const chart = await page.getByRole("article", { name: "eu-1" }).getByRole("img").boundingBox();
   if (chart === null) throw new Error("the chart is not on the page");
   expect(Math.round(chart.height)).toBe(64);
   expect(chart.width).toBeGreaterThan(eu.width * 0.75);
   expect(await brokenWords(page)).toEqual([]);
 });
 
-test("at phone width everything stacks and the page still does not scroll sideways", async ({
-  page,
-}) => {
+test("at phone width everything stacks and the page still does not scroll sideways", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await signIn(page, "viewer");
   const eu = await page.getByRole("article", { name: "eu-1" }).boundingBox();
@@ -255,9 +193,7 @@ test("at phone width everything stacks and the page still does not scroll sidewa
 test("the overview works from the keyboard alone", async ({ page }) => {
   await signIn(page, "viewer");
   await page.keyboard.press("Tab");
-  await expect(
-    page.getByRole("link", { name: "Skip to main content" }),
-  ).toBeFocused();
+  await expect(page.getByRole("link", { name: "Skip to main content" })).toBeFocused();
   await page.keyboard.press("Enter");
   await page.keyboard.press("Tab");
   // The skip link lands past the rail: the first stop is the first control of the page.
@@ -268,33 +204,23 @@ test("the overview works from the keyboard alone", async ({ page }) => {
   await expect(page.getByRole("button", { name: "env = prod" })).toBeFocused();
 
   // Tab reaches a leader's own link without ever leaving the main region.
-  const card = page
-    .getByRole("article", { name: "eu-1" })
-    .getByRole("link", { name: "eu-1", exact: true });
+  const card = page.getByRole("article", { name: "eu-1" }).getByRole("link", { name: "eu-1", exact: true });
   for (let i = 0; i < 12; i += 1) {
     await page.keyboard.press("Tab");
-    expect(
-      await page.evaluate(
-        () => document.activeElement?.closest("main") !== null,
-      ),
-    ).toBe(true);
+    expect(await page.evaluate(() => document.activeElement?.closest("main") !== null)).toBe(true);
     if (await card.evaluate((el) => el === document.activeElement)) break;
   }
   await expect(card).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(page).toHaveURL("/leaders/eu-1/pools");
-  await expect(
-    page.getByRole("heading", { level: 1, name: "eu-1" }),
-  ).toBeFocused();
+  await expect(page.getByRole("heading", { level: 1, name: "eu-1" })).toBeFocused();
 
   await page.getByRole("combobox", { name: "Theme" }).focus();
   await page.keyboard.press("ArrowDown");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 });
 
-test("the longest leader name and a very long label never push the page sideways", async ({
-  page,
-}) => {
+test("the longest leader name and a very long label never push the page sideways", async ({ page }) => {
   // The registry allows a name of 100 characters and a label value of 255, with no spaces.
   const name = `L${"o".repeat(99)}`;
   const label = `note=${"v".repeat(200)}`;
@@ -302,13 +228,9 @@ test("the longest leader name and a very long label never push the page sideways
   await page.getByRole("button", { name: "Add leader" }).click();
   const dialog = page.getByRole("dialog", { name: "Add a leader" });
   await dialog.getByRole("textbox", { name: "Name" }).fill(name);
-  await dialog
-    .getByRole("textbox", { name: "Address (https://)" })
-    .fill("https://long.leaders.example");
+  await dialog.getByRole("textbox", { name: "Address (https://)" }).fill("https://long.leaders.example");
   await dialog.getByRole("textbox", { name: "Labels" }).fill(label);
-  await dialog
-    .getByLabel("Console credential")
-    .fill("c".repeat(20) + "_-" + "D".repeat(21));
+  await dialog.getByLabel("Console credential").fill("c".repeat(20) + "_-" + "D".repeat(21));
   await dialog.getByRole("button", { name: "Add leader" }).click();
   await expect(dialog).toHaveCount(0);
 
@@ -316,38 +238,20 @@ test("the longest leader name and a very long label never push the page sideways
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/");
     // The new leader has no fake behind it: its card appears at the next 10 s refresh.
-    await expect(page.getByRole("article", { name })).toBeVisible({
-      timeout: 20_000,
-    });
-    expect(
-      await sidewaysOverflow(page),
-      `fleet at ${width}`,
-    ).toBeLessThanOrEqual(0);
-    await page
-      .getByRole("button", { name: `note = ${"v".repeat(200)}` })
-      .click();
+    await expect(page.getByRole("article", { name })).toBeVisible({ timeout: 20_000 });
+    expect(await sidewaysOverflow(page), `fleet at ${width}`).toBeLessThanOrEqual(0);
+    await page.getByRole("button", { name: `note = ${"v".repeat(200)}` }).click();
     await expect(page.getByRole("article", { name: "eu-1" })).toHaveCount(0);
-    expect(
-      await sidewaysOverflow(page),
-      `fleet, filtered, at ${width}`,
-    ).toBeLessThanOrEqual(0);
+    expect(await sidewaysOverflow(page), `fleet, filtered, at ${width}`).toBeLessThanOrEqual(0);
     const menu = page.getByRole("button", { name: "Menu" });
     if (await menu.isVisible()) {
       await menu.click();
-      await expect(
-        page.getByRole("button", { name: "Sign out" }),
-      ).toBeVisible();
-      expect(
-        await sidewaysOverflow(page),
-        `menu at ${width}`,
-      ).toBeLessThanOrEqual(0);
+      await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
+      expect(await sidewaysOverflow(page), `menu at ${width}`).toBeLessThanOrEqual(0);
     }
     await page.goto(`/leaders/${name}/pools`);
     await expect(page.getByRole("heading", { level: 1, name })).toBeVisible();
-    expect(
-      await sidewaysOverflow(page),
-      `leader page at ${width}`,
-    ).toBeLessThanOrEqual(0);
+    expect(await sidewaysOverflow(page), `leader page at ${width}`).toBeLessThanOrEqual(0);
   }
 });
 
@@ -362,51 +266,50 @@ const ACTION_TABLES: [path: string, region: string][] = [
   ["/admin/admins", "Console administrators"],
 ];
 
-test("the Actions column stays in reach at tablet width however far a table is scrolled", async ({
+// Until R2 folds the columns, a pinned Actions column would hide the text beneath it at rest
+// (Detail at 1280, Created at 768), so nothing is pinned: tables fit where they can and
+// scroll where they cannot, and Actions is reached by scrolling.
+test("every table fits at 1280 and 900, and scrolls at 768 with Actions reachable and no text covered", async ({
   page,
 }) => {
-  await page.setViewportSize({ width: 768, height: 1024 });
   await signIn(page, "admin");
-  for (const [path, name] of ACTION_TABLES) {
-    await page.goto(path);
-    const region = page.getByRole("region", { name, exact: true });
-    await expect(region).toBeVisible();
-    const button = region.locator("td.actions button").first();
-    const header = region.getByRole("columnheader", { name: "Actions" });
-    const widest = await region.evaluate(
-      (el) => el.scrollWidth - el.clientWidth,
-    );
-    for (const left of [0, Math.floor(widest / 2), widest]) {
-      await region.evaluate((el, x) => {
-        el.scrollLeft = x;
-      }, left);
+  for (const width of [1280, 900, 768]) {
+    await page.setViewportSize({ width, height: 1000 });
+    for (const [path, name] of ACTION_TABLES) {
+      await page.goto(path);
+      const region = page.getByRole("region", { name, exact: true });
+      await expect(region).toBeVisible();
+      const where = `${path} at ${width}`;
+      const widest = await region.evaluate((el) => el.scrollWidth - el.clientWidth);
+      if (width >= 900) expect(widest, `${where} needs no sideways scroll`).toBeLessThanOrEqual(1);
+
+      // No cell is pinned over its neighbours, so no column's text is hidden under another.
+      const pinned = await region.evaluate(
+        (el) => Array.from(el.querySelectorAll("td, th")).filter((c) => getComputedStyle(c).position === "sticky").length,
+      );
+      expect(pinned, `${where}: nothing is pinned`).toBe(0);
+
+      // Scrolled all the way right, the Actions header and the first row's buttons are in view.
+      await region.evaluate((el) => {
+        el.scrollLeft = el.scrollWidth;
+      });
       const frame = await region.boundingBox();
-      for (const pinned of [button, header]) {
-        const box = await pinned.boundingBox();
-        if (frame === null || box === null)
-          throw new Error(`${path}: nothing to measure`);
-        expect(box.x, `${path} at ${left}`).toBeGreaterThanOrEqual(frame.x);
-        expect(box.x + box.width, `${path} at ${left}`).toBeLessThanOrEqual(
-          frame.x + frame.width + 1,
-        );
+      const button = region.locator("td.actions button").first();
+      const header = region.getByRole("columnheader", { name: "Actions" });
+      for (const target of [button, header]) {
+        const box = await target.boundingBox();
+        if (frame === null || box === null) throw new Error(`${where}: nothing to measure`);
+        expect(box.x, where).toBeGreaterThanOrEqual(frame.x);
+        expect(box.x + box.width, where).toBeLessThanOrEqual(frame.x + frame.width + 1);
       }
-      // Nothing is painted over the button: the point at its middle is the button itself.
+      // And the point at the middle of that button is the button itself: nothing over it.
       const onTop = await button.evaluate((el) => {
         const r = el.getBoundingClientRect();
-        const hit = document.elementFromPoint(
-          r.left + r.width / 2,
-          r.top + r.height / 2,
-        );
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
         return hit !== null && el.contains(hit);
       });
-      expect(onTop, `${path} at ${left}`).toBe(true);
+      expect(onTop, where).toBe(true);
     }
-    // The pinned column leaves the first column readable: it never covers the whole table.
-    const cell = await region.locator("td.actions").first().boundingBox();
-    const frame = await region.boundingBox();
-    if (cell === null || frame === null)
-      throw new Error(`${path}: nothing to measure`);
-    expect(cell.width, path).toBeLessThan(frame.width / 2);
   }
 });
 

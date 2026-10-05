@@ -82,15 +82,27 @@ main {
   min-height: 0;
 }
 
-/* With many leaders the list scrolls inside the rail; the person, the theme and Sign out
-   below it stay in view. The small padding and matching negative margin keep a focus ring
-   from being clipped by the scroller. */
+/* With many leaders only the list of leaders scrolls inside the rail: Fleet stays above it,
+   Administration below it, and the person, the theme and Sign out below those, all in view.
+   The small padding and matching negative margin keep a focus ring from being clipped by
+   the scroller. */
 .rail-panel nav {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.nav-list {
   flex: 1 1 auto;
   min-height: 0;
-  margin: -4px;
-  padding: 4px;
-  overflow-y: auto;
+}
+
+.nav-fleet {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .rail-foot {
@@ -107,12 +119,22 @@ main {
   list-style: none;
 }
 
-.nav-sublist {
-  margin-top: var(--s-1);
+/* Beside the scrolling list, not inside it: Administration never moves out of reach. */
+.nav-gap {
+  flex: none;
+  margin-top: var(--s-3);
 }
 
-.nav-gap {
-  margin-top: var(--s-3);
+.nav-sublist {
+  flex: 0 1 auto;
+  min-height: 0;
+  margin: var(--s-1) -4px -4px;
+  padding: 4px;
+  overflow-y: auto;
+}
+
+.nav-fleet > .nav-link {
+  flex: none;
 }
 
 .nav-link {
@@ -298,7 +320,10 @@ main {
   /* The whole open menu scrolls in the bar here, not the list alone. */
   .rail-panel nav {
     flex: none;
-    margin: 0;
+  }
+
+  .nav-sublist {
+    margin: var(--s-1) 0 0;
     padding: 0;
     overflow: visible;
   }
@@ -371,5 +396,14 @@ main {
 @media (max-width: 900px) {
   .idle-notice {
     margin: var(--s-3) var(--s-5) 0;
+  }
+}
+
+/* Windows high contrast: the current page in the rail is shown in the selected colours too. */
+@media (forced-colors: active) {
+  .nav-link[aria-current="page"] {
+    forced-color-adjust: none;
+    background: Highlight;
+    color: HighlightText;
   }
 }

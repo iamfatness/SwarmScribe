@@ -57,6 +57,11 @@
 
   --shadow-offset: 8px 8px 0 var(--amber);
   --shadow-drop: 0 30px 60px -30px rgb(0 0 0 / 0.8);
+
+  /* The same in both themes: text on amber, and what a modal dialog dims the page with. */
+  --ink: #14110d;
+  --backdrop: rgb(10 8 6 / 0.65);
+  --shadow-edge: rgb(0 0 0 / 0.45);
 }
 
 /* token-set: ink */

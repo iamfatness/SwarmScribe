@@ -10,7 +10,7 @@ import { expect, setLeaderMode, signIn, test } from "../tests/support";
 // Run with: npm run screens   (the same harness as npm run e2e; build first).
 
 const OUT = join(process.cwd(), "screens");
-const WIDTHS = [1280, 768] as const;
+const WIDTHS = [1280, 900, 768] as const;
 const THEMES = ["dark", "light"] as const;
 
 const PAGES: [name: string, path: string][] = [
@@ -146,6 +146,83 @@ for (const theme of THEMES) {
       await page.goto("/leaders/us-1/jobs");
       await expect(page.getByRole("alert").first()).toBeVisible();
       await shot("leader-down");
+
+      // The fleet in its other states. Each answer is the real one, changed on the way.
+      await setLeaderMode(request, "us-1", "ok");
+      type Leader = { name: string; health: string } & Record<string, unknown>;
+      const fleetAs = async (change: (leaders: Leader[]) => Leader[]) => {
+        await page.unroute("**/api/fleet");
+        await page.route("**/api/fleet", async (route) => {
+          const answer = await route.fetch();
+          const leaders = (await answer.json()) as Leader[];
+          await route.fulfill({ response: answer, json: change(leaders) });
+        });
+      };
+      const copies = (leaders: Leader[], n: number, patch: Partial<Leader> = {}) =>
+        Array.from({ length: n }, (_, i) =>
+          leaders.map((l) => ({ ...l, ...patch, name: `${l.name}-${i + 1}` })),
+        ).flat();
+
+      await fleetAs(() => []);
+      await page.goto("/");
+      await expect(page.getByText(/You have no role/)).toBeVisible();
+      await shot("fleet-empty");
+
+      await fleetAs((leaders) => [
+        ...leaders,
+        { ...leaders[0], name: "rev-1", health: "credential_revoked" } as Leader,
+        { ...leaders[0], name: "off-1", health: "disabled", enabled: false } as Leader,
+        { ...leaders[0], name: "new-1", health: "pending", consecutive_failures: 2, summary: null, snapshot: null } as Leader,
+        { ...leaders[0], name: "lost-1", health: "unreachable", consecutive_failures: 5, last_error: "connect_error", last_success_at: null, summary: null, snapshot: null } as Leader,
+      ]);
+      await page.goto("/");
+      await settled(page);
+      await shot("fleet-every-state");
+
+      await fleetAs((leaders) => copies(leaders, 6, { health: "credential_revoked" }));
+      await page.goto("/");
+      await settled(page);
+      await shot("fleet-needs-look-many");
+      const showAll = page.getByRole("button", { name: /^Show all/ });
+      await showAll.click();
+      await shot("fleet-needs-look-open");
+
+      await fleetAs((leaders) => copies(leaders, 6));
+      await page.goto("/");
+      await settled(page);
+      await shot("fleet-12-leaders");
+
+      await fleetAs((leaders) => copies(leaders, 20));
+      await page.goto("/");
+      await settled(page);
+      await shot("fleet-40-leaders", false);
+      if (width > 900) await shot("rail-40-leaders", false);
+
+      // The first answer still pending: placeholders where the totals and cards will be.
+      await page.unroute("**/api/fleet");
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await page.route("**/api/fleet", async (route) => {
+        await held;
+        await route.continue();
+      });
+      await page.goto("/", { waitUntil: "commit" });
+      await expect(page.getByText(/^Loading the fleet/)).toBeVisible();
+      await shot("fleet-loading", false);
+      release();
+      await settled(page);
+
+      // A refresh that fails after a good answer: the cards stay and a notice says so.
+      await page.unroute("**/api/fleet");
+      await page.goto("/");
+      await settled(page);
+      await page.route("**/api/fleet", (route) => route.fulfill({ status: 503, json: { detail: "unavailable" } }));
+      await expect(page.getByRole("alert").filter({ hasText: "The last check did not work" })).toBeVisible({
+        timeout: 30_000,
+      });
+      await shot("fleet-failed-refresh");
     });
   }
 }

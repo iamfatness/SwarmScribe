@@ -149,10 +149,35 @@ test.describe("the rail on a tall page", () => {
   });
 });
 
+const leaderList = (page: Page) => nav(page).getByRole("list", { name: "Leaders" });
+
+test.describe("Administration in the rail", () => {
+  test.use({ viewport: { width: 1280, height: 700 } });
+
+  for (const pairs of [6, 20]) {
+    test(`is visible and reachable with ${pairs * 2} leaders`, async ({ page }) => {
+      await manyLeaders(page, pairs);
+      await signIn(page, "admin");
+      const admin = nav(page).getByRole("link", { name: "Administration" });
+      await expect(admin).toBeInViewport({ ratio: 1 });
+      // Fleet stays above the list, Administration below it, both without scrolling anything.
+      await expect(nav(page).getByRole("link", { name: "Fleet", exact: true })).toBeInViewport({ ratio: 1 });
+      const list = await leaderList(page).boundingBox();
+      const at = await admin.boundingBox();
+      if (list === null || at === null) throw new Error("the rail is not laid out");
+      expect(at.y).toBeGreaterThanOrEqual(list.y + list.height - 1);
+      // It still works: a click goes to Administration.
+      await admin.click();
+      await expect(page).toHaveURL(/\/admin\/leaders/);
+      await expect(admin).toBeInViewport({ ratio: 1 });
+    });
+  }
+});
+
 test.describe("the rail with twenty leaders", () => {
   test.use({ viewport: { width: 1280, height: 700 } });
 
-  test("scrolls its list inside itself, with the person, theme and Sign out always in view", async ({
+  test("scrolls only the list of leaders, with Administration, the person, theme and Sign out always in view", async ({
     page,
   }) => {
     await manyLeaders(page, 10);
@@ -162,9 +187,10 @@ test.describe("the rail with twenty leaders", () => {
     const signOut = page.getByRole("button", { name: "Sign out" });
     await expect(signOut).toBeInViewport({ ratio: 1 });
     await expect(page.getByRole("combobox", { name: "Theme" })).toBeInViewport({ ratio: 1 });
-    // The list is what scrolls: it is taller than the room it has, and the rail itself is not.
+    await expect(nav(page).getByRole("link", { name: "Administration" })).toBeInViewport({ ratio: 1 });
+    // The list of leaders is what scrolls: it is taller than the room it has, and the rail itself is not.
     const sizes = await page.evaluate(() => {
-      const list = document.querySelector<HTMLElement>(".rail-panel nav");
+      const list = document.querySelector<HTMLElement>(".rail-panel nav ul[aria-label='Leaders']");
       const rail = document.querySelector<HTMLElement>(".rail");
       return {
         listScrolls: (list?.scrollHeight ?? 0) > (list?.clientHeight ?? 0),
@@ -174,8 +200,11 @@ test.describe("the rail with twenty leaders", () => {
     expect(sizes).toEqual({ listScrolls: true, railScrolls: false });
     // Scrolling the list to its end leaves Sign out where it was.
     const at = await signOut.boundingBox();
-    await nav(page).evaluate((el) => el.scrollTo(0, el.scrollHeight));
+    const admin = nav(page).getByRole("link", { name: "Administration" });
+    const adminAt = await admin.boundingBox();
+    await leaderList(page).evaluate((el) => el.scrollTo(0, el.scrollHeight));
     expect(await signOut.boundingBox()).toEqual(at);
+    expect(await admin.boundingBox()).toEqual(adminAt);
     // And from the keyboard: Tab from the last leader reaches Administration, the theme, then Sign out.
     await nav(page).getByRole("link", { name: "us-1-9" }).focus();
     await page.keyboard.press("Tab");

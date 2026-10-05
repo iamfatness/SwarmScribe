@@ -91,7 +91,7 @@ th.long,
 
 td.long,
 th.long {
-  min-width: 12rem;
+  min-width: 8rem;
 }
 
 table.medium {
@@ -99,7 +99,7 @@ table.medium {
 }
 
 table.wide {
-  min-width: 54rem;
+  min-width: 44rem;
 }
 
 .cell-note,
@@ -124,14 +124,20 @@ table.wide {
   font-size: var(--fs-small);
 }
 
-/* The Actions column stays in reach while a wide table scrolls sideways: it is pinned to
-   the right edge of the scrolling region, over the columns that slide beneath it. */
-td.actions,
-table:has(td.actions) thead th:last-child {
+/* A table whose Actions column is pinned to the right edge of its scrolling region (class
+   pin-actions on the .table-scroll): the column stays in reach over the columns that slide
+   beneath it, with a soft edge on its left so it reads as lying on top of them. Nothing uses
+   it yet. A pinned column hides whatever is beneath it at rest, so it waits for R2, which
+   folds the columns until each table fits; until then Actions are reached by scrolling the
+   region, and no text is ever covered. */
+.pin-actions td.actions,
+.pin-actions table:has(td.actions) thead th:last-child {
   position: sticky;
   right: 0;
   background: var(--panel);
-  box-shadow: -1px 0 0 var(--line);
+  box-shadow:
+    -1px 0 0 var(--line),
+    -14px 0 14px -10px var(--shadow-edge);
 }
 
 td.actions {
@@ -223,7 +229,7 @@ html:has(dialog[open]) {
 }
 
 .dialog::backdrop {
-  background: rgb(10 8 6 / 0.65);
+  background: var(--backdrop);
 }
 
 .dialog-title {
@@ -412,4 +418,11 @@ html:has(dialog[open]) {
 
 .labels li + li::before {
   content: "· ";
+}
+
+/* Windows high contrast also drops a sheet's colour set and its shadows: it keeps an edge. */
+@media (forced-colors: active) {
+  .sheet {
+    border: 1px solid CanvasText;
+  }
 }

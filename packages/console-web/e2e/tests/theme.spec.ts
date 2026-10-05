@@ -63,3 +63,42 @@ test.describe("on a system set to dark", () => {
   });
 });
 
+
+// The chosen theme is applied by a classic script in <head>, before the first paint, not by
+// the app's deferred module script: hold that script back and look at what is painted.
+async function firstPaintWhileAppIsHeldBack(page: Page, chosen: "light" | "dark"): Promise<string> {
+  await page.addInitScript((choice) => localStorage.setItem("swarmscribe-console-theme", choice), chosen);
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(/\/assets\/index-[0-9a-f]+\.js$/, async (route) => {
+    await held;
+    await route.continue();
+  });
+  await page.goto("/sign-in", { waitUntil: "commit" });
+  // The stylesheet has applied once the page has a background of its own.
+  await page.waitForFunction(() => getComputedStyle(document.documentElement).backgroundColor !== "rgba(0, 0, 0, 0)");
+  const painted = await ground(page);
+  // Proof the app really had not started: nothing is rendered yet.
+  expect(await page.locator("#root").evaluate((el) => el.childElementCount)).toBe(0);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", chosen);
+  release();
+  return painted;
+}
+
+test.describe("before the first paint", () => {
+  test.describe("system light, Dark chosen", () => {
+    test.use({ colorScheme: "light" });
+    test("paints ink, not paper", async ({ page }) => {
+      expect(await firstPaintWhileAppIsHeldBack(page, "dark")).toBe(INK);
+    });
+  });
+
+  test.describe("system dark, Light chosen", () => {
+    test.use({ colorScheme: "dark" });
+    test("paints paper, not ink", async ({ page }) => {
+      expect(await firstPaintWhileAppIsHeldBack(page, "light")).toBe(PAPER);
+    });
+  });
+});

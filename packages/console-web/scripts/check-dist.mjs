@@ -3,6 +3,8 @@
 //   (any quoting of the attribute value).
 // - built CSS: no off-origin @import or url(); data: only for images (the CSP's img-src
 //   allows data:; font-src and style-src do not).
+// - the theme script: a classic script in <head> (no type, defer or async: it must block the
+//   first paint), an asset of its own with no import or export left in it.
 // - every file under dist/assets has a name the console caches as content-hashed
 //   (packages/console/src/swarmscribe_console/static.py, _HASHED).
 // - nothing from the end-to-end harness or a test reached the bundle.
@@ -24,7 +26,16 @@ function walk(dir) {
   });
 }
 
+const THEME_SCRIPT = /<script\b([^>]*\bsrc\s*=\s*["']?\/assets\/theme-[^>]*)>\s*<\/script>/i;
+
 function checkHtml(html, problems) {
+  const theme = THEME_SCRIPT.exec(html);
+  const headEnd = html.search(/<\/head>/i);
+  if (theme === null || headEnd < 0 || theme.index > headEnd) {
+    problems.push("index.html has no theme script in <head>");
+  } else if (/\b(?:type|defer|async)\b/i.test(theme[1].replace(/\bsrc\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/i, ""))) {
+    problems.push("the theme script must be a classic, blocking script (no type, defer or async)");
+  }
   for (const match of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
     const [, attributes, body] = match;
     if (!/\bsrc=/.test(attributes) || body.trim() !== "") problems.push("index.html has an inline <script>");
@@ -73,6 +84,9 @@ export function checkDist(dist) {
         if (text.includes(needle)) problems.push(`${name} contains ${JSON.stringify(needle)}`);
       }
       if (name.endsWith(".css")) checkCss(name, text, problems);
+      if (name.startsWith("theme-") && /\b(?:import|export)\b\s*[{*"'\w]/.test(text)) {
+        problems.push(`${name} has an import or export: a classic script cannot`);
+      }
     }
   }
   return { missing: false, problems, assets: assets.length };

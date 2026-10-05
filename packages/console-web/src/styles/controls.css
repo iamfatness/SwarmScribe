@@ -201,3 +201,14 @@ textarea[aria-invalid="true"] {
 .form-panel h2 {
   margin-top: 0;
 }
+
+/* Windows high contrast drops backgrounds and weight alone is too faint: a pressed pill is
+   drawn in the system's selected colours, with its border, so it reads as chosen. */
+@media (forced-colors: active) {
+  .pill[aria-pressed="true"] {
+    forced-color-adjust: none;
+    border-color: Highlight;
+    background: Highlight;
+    color: HighlightText;
+  }
+}

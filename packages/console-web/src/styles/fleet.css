@@ -5,6 +5,51 @@
   margin-bottom: 26px;
 }
 
+/* The page's one rhythm is 26px between its parts, a notice included. */
+.fleet-notice {
+  margin: 0 0 26px;
+}
+
+.fleet-loading {
+  margin: 0 0 var(--s-4);
+}
+
+/* ---- Loading: empty shapes where the totals and cards will be (still, so nothing moves) ---- */
+
+.placeholder {
+  display: grid;
+  gap: var(--s-3);
+  align-content: start;
+}
+
+.stat-tile.placeholder {
+  min-height: 90px;
+}
+
+.leader-card.placeholder {
+  min-height: 210px;
+}
+
+.placeholder-bar {
+  display: block;
+  height: 12px;
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+}
+
+.placeholder-bar-short {
+  width: 45%;
+}
+
+.placeholder-bar-figure {
+  width: 30%;
+  height: 26px;
+}
+
+.placeholder-bar-chart {
+  height: 64px;
+}
+
 /* ---- Totals ---- */
 
 .stat-row {
@@ -61,9 +106,10 @@
   margin-top: 26px;
 }
 
+/* A band of its own across the grid, as tall as what it lists and no taller, above the
+   leaders' cards. Its items run in two columns when there is room, one when there is not. */
 .needs-look {
-  /* As tall as the card beside it, so it never leaves a hole under itself. */
-  align-self: stretch;
+  grid-column: 1 / -1;
   min-width: 0;
   overflow-wrap: break-word;
   padding: var(--s-6) 22px;
@@ -80,15 +126,22 @@
   list-style: none;
 }
 
-.needs-look-more {
-  margin: 0;
-  padding-top: 10px;
-  border-top: 1px solid var(--line);
-}
-
 .needs-look-list li {
   padding: 10px 0;
   border-top: 1px solid var(--line);
+  break-inside: avoid;
+}
+
+.needs-look-toggle {
+  margin-top: var(--s-3);
+}
+
+/* Two columns that flow, so an item of any length never leaves a gap beside it. */
+@media (min-width: 1100px) {
+  .needs-look-list {
+    column-count: 2;
+    column-gap: var(--s-9);
+  }
 }
 
 /* A name or a label longer than the card breaks inside it; ordinary words never do. */

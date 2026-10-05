@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -120,5 +120,28 @@ describe("design tokens", () => {
 
   it("loads no font and no image from anywhere", () => {
     expect(CSS).not.toMatch(/url\(|@font-face|@import/);
+  });
+  it("writes no colour anywhere but this file (the logo's two ink constants excepted)", () => {
+    // A hex colour or an rgb()/hsl() function in any stylesheet or source file, comments aside.
+    const COLOUR = /#[0-9a-fA-F]{3,8}\b|\b(?:rgba?|hsla?)\(/;
+    const files = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) return files(path);
+        return /\.(css|tsx?)$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name) ? [path] : [];
+      });
+    const found: string[] = [];
+    for (const file of files(join(process.cwd(), "src"))) {
+      if (file.endsWith("tokens.css")) continue;
+      readFileSync(file, "utf8")
+        .replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\n]/g, " "))
+        .split("\n")
+        .forEach((line, i) => {
+          if (/^\s*\/\//.test(line)) return;
+          if (COLOUR.test(line)) found.push(`${file.slice(process.cwd().length + 1)}:${i + 1}: ${line.trim()}`);
+        });
+    }
+    expect(found.map((entry) => entry.replace(/^.*?:\d+: /, "")).sort()).toEqual(["fill: #14110d;", "stroke: #14110d;"]);
+    expect(found.every((entry) => entry.includes("shell.css"))).toBe(true);
   });
 });

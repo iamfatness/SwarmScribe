@@ -151,7 +151,7 @@ def test_a_second_start_reuses_the_credential_and_needs_no_token(tmp_path, leade
         ({"join_token": None}, None, 4, "no join token"),
         ({"join_token": "wrong"}, None, 4, "not valid"),
         ({}, error(409, "protocol_version"), 5, "another protocol"),
-        ({}, error(422, "invalid_request"), 5, "refused the registration"),
+        ({}, error(422, "invalid_request"), 2, "refused the registration"),
     ],
 )
 def test_a_registration_that_cannot_succeed_exits_and_is_not_retried(
@@ -455,8 +455,12 @@ def test_a_release_that_cannot_be_delivered_does_not_keep_the_follower_up(
 def test_stop_never_blocks_and_can_be_called_from_any_thread_at_any_time(
     tmp_path, leader, engine
 ):
+    early = make_agent(tmp_path, leader, engine)
+    early.stop()  # before prepare: start-up ends at once, with nothing registered
+    with pytest.raises(FollowerExit) as stopped:
+        early.prepare()
+    assert stopped.value.code == 0 and leader.registrations == 0 and engine.loads == []
     agent = make_agent(tmp_path, leader, engine)
-    agent.stop()  # before prepare
     agent.prepare()
     agent.stop(now=True)
     assert agent.serve() == 0

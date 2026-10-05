@@ -1,3 +1,4 @@
+import logging
 import sys
 import threading
 import time
@@ -26,3 +27,18 @@ def no_thread_left_running():
             break
         time.sleep(0.01)
     assert not extra, f"threads still running after the test: {[t.name for t in extra]}"
+
+
+@pytest.fixture(autouse=True)
+def logging_is_left_as_found():
+    """A test that configures logging (the command line does) must not change what the rest
+    of the process, other packages' tests included, sees."""
+    names = ("", "httpx", "httpcore")
+    before = [
+        (logging.getLogger(n), logging.getLogger(n).level, list(logging.getLogger(n).handlers))
+        for n in names
+    ]
+    yield
+    for logger, level, handlers in before:
+        logger.setLevel(level)
+        logger.handlers[:] = handlers

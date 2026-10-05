@@ -7,6 +7,7 @@ dependencies = [
     "swarmscribe-protocol",
     "swarmscribe-engine",
     "httpx>=0.27,<1",
+    "pydantic>=2,<3",
     "pydantic-settings>=2.4,<3",
 ]
 

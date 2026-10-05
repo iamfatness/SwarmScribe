@@ -1,4 +1,5 @@
 import hashlib
+import logging
 
 import httpx
 import pytest
@@ -7,6 +8,7 @@ from swarmscribe_follower.leader import Refused, Transient
 from swarmscribe_follower.transfer import (
     LeaseLost,
     LinkExpired,
+    LinkRefusedByPolicy,
     Links,
     OutOfSpace,
     OutputTooLarge,
@@ -268,10 +270,10 @@ def test_a_link_that_is_not_http_is_refused_without_a_request(tmp_path):
     bad_get = Link(url="file:///etc/passwd", method="GET")
     bad_put = Link(url="ftp://storage.test/x", method="PUT")
     links, seen = links_for(lambda request: httpx.Response(200))
-    with pytest.raises(Refused) as refused:
+    with pytest.raises(LinkRefusedByPolicy) as refused:
         links.download(bad_get, tmp_path / "source", lambda: None)
     assert "passwd" not in str(refused.value)
-    with pytest.raises(Refused):
+    with pytest.raises(LinkRefusedByPolicy):
         links.upload(bad_put, path)
     assert seen == []
 
@@ -304,6 +306,8 @@ def test_a_big_output_is_refused_without_reading_it_or_sending_it(tmp_path, monk
 
 
 def test_nothing_about_a_link_reaches_the_log(tmp_path, caplog):
+    for name in ("httpx", "httpcore"):  # what the command line does at start (restored after)
+        logging.getLogger(name).setLevel(logging.WARNING)
     caplog.set_level("DEBUG")
     path = tmp_path / "source.txt"
     path.write_bytes(b"x")

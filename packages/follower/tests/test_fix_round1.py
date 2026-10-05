@@ -21,8 +21,8 @@ from swarmscribe_follower.leader import (
     Transient,
     retrying,
 )
-from swarmscribe_follower.logs import RedactingFilter, configure, redact
-from swarmscribe_follower.transfer import Links
+from swarmscribe_follower.logs import RedactingFilter, configure_logging, redact
+from swarmscribe_follower.transfer import LinkRefusedByPolicy, Links
 from swarmscribe_protocol import Link
 
 BARE = ("LEADER_URL", "JOIN_TOKEN", "JOIN_TOKEN_FILE", "LEADER_CA_FILE")
@@ -194,14 +194,14 @@ def test_a_link_must_be_https_unless_the_switch_is_on(tmp_path):
     plain = Link(url="http://storage.test/in?sig=SECRET", method="GET")
     secure = Link(url="https://storage.test/in?sig=SECRET", method="GET")
     closed = Links(transport=httpx.MockTransport(handler))
-    with pytest.raises(Refused) as refused:
+    with pytest.raises(LinkRefusedByPolicy) as refused:
         closed.download(plain, tmp_path / "a", lambda: None)
     assert "SECRET" not in str(refused.value) and seen == []
     closed.download(secure, tmp_path / "a", lambda: None)
     opened = Links(transport=httpx.MockTransport(handler), allow_http=True)
     opened.download(plain, tmp_path / "b", lambda: None)
     assert len(seen) == 2
-    with pytest.raises(Refused):  # the switch does not open other schemes
+    with pytest.raises(LinkRefusedByPolicy):  # the switch does not open other schemes
         ftp = Link(url="ftp://storage.test/x", method="GET")
         opened.download(ftp, tmp_path / "c", lambda: None)
 
@@ -312,7 +312,7 @@ def test_redact_keeps_the_host_and_ordinary_text():
 
 def test_the_configured_log_handler_redacts_and_drops_http_library_chatter():
     stream = io.StringIO()
-    configure("json", stream=stream)
+    configure_logging("json", stream=stream)
     try:
         logging.getLogger("swarmscribe_follower.test").warning(
             "download failed: %s", httpx.ConnectError("no route to https://storage.test/o?sig=SECRET")
@@ -333,7 +333,7 @@ def test_the_configured_log_handler_redacts_and_drops_http_library_chatter():
 
 def test_the_filter_is_a_logging_filter_on_the_handler():
     assert isinstance(RedactingFilter(), logging.Filter)
-    configure("text", stream=io.StringIO())
+    configure_logging("text", stream=io.StringIO())
     try:
         assert any(isinstance(f, RedactingFilter) for f in logging.getLogger().handlers[0].filters)
     finally:
@@ -342,7 +342,7 @@ def test_the_filter_is_a_logging_filter_on_the_handler():
 
 def test_a_log_line_with_a_non_json_extra_and_a_newline_is_still_one_line():
     stream = io.StringIO()
-    configure("json", stream=stream)
+    configure_logging("json", stream=stream)
     try:
         import uuid
 

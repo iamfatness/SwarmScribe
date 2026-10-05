@@ -342,9 +342,9 @@ unset and an embedded one starts automatically in `.pgdata/`.
 
 A follower takes recordings from a leader, transcribes them and uploads the
 three outputs. It needs the leader's URL and, the first time, a join token (or
-a pool token). With a leader on the same machine (the leader's own file links
-are plain `http` there, which the follower accepts only with the development
-switch `SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1`):
+a pool token). With a leader on the same machine (its URL and its file links are
+plain `http` there, which the follower accepts only with the development switch
+`SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1`, loopback included):
 
 ```
 uv run swarmscribe-admin tokens create --pool default
@@ -357,12 +357,14 @@ uv run swarmscribe-follower run
 
 Commands:
 
-- `doctor` checks the folders and the device, loads the device's default model
+- `doctor` checks the settings, folders and device, loads the start-up model
   and runs it once (the first time that downloads it), asks the leader's
   `/healthz`, and says whether this machine has joined. It registers nothing
-  and prints no token. The model it loads is the device default
-  (`distil-large-v3` on CPU); the model a job uses is the leader's profile for
-  the device.
+  and prints no token. Invalid settings, a plain-`http` leader without
+  `ALLOW_HTTP=1` for one, are reported as `NOT READY`, in words. The start-up
+  model is `SWARMSCRIBE_FOLLOWER_STARTUP_MODEL`, by default the device's
+  default (`distil-large-v3` on CPU); the model a job uses is the leader's
+  profile for the device.
 - `run` does the same checks, joins if there is no stored credential, then
   claims and transcribes until it is stopped.
 - `join [--leader URL] [--token-stdin]` only registers and stores the
@@ -372,15 +374,19 @@ Commands:
   (it would orphan the first registration); run `leave` first.
 - `leave` deregisters with the stored credential and deletes it. It needs no
   settings: the credential remembers its leader, so `SWARMSCRIBE_LEADER_URL`
-  may be unset. If the leader cannot be reached the credential is deleted
+  may be unset; with a state folder other than the default, set
+  `SWARMSCRIBE_FOLLOWER_STATE_DIR` as for `run`. Only a missing credential file
+  means "has not joined" (exit 0); a credential file that cannot be read, or an
+  invalid setting, is an error (exit 2). If the leader cannot be reached the credential is deleted
   anyway and the leader notices the silence.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SWARMSCRIBE_LEADER_URL` | required (except for `join --leader` and `leave`) | the leader; `https`, or `http` for a loopback address |
+| `SWARMSCRIBE_LEADER_URL` | required (except for `join --leader` and `leave`) | the leader; `https`, or `http` only with `SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1` |
 | `SWARMSCRIBE_JOIN_TOKEN`, `SWARMSCRIBE_JOIN_TOKEN_FILE` | none | a join or pool token, read only when there is no stored credential (the file wins) |
 | `SWARMSCRIBE_LEADER_CA_FILE` | none | PEM certificates trusted in addition to the public roots |
-| `SWARMSCRIBE_FOLLOWER_ALLOW_HTTP` | `0` | `1`: accept plain `http` leader links (development only) |
+| `SWARMSCRIBE_FOLLOWER_ALLOW_HTTP` | `0` | `1`: accept a plain `http` leader URL and plain `http` file links (development only) |
+| `SWARMSCRIBE_FOLLOWER_STARTUP_MODEL` | the device default | the model loaded and exercised at start-up, before registering; a model name or `owner/name`, in `ALLOWED_MODELS` when that is set. With `OFFLINE=1` a model that is not in the cache is exit `3`, naming this setting. An image that bakes one model sets it to that model |
 | `SWARMSCRIBE_FOLLOWER_DEVICE` | `auto` | `auto`, `cuda` or `cpu` |
 | `SWARMSCRIBE_FOLLOWER_POOL` | `default` | the pool name it reports; the token decides the real pool |
 | `SWARMSCRIBE_FOLLOWER_STATE_DIR` | the user's data folder | credential and lock file |
@@ -406,8 +412,15 @@ How it ends:
 | `3` | this machine cannot do the work: device, GPU libraries, model (`doctor` says which) | after fixing it |
 | `4` | no or invalid token, or the follower was revoked | no: it needs a new token |
 | `5` | the leader speaks another protocol version | no: upgrade |
+| `1` | a bug in the follower (`error: unexpected ...`); `doctor`: the leader does not answer | report it |
+| `130` | Ctrl+C before `run` started supervising (any other command) | n/a |
 
 **Stopping.** Ctrl+C or `SIGTERM` (on Windows also Ctrl+Break) stops claiming.
+The handlers are installed before anything slow, so a stop also works during
+start-up (against a leader that is down, while registering, or while the model
+loads): the process exits `0` and registers nothing. A model load or download
+itself cannot be interrupted; the stop is seen the moment it ends. As PID 1 in a
+container this is what lets `docker stop` end the follower.
 The current job is finished only if its estimated time left fits the grace
 period, or if it is already uploading or submitting; otherwise it is released
 without counting an attempt and another follower redoes it. The stop takes
@@ -446,9 +459,10 @@ credentials.
   resume.
 - A stop during the upload can leave outputs in storage that were never
   submitted. The next attempt at the job overwrites them.
-- A start-up always loads the device's default model, even when the leader's
-  profile names another (and a drained or revoked follower pays that load
-  before it learns it has nothing to do).
+- A start-up always loads the start-up model, even when the leader's profile
+  names another, and a drained or revoked follower pays that load before it
+  learns it has nothing to do. The cheap checks (settings, folders, a credential
+  or a token) come first, so a follower that cannot register fails at once.
 
 ## Run the fleet console (development)
 

@@ -1563,6 +1563,7 @@ version = "0.1.0"
 source = { editable = "packages/follower" }
 dependencies = [
     { name = "httpx" },
+    { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "swarmscribe-engine" },
     { name = "swarmscribe-protocol" },
@@ -1571,6 +1572,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "pydantic", specifier = ">=2,<3" },
     { name = "pydantic-settings", specifier = ">=2.4,<3" },
     { name = "swarmscribe-engine", editable = "packages/engine" },
     { name = "swarmscribe-protocol", editable = "packages/protocol" },

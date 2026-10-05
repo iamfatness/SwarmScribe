@@ -5,7 +5,7 @@ import logging
 import pytest
 from pydantic import ValidationError
 from swarmscribe_follower.config import Settings
-from swarmscribe_follower.logs import JsonFormatter, TextFormatter, configure
+from swarmscribe_follower.logs import JsonFormatter, TextFormatter, configure_logging
 
 ENV = (
     "SWARMSCRIBE_LEADER_URL",
@@ -85,14 +85,14 @@ def test_a_leader_url_that_is_not_safe_is_refused(url):
 
 
 @pytest.mark.parametrize(
-    "url", ["http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080"]
+    "url",
+    ["http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080", "http://proxy"],
 )
-def test_plain_http_is_accepted_for_loopback(url):
-    assert Settings(leader_url=url).leader_url == url
-
-
-def test_plain_http_elsewhere_needs_the_explicit_switch():
-    assert Settings(leader_url="http://proxy", allow_http=True).leader_url == "http://proxy"
+def test_plain_http_is_refused_without_the_switch_loopback_included(url):
+    with pytest.raises(ValidationError) as refused:
+        Settings(leader_url=url)
+    assert "SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1" in str(refused.value)
+    assert Settings(leader_url=url, allow_http=True).leader_url == url
 
 
 def test_a_validation_error_never_shows_the_join_token():
@@ -142,11 +142,26 @@ def test_text_format_is_one_readable_line():
     assert line.endswith("INFO swarmscribe_follower.job: job done job_id=j1")
 
 
-def test_importing_the_follower_already_silences_the_http_clients():
-    import swarmscribe_follower  # noqa: F401
+def test_importing_every_follower_module_changes_no_logger_in_a_fresh_interpreter():
+    import subprocess
+    import sys
 
-    assert logging.getLogger("httpx").level == logging.WARNING
-    assert logging.getLogger("httpcore").level == logging.WARNING
+    code = """
+import importlib, logging, pkgutil
+names = ("", "httpx", "httpcore")
+def state():
+    return [(n, logging.getLogger(n).level, list(logging.getLogger(n).handlers),
+             logging.getLogger(n).propagate, logging.getLogger(n).disabled) for n in names]
+before = state()
+import swarmscribe_follower
+for module in pkgutil.walk_packages(swarmscribe_follower.__path__, "swarmscribe_follower."):
+    if not module.name.endswith("__main__"):  # that one runs the command line
+        importlib.import_module(module.name)
+assert state() == before, (before, state())
+print("unchanged")
+"""
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    assert done.stdout.strip() == "unchanged", done.stderr
 
 
 def test_configuring_logs_silences_the_http_clients_request_lines():
@@ -155,7 +170,7 @@ def test_configuring_logs_silences_the_http_clients_request_lines():
     before, level = root.handlers[:], root.level
     try:
         logging.getLogger("httpx").setLevel(logging.DEBUG)  # something lowered it
-        configure("json", stream=stream)
+        configure_logging("json", stream=stream)
         logging.getLogger("httpx").info("HTTP Request: GET https://leader/v1/files/SECRET-LINK")
         logging.getLogger("httpcore").info("connect https://leader/v1/files/SECRET-LINK")
         logging.getLogger("swarmscribe_follower").info("started")

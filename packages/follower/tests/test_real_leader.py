@@ -8,26 +8,29 @@ side the specs support and make the fake leader behave as the real one does."""
 
 # ruff: noqa: E402
 # The contract tests need the leader's packages and a Postgres. Where either is missing (a
-# follower-only container) they are skipped, visibly, not ignored on the command line.
+# follower-only container) they are skipped, visibly, not ignored on the command line. Where
+# CI says it is running, a missing piece is a failure: a changed dependency must not turn the
+# contract tests into one quiet `s`.
 import importlib.util
 import os
 
 import pytest
 
+
+def _unavailable(reason: str) -> None:
+    if os.environ.get("CI"):
+        pytest.fail(f"CI is set, so the contract tests may not be skipped: {reason}", pytrace=False)
+    pytest.skip(reason, allow_module_level=True)
+
+
 for _needed in ("swarmscribe_leader", "uvicorn", "asyncpg", "sqlalchemy"):
     if importlib.util.find_spec(_needed) is None:
-        pytest.skip(
-            f"the leader package's dependency {_needed!r} is not installed",
-            allow_module_level=True,
-        )
+        _unavailable(f"the leader package's dependency {_needed!r} is not installed")
 if (
     not os.environ.get("SWARMSCRIBE_TEST_DATABASE_URL")
     and importlib.util.find_spec("pgserver") is None
 ):
-    pytest.skip(
-        "no Postgres: set SWARMSCRIBE_TEST_DATABASE_URL or install pgserver",
-        allow_module_level=True,
-    )
+    _unavailable("no Postgres: set SWARMSCRIBE_TEST_DATABASE_URL or install pgserver")
 
 import asyncio
 import contextlib
@@ -197,6 +200,7 @@ def strict_leader(leader_database):
 def follower(tmp_path, leader, engine, token, name="state", **overrides) -> Agent:
     settings = Settings(
         leader_url=leader.url,
+        allow_http=True,  # the leader is plain http on loopback
         join_token=token,
         state_dir=tmp_path / name,
         model_dir=tmp_path / "models",

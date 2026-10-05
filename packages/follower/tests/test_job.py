@@ -669,6 +669,8 @@ def test_a_cleanup_that_fails_after_a_failed_job_still_reports_the_failure(
 def test_no_log_line_or_failure_reason_holds_a_link_a_credential_or_the_transcript(
     tmp_path, leader, engine, caplog
 ):
+    for name in ("httpx", "httpcore"):  # what the command line does at start (restored after)
+        logging.getLogger(name).setLevel(logging.WARNING)
     with caplog.at_level(logging.DEBUG):
         leader.add_job()
         run_one(tmp_path / "ok", leader, engine)

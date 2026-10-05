@@ -42,7 +42,15 @@ from .lease import (
 )
 from .models import ModelHost, ModelUnavailable, OutOfMemory, is_out_of_memory
 from .scratch import Scratch, ScratchDiskFull, ScratchError, ScratchWipeFailed
-from .transfer import LeaseLost, LinkExpired, Links, OutOfSpace, OutputTooLarge, SourceChanged
+from .transfer import (
+    LeaseLost,
+    LinkExpired,
+    LinkRefusedByPolicy,
+    Links,
+    OutOfSpace,
+    OutputTooLarge,
+    SourceChanged,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +71,7 @@ ABANDONED = "abandoned"  # cancelled, or the lease was lost: nothing to tell
 REVOKED_FOLLOWER = "revoked"  # this follower was revoked: it must exit
 UNKNOWN_CREDENTIAL = "unauthorised"  # the leader no longer knows this follower
 UNFIT = "unfit"  # this machine cannot serve the claim: released, and it must exit
+MISCONFIGURED = "misconfigured"  # its own settings refuse the job's links: released, exit 2
 SCRATCH_BROKEN = "scratch"  # the scratch folder is not usable or not ours: released, exit 2
 INVALID_JOB_ID = "invalid job id"  # JobResult.detail of an ABANDONED claim that is ignored
 
@@ -461,6 +470,10 @@ class JobRunner:
             self._phase == "model" and isinstance(error, OutOfMemory | DeviceUnavailableError)
         ):
             return release(str(error), UNFIT)
+        if isinstance(error, LinkRefusedByPolicy):
+            logger.error("a link was refused by this follower's settings; the job is released",
+                         extra={"job_id": job})
+            return release(str(error), MISCONFIGURED)
         if isinstance(error, ScratchError) and not isinstance(error, ScratchDiskFull):
             logger.error("the scratch folder is unusable: %s", type(error).__name__,
                          extra={"job_id": job})

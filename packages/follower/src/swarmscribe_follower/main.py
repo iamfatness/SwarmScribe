@@ -5,6 +5,7 @@ reaches the user. The join token is never an argument (spec 5.3: it would show i
 lists and shell history): it comes from the environment, a file, or `join --token-stdin`."""
 
 import argparse
+import getpass
 import logging
 import os
 import shutil
@@ -39,6 +40,13 @@ EXIT_INTERRUPTED = 130  # Ctrl+C outside `run` (which handles its own signals)
 def load_settings(err: TextIO, **given: Any) -> Settings | None:
     try:
         return Settings(**given)
+    except RuntimeError:  # no home directory to put the state folder in
+        print(
+            "error: cannot find a home directory for the state folder;"
+            " set SWARMSCRIBE_FOLLOWER_STATE_DIR",
+            file=err,
+        )
+        return None
     except ValidationError as error:
         # Field names and messages only: the default rendering echoes the values, and one
         # of them is the join token.
@@ -49,17 +57,52 @@ def load_settings(err: TextIO, **given: Any) -> Settings | None:
         return None
 
 
-def stored_leader_url() -> str | None:
-    """The leader URL stored with the credential, for `leave` when the setting is absent.
-    None when there is no readable credential (the state folder comes from the same
-    settings, with a placeholder leader that is never contacted)."""
+def leave_settings(out: TextIO, err: TextIO) -> Settings | int:
+    """The settings for `leave`: the environment's, or, when no leader is set, the leader the
+    credential was issued by. An exit code when there is nothing to do or nothing can be
+    done: only an ABSENT credential file means "has not joined"; an invalid setting or a
+    credential file that cannot be read is an error (exit 2), never a success."""
+    if os.environ.get("SWARMSCRIBE_LEADER_URL", "").strip():
+        return load_settings(err) or EXIT_CONFIGURATION
+    # A placeholder leader that is never contacted: it lets the other settings (the state
+    # folder above all) be validated and reported as usual.
+    base = load_settings(err, leader_url="https://placeholder.invalid")
+    if base is None:
+        return EXIT_CONFIGURATION
     try:
-        stored = CredentialStore(
-            Settings(leader_url="https://placeholder.invalid").credential_file
-        ).load()
-    except (ValidationError, CredentialFileError):
-        return None
-    return stored.leader_url if stored is not None else None
+        stored = CredentialStore(base.credential_file).load()
+    except CredentialFileError as error:
+        print(f"error: {error}", file=err)
+        return EXIT_CONFIGURATION
+    if stored is None:
+        print("this follower has not joined a leader", file=out)
+        return EXIT_OK
+    given: dict[str, Any] = {"leader_url": stored.leader_url}
+    if stored.leader_url.lower().startswith("http://"):
+        given["allow_http"] = True  # it was issued under that switch; leaving needs no more
+    return load_settings(err, **given) or EXIT_CONFIGURATION
+
+
+def doctor_settings(out: TextIO) -> Settings | int:
+    """`doctor` says what is wrong with the settings as one of its checks, in plain words,
+    instead of refusing to start."""
+    try:
+        return Settings()
+    except (ValidationError, RuntimeError) as error:
+        print(f"swarmscribe-follower {FOLLOWER_VERSION}", file=out)
+        if isinstance(error, ValidationError):
+            for problem in error.errors(
+                include_input=False, include_url=False, include_context=False
+            ):
+                field = ".".join(str(part) for part in problem["loc"]) or "settings"
+                print(f"settings: FAILED: {field}: {problem['msg']}", file=out)
+        else:
+            print(
+                "settings: FAILED: no home directory; set SWARMSCRIBE_FOLLOWER_STATE_DIR",
+                file=out,
+            )
+        print(f"result: NOT READY (exit {EXIT_CONFIGURATION})", file=out)
+        return EXIT_CONFIGURATION
 
 
 def configure_environment(settings: Settings) -> None:
@@ -105,9 +148,10 @@ def build(settings: Settings) -> Agent:
 
 
 def command_run(settings: Settings, build: Build) -> int:
-    # The agent takes the state folder's lock itself (prepare) and releases it when it ends.
+    # The agent takes the state folder's lock itself and releases it when it ends.
+    # run_supervised installs the signal handlers, then starts up and serves: a stop while
+    # the model loads or the registration retries ends the process.
     agent = build(settings)
-    agent.prepare()
     return agent.run_supervised()
 
 
@@ -115,7 +159,8 @@ def command_join(
     settings: Settings, build: Build, token_stdin: bool, out: TextIO, stdin: TextIO
 ) -> int:
     if token_stdin:
-        token = stdin.readline().strip()
+        # On a terminal the token is not echoed.
+        token = (getpass.getpass('join token: ') if stdin.isatty() else stdin.readline()).strip()
         # The file would win over the variable in Settings.token(): the explicit source wins.
         settings = settings.model_copy(
             update={
@@ -130,6 +175,12 @@ def command_join(
             stored = CredentialStore(settings.credential_file).load()
         except CredentialFileError as error:
             raise FollowerExit(EXIT_CONFIGURATION, str(error)) from None
+        if stored is not None and stored.leader_url != settings.leader_url:
+            raise FollowerExit(
+                EXIT_CONFIGURATION,
+                f"this follower has already joined another leader ({stored.leader_url});"
+                " run `swarmscribe-follower leave` first to join this one",
+            )
         if stored is not None:
             # Registering again would orphan that follower and spend another token.
             print(
@@ -235,8 +286,9 @@ def command_doctor(
     if load_model:
         models = host(choice.device, allowed=frozenset(settings.allowed_models))
         try:
-            models.get(choice.model, choice.compute_type)
-            print(f"model: {choice.model} ({choice.compute_type}) loaded and ran", file=out)
+            wanted = settings.startup_model or choice.model
+            models.get(wanted, choice.compute_type)
+            print(f"model: {wanted} ({choice.compute_type}) loaded and ran", file=out)
         except (ModelUnavailable, OutOfMemory, DeviceUnavailableError) as error:
             print(f"model: FAILED: {error}", file=out)
             code = EXIT_UNFIT
@@ -300,20 +352,20 @@ def main(
 ) -> int:
     out, err, stdin = out or sys.stdout, err or sys.stderr, stdin or sys.stdin
     args = parser().parse_args(argv)
-    given: dict[str, Any] = {}
-    if args.command == "join" and args.leader:
-        given["leader_url"] = args.leader
-    elif args.command == "leave" and not os.environ.get("SWARMSCRIBE_LEADER_URL", "").strip():
-        # The credential remembers where it was issued; leaving needs nothing else.
-        stored = stored_leader_url()
-        if stored is None:
-            print("this follower has not joined a leader", file=out)
-            return EXIT_OK
-        given["leader_url"] = stored
-    settings = load_settings(err, **given)
-    if settings is None:
-        return EXIT_CONFIGURATION
-    logs.configure(settings.log_format, stream=err)
+    if args.command == "doctor":
+        settings = doctor_settings(out)
+        if isinstance(settings, int):
+            return settings
+    elif args.command == "leave":
+        settings = leave_settings(out, err)
+        if isinstance(settings, int):
+            return settings
+    else:
+        given = {"leader_url": args.leader} if args.command == "join" and args.leader else {}
+        settings = load_settings(err, **given)
+        if settings is None:
+            return EXIT_CONFIGURATION
+    logs.configure_logging(settings.log_format, stream=err)
     try:
         if args.command == "run":
             return command_run(settings, build)

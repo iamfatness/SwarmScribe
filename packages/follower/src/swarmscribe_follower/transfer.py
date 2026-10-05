@@ -30,6 +30,12 @@ class SourceChanged(Exception):
     """The recording is no longer the file that was ingested (changed, or gone)."""
 
 
+class LinkRefusedByPolicy(Exception):
+    """The follower's own settings forbid the link's scheme (plain http without
+    SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1). The machine is misconfigured; the job is not at
+    fault and must never be failed for it."""
+
+
 class LinkExpired(Exception):
     """The link was refused as expired or invalid; a fresh one may work."""
 
@@ -85,7 +91,10 @@ class Links:
         if url.startswith("http://") and self._allow_http:
             return
         if not url.startswith("https://"):
-            raise Refused(0, "invalid_link", "a link must be an https URL")
+            raise LinkRefusedByPolicy(
+                "the leader gave a link that is not https; set SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1"
+                " to accept plain http (development only)"
+            )
 
     def download(self, link: Link, destination: Path, check: Callable[[], None]) -> str:
         """Stream the recording to `destination` and return its SHA-256. `check` is called

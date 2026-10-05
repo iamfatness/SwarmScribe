@@ -1,11 +1,12 @@
-import ipaddress
 import os
+import re
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from swarmscribe_protocol import MODEL_NAME_MAX_LENGTH, MODEL_NAME_PATTERN
 
 from .scratch import ScratchError, check_folders
 
@@ -18,15 +19,6 @@ def default_state_dir() -> Path:
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
         return Path(base) / "swarmscribe-follower"
     return Path.home() / ".local" / "share" / "swarmscribe-follower"
-
-
-def _is_loopback(host: str) -> bool:
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
 
 
 class Settings(BaseSettings):
@@ -62,12 +54,21 @@ class Settings(BaseSettings):
     model_dir: Path | None = None
     offline: bool = False
     allowed_models: NameList = ()
+    # The model loaded at start-up, before the follower registers (spec 5.2 step 5). Unset: the
+    # device's default. An image that bakes one model sets it to that one.
+    startup_model: str | None = None
     shutdown_grace_seconds: float = Field(default=8.0, ge=0)
     on_drained: Literal["exit", "park"] = "exit"
     log_format: Literal["json", "text"] = "json"
 
     @field_validator(
-        "join_token", "join_token_file", "leader_ca_file", "scratch_dir", "model_dir", mode="before"
+        "join_token",
+        "join_token_file",
+        "leader_ca_file",
+        "scratch_dir",
+        "model_dir",
+        "startup_model",
+        mode="before",
     )
     @classmethod
     def _blank_is_unset(cls, value: Any) -> Any:
@@ -95,13 +96,39 @@ class Settings(BaseSettings):
             raise ValueError("leader_url must not carry credentials, a query or a fragment")
         return value.strip().rstrip("/")
 
+    @field_validator("startup_model")
+    @classmethod
+    def _a_plain_model_name(cls, value: str | None) -> str | None:
+        # The protocol's rule for a model name, the same one the leader applies to a profile:
+        # a name or owner/name, never a path.
+        if value is None:
+            return None
+        value = value.strip()
+        if len(value) > MODEL_NAME_MAX_LENGTH or not re.fullmatch(MODEL_NAME_PATTERN, value):
+            raise ValueError("startup_model must be a model name or owner/name, never a path")
+        return value
+
     @model_validator(mode="after")
-    def _https_unless_local(self) -> "Settings":
-        parts = urlsplit(self.leader_url)
-        if parts.scheme == "http" and not self.allow_http and not _is_loopback(parts.hostname):
+    def _startup_model_is_allowed(self) -> "Settings":
+        if (
+            self.startup_model is not None
+            and self.allowed_models
+            and self.startup_model not in self.allowed_models
+        ):
             raise ValueError(
-                "leader_url must be https (plain http is accepted only for a loopback address,"
-                " or with SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1)"
+                "startup_model is not in SWARMSCRIBE_FOLLOWER_ALLOWED_MODELS; add it there"
+                " or choose one of them"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _https_unless_allowed(self) -> "Settings":
+        # One rule for the leader and for the links it hands out (Links takes the same
+        # switch): plain http, loopback included, only on request.
+        if urlsplit(self.leader_url).scheme == "http" and not self.allow_http:
+            raise ValueError(
+                "leader_url must be https; plain http is refused unless"
+                " SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1 is set (development only)"
             )
         return self
 

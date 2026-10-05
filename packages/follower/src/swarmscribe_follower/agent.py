@@ -1,6 +1,16 @@
 """The follower's life: prepare, register, claim and work until told to stop (follower
 spec 5.2, 5.3, 5.5, 5.6).
 
+`run_supervised()` installs the signal handlers FIRST, then runs `prepare()` (the state lock, the
+scratch folder, the cheap checks, the start-up model, the registration) and `serve()` on a
+thread of its own, while the main thread watches the signals. A stop during start-up therefore
+ends the process: the registration's retry loop, the scratch retry waits and the checks between
+steps all see it. One step cannot be interrupted: a model load or download (and a request in
+flight, bounded by its timeout); the stop is noticed the moment it returns, and nothing is
+registered after it. A second signal during start-up cannot hurry that load either. As PID 1 in
+a container this is what makes `docker stop` end the process (the kernel gives PID 1 no default
+action for SIGTERM, so a process that has installed no handler ignores it).
+
 `serve()` is the worker loop and runs on a thread of its own. `stop()` may be called from any
 thread EXCEPT a signal handler: it takes locks (the agent's, `Event.set`, `JobControl`'s), and
 a second signal can interrupt the first handler on the same thread while it holds one, which
@@ -53,6 +63,7 @@ from .errors import (
 from .job import (
     ABANDONED,
     INVALID_JOB_ID,
+    MISCONFIGURED,
     REVOKED_FOLLOWER,
     SCRATCH_BROKEN,
     UNFIT,
@@ -69,6 +80,10 @@ from .transfer import Links
 
 logger = logging.getLogger(__name__)
 
+NO_CREDENTIAL = (
+    "this follower has no credential for this leader and no join token; set"
+    " SWARMSCRIBE_JOIN_TOKEN or run `swarmscribe-follower join`"
+)
 EXIT_UNEXPECTED = 1  # a bug: the follower stopped on an error nobody planned for
 IDLE_JITTER = 0.2  # an idle follower waits Retry-After plus up to this fraction of it
 PARKED_POLL_SECONDS = 60.0  # how often a drained, parked follower asks again
@@ -149,17 +164,25 @@ class Agent:
         self._registered_again = False
         self._skip_deregister = False  # revoked, or the leader does not know us: it would 401
         self._scratch_failures = 0
+        self._prepared = False
         self.follower_id: str | None = None
         self.drained = False
         self.exit_reason = ""
 
     # --- before the loop -----------------------------------------------------------------
 
+    def startup_model(self) -> tuple[str, str]:
+        """The model (and compute type) loaded and exercised at start-up: the setting, else
+        the device's default."""
+        choice = self._probe.choice
+        return self._settings.startup_model or choice.model, choice.compute_type
+
     def prepare(self) -> None:
-        """Everything that can fail before the leader hears of this follower: the state
-        folder's lock, the scratch folder, the device's default model and a real inference
-        with it. Then the credential. Raises FollowerExit; whatever it had taken (the lock,
-        the model) is let go again."""
+        """Everything that can fail before the leader hears of this follower, cheapest first:
+        the state folder's lock, the scratch folder, that there is a credential or a token to
+        register with; then the start-up model and a real inference with it; then the
+        credential. Raises FollowerExit (EXIT_OK when a stop was asked meanwhile); whatever it
+        had taken (the lock, the model) is let go again."""
         try:
             if self._state_lock is None:
                 self._state_lock = self._hold_lock(self._settings.state_dir)
@@ -167,18 +190,50 @@ class Agent:
             if not self._prepare_scratch():
                 raise FollowerExit(EXIT_OK, "stopped before it started")
             self._scratch_failures = 0
-            choice = self._probe.choice
-            try:
-                self._models.get(choice.model, choice.compute_type)
-            except (ModelUnavailable, OutOfMemory, DeviceUnavailableError) as error:
-                raise FollowerExit(
-                    EXIT_UNFIT,
-                    f"this machine cannot transcribe: {error}. Run `swarmscribe-follower doctor`.",
-                ) from None
+            self._check_can_register()
+            self._load_startup_model()
             self.obtain_credential()
+            self._prepared = True
         except BaseException:
             self.close()
             raise
+
+    def _stopped_during_start(self) -> None:
+        if self._stopping.is_set():
+            raise FollowerExit(EXIT_OK, "stopped before it started")
+
+    def _check_can_register(self) -> None:
+        """Fail now, not after a model load: a follower with neither a credential for this
+        leader nor a token to register with can do nothing."""
+        self._stopped_during_start()
+        try:
+            stored = self._store.load()
+        except CredentialFileError as error:
+            raise FollowerExit(EXIT_CONFIGURATION, str(error)) from None
+        if self._is_mine(stored):
+            return
+        try:
+            token = self._settings.token()
+        except ValueError as error:
+            raise FollowerExit(EXIT_CONFIGURATION, str(error)) from None
+        if token is None:
+            raise FollowerExit(EXIT_UNAUTHORISED, NO_CREDENTIAL)
+
+    def _load_startup_model(self) -> None:
+        model, compute_type = self.startup_model()
+        try:
+            self._models.get(model, compute_type)
+        except (ModelUnavailable, OutOfMemory, DeviceUnavailableError) as error:
+            offline = " (SWARMSCRIBE_FOLLOWER_OFFLINE=1: it must be in the model cache)"
+            raise FollowerExit(
+                EXIT_UNFIT,
+                f"this machine cannot transcribe with its start-up model {model}"
+                f"{offline if self._settings.offline else ''}: {error}. Set"
+                " SWARMSCRIBE_FOLLOWER_STARTUP_MODEL to a model this machine holds, or run"
+                " `swarmscribe-follower doctor`.",
+            ) from None
+        # The load cannot be interrupted; this is the first moment a stop can be seen.
+        self._stopped_during_start()
 
     def close(self) -> None:
         """Let go of what `prepare` took: the model and the state folder's lock. `serve`
@@ -225,15 +280,17 @@ class Agent:
             stored = self._store.load()
         except CredentialFileError as error:
             raise FollowerExit(EXIT_CONFIGURATION, str(error)) from None
-        mine = (
+        if stored is not None and self._is_mine(stored):
+            self._use(stored)
+        else:
+            self.register()
+
+    def _is_mine(self, stored: Stored | None) -> bool:
+        return (
             stored is not None
             and stored.leader_url == self._settings.leader_url
             and stored.device == self._probe.choice.device
         )
-        if mine:
-            self._use(stored)
-        else:
-            self.register()
 
     def _use(self, stored: Stored) -> None:
         self._client.credential = stored.credential
@@ -259,11 +316,7 @@ class Agent:
         except ValueError as error:
             raise FollowerExit(EXIT_CONFIGURATION, str(error)) from None
         if token is None:
-            raise FollowerExit(
-                EXIT_UNAUTHORISED,
-                "this follower has no credential for this leader and no join token; set"
-                " SWARMSCRIBE_JOIN_TOKEN or run `swarmscribe-follower join`",
-            )
+            raise FollowerExit(EXIT_UNAUTHORISED, NO_CREDENTIAL)
         models = cached_models(self._settings.model_dir)
         if self._models.loaded is not None:
             models.append(self._models.loaded[0])
@@ -283,9 +336,12 @@ class Agent:
                     "the join token is not valid (unknown, expired, revoked or used up);"
                     " ask an administrator for a new one",
                 ) from None
+            # A 404 from a wrong URL, a 403 from a proxy: a configuration error. Exit 5
+            # tells a supervisor never to restart, and is for a protocol refusal only.
             raise FollowerExit(
-                EXIT_PROTOCOL,
-                f"the leader refused the registration ({refused.status} {refused.code})",
+                EXIT_CONFIGURATION,
+                f"the leader refused the registration ({refused.status} {refused.code});"
+                " check SWARMSCRIBE_LEADER_URL",
             ) from None
         finally:
             del token  # the secret lives for the one request and no longer
@@ -372,6 +428,8 @@ class Agent:
             self._exit_revoked()
         elif result.outcome == UNKNOWN_CREDENTIAL:
             self._register_again()  # wipes scratch first
+        elif result.outcome == MISCONFIGURED:
+            raise FollowerExit(EXIT_CONFIGURATION, result.detail)
         elif result.outcome == UNFIT:
             raise FollowerExit(EXIT_UNFIT, f"this machine cannot serve its pool: {result.detail}")
         elif result.outcome == SCRATCH_BROKEN:
@@ -474,14 +532,28 @@ class Agent:
     # --- stopping ------------------------------------------------------------------------
 
     def run_supervised(self, *, poll: float = POLL_SECONDS) -> int:
-        """Serve on a worker thread while this (the main) thread watches for signals; returns
-        the exit code. The first signal calls `stop()`, the second `stop(now=True)`. The
-        handlers only count; every lock is taken here, in normal context. Must be called on
-        the main thread. However it ends, the handlers are put back and the worker has ended."""
+        """Start up and serve on a worker thread while this (the main) thread watches for
+        signals; returns the exit code. The handlers are installed first, so a stop during
+        start-up is seen (module docstring). The first signal calls `stop()`, the second
+        `stop(now=True)`. The handlers only count; every lock is taken here, in normal
+        context. A FollowerExit from start-up is raised here, on this thread. Must be called
+        on the main thread. However it ends, the handlers are put back and the worker has
+        ended."""
         signals = StopSignals()
         previous = signals.install()
         codes: list[int] = []
-        worker = threading.Thread(target=lambda: codes.append(self.serve()), name="worker")
+        failed: list[Exception] = []
+
+        def work() -> None:
+            try:
+                if not self._prepared:
+                    self.prepare()
+            except Exception as error:  # FollowerExit, or a bug: the main thread re-raises it
+                failed.append(error)
+                return
+            codes.append(self.serve())
+
+        worker = threading.Thread(target=work, name="worker")
         worker.start()
         seen = 0
         try:
@@ -494,6 +566,8 @@ class Agent:
         finally:
             worker.join()
             signals.restore(previous)
+        if failed:
+            raise failed[0]
         return codes[0] if codes else EXIT_UNEXPECTED
 
     def stop(self, *, now: bool = False) -> None:

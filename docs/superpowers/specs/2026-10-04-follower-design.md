@@ -157,7 +157,7 @@ Environment variables. The first two keep the names the master spec's
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SWARMSCRIBE_LEADER_URL` | required | The leader's base URL. Must be `https` unless the host is loopback or `SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1` (Compose tests) |
+| `SWARMSCRIBE_LEADER_URL` | required | The leader's base URL. Must be `https` unless `SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1` (development and Compose tests); loopback is no exception, so one rule covers the leader and its links |
 | `SWARMSCRIBE_JOIN_TOKEN` | — | Secret: a join token or a pool token (section 12.1). Read only when there is no stored credential |
 | `SWARMSCRIBE_JOIN_TOKEN_FILE` | — | A file holding the token (a mounted Secret); wins over the variable |
 | `SWARMSCRIBE_LEADER_CA_FILE` | — | PEM certificates trusted in addition to the public roots, for calls to the leader and its links |
@@ -170,7 +170,8 @@ Environment variables. The first two keep the names the master spec's
 | `SWARMSCRIBE_FOLLOWER_ALLOWED_MODELS` | — | Comma-separated; when set, only these models are loaded |
 | `SWARMSCRIBE_FOLLOWER_SHUTDOWN_GRACE_SECONDS` | `8` | How long a stop may wait for the current job (section 5.6) |
 | `SWARMSCRIBE_FOLLOWER_ON_DRAINED` | `exit` | `exit`: stop with code 0 once drained and idle. `park`: stay up and claim nothing (the chart sets this; section 5.5) |
-| `SWARMSCRIBE_FOLLOWER_ALLOW_HTTP` | `0` | `1`: accept a plain-http leader URL that is not loopback (Compose tests) |
+| `SWARMSCRIBE_FOLLOWER_ALLOW_HTTP` | `0` | `1`: accept a plain-http leader URL and plain-http file links (development and Compose tests) |
+| `SWARMSCRIBE_FOLLOWER_STARTUP_MODEL` | the device default | The model loaded and exercised at start-up, before registering (5.2 step 5). A model name or `owner/name`; must be in `ALLOWED_MODELS` when that is set. With `OFFLINE=1` and the model absent from the cache the follower exits 3 and names this setting |
 | `SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB` | detected | Memory the follower may use (section 5.7; F2) |
 | `SWARMSCRIBE_FOLLOWER_HEALTH_ADDR` | image: `127.0.0.1:9108`; native: off | Listener for `/healthz` and `/metrics` (F2) |
 | `SWARMSCRIBE_FOLLOWER_LOG_FORMAT` | `json` | `json` or `text` |
@@ -1197,3 +1198,24 @@ follower exits and does not register again by itself."
 **15. Build order.** Step 3 becomes "Follower + images: leader and engine
 changes (F0), agent core (F1), images and Compose (F2)". Step 4 gains the
 follower chart (F3) and the outside-machine install (F4).
+
+**Amendments after the F1 final review.**
+- **Start-up model (5.2 step 5, D5, 5.10).** Step 5 loads the model named by
+  `SWARMSCRIBE_FOLLOWER_STARTUP_MODEL`, which defaults to the device's default
+  model. F2's images set it from the baked model (the image's `MODELS`
+  argument), so that an offline follower that holds one model starts with it;
+  `doctor` uses the same setting.
+- **Start-up order (5.2).** The cheap checks come before the model load: the
+  settings, the state folder's lock, the scratch folder, and that there is a
+  stored credential for this leader or a token to register with (exit 4
+  otherwise). The signal handlers are installed before all of it (5.6), so a
+  stop during start-up ends the process; a model load itself cannot be
+  interrupted, and the stop is seen the moment it returns, before anything is
+  registered.
+- **Plain http (4.1).** `https` is required unless `ALLOW_HTTP=1`, loopback
+  included. A link whose scheme the follower's own settings refuse is a
+  follower misconfiguration: the job is released (not failed) and the follower
+  exits 2.
+- **Registration refusals (4.1).** Exit 5 is for a protocol refusal only; any
+  other refusal of the registration (a 404 from a wrong URL, a 403 from a proxy)
+  exits 2.

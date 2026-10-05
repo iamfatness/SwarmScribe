@@ -1,8 +1,10 @@
 """Logging: one JSON object per line on stderr (follower spec 9), or plain text on request.
 
 A log line never holds audio, transcript text, a link, a token or a credential. Link URLs
-carry their own secret, and httpx logs every request URL at INFO, so its loggers are kept at
-WARNING (the package sets that when it is imported; `configure` sets it again)."""
+carry their own secret, and httpx logs every request URL at INFO, so `configure_logging` raises
+its loggers to WARNING and puts a filter on the handler that drops what is left of their
+chatter. `configure_logging` is the only place this package touches logging configuration, and
+only the command line calls it: importing the package changes nothing."""
 
 import json
 import logging
@@ -67,12 +69,12 @@ class TextFormatter(logging.Formatter):
         return f"{stamp} {record.levelname} {record.name}: {message}{fields}"
 
 
-def configure(log_format: str = "json", *, stream=None) -> None:
+def configure_logging(log_format: str = "json", *, stream=None) -> None:
     handler = logging.StreamHandler(stream or sys.stderr)
     handler.addFilter(RedactingFilter())
     handler.setFormatter(JsonFormatter() if log_format == "json" else TextFormatter())
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(logging.INFO)
-    for name in QUIETED:  # again, in case something lowered them since the import
+    for name in QUIETED:
         logging.getLogger(name).setLevel(logging.WARNING)

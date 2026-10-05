@@ -215,11 +215,10 @@ def test_run_hands_the_agent_to_run_supervised_and_takes_no_lock_of_its_own(
     seen = {}
 
     def fake_supervised(self, **kwargs):
-        # prepare() holds the state lock for the agent; main took none of its own, or
-        # prepare() itself would have been refused.
+        # The agent takes the state lock itself, inside run_supervised; main took none of its
+        # own, so it is free here (and would be refused to the agent if main held it).
         seen["reached"] = True
-        with pytest.raises(FollowerExit):
-            cli.hold_state_lock(tmp_path / "state")
+        cli.hold_state_lock(tmp_path / "state").close()
         return 0
 
     from swarmscribe_follower.agent import Agent
@@ -417,9 +416,9 @@ def test_join_takes_the_leader_from_its_own_flag_when_the_setting_is_absent(
         return make_agent(tmp_path, leader, engine)
 
     out, err = io.StringIO(), io.StringIO()
-    code = cli.main(["join", "--leader", "http://127.0.0.1:9/"], build=build, out=out, err=err)
+    code = cli.main(["join", "--leader", "https://other.test/"], build=build, out=out, err=err)
     assert code == 0, err.getvalue()
-    assert seen == ["http://127.0.0.1:9"]
+    assert seen == ["https://other.test"]
     assert out.getvalue().startswith("joined as follower ")
 
 
@@ -430,9 +429,9 @@ def test_the_leader_flag_wins_over_the_setting(tmp_path, leader, engine):
         seen.append(settings.leader_url)
         return make_agent(tmp_path, leader, engine)
 
-    argv = ["join", "--leader", "http://127.0.0.1:9"]
+    argv = ["join", "--leader", "https://other.test"]
     code = cli.main(argv, build=build, out=io.StringIO(), err=io.StringIO())
-    assert code == 0 and seen == ["http://127.0.0.1:9"]
+    assert code == 0 and seen == ["https://other.test"]
 
 
 def test_a_bad_leader_flag_is_a_configuration_error_naming_the_field(

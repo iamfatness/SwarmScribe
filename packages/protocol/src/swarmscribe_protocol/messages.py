@@ -10,6 +10,11 @@ Directive = Literal["continue", "cancel", "drain"]
 DIRECTIVE_HEADER = "X-SwarmScribe-Directive"
 """Response header on a claim answered 204. Its value is a Directive; the leader sends only
 `drain`, to a draining follower, which will be given nothing more. Absent otherwise."""
+MODEL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(/[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$"
+MODEL_NAME_MAX_LENGTH = 100
+"""A model is named, never located: followers load it by this name, and a path here would
+make them read their own disks. `owner/name` is a Hugging Face repository. The leader
+accepts a name by this rule and the follower checks it again before loading; one copy."""
 FailureCode = Literal["source_changed", "undecodable", "engine_error", "out_of_resources", "other"]
 
 

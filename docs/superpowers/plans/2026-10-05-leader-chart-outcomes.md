@@ -255,9 +255,24 @@ By hand, once each, on the scenario's install after it had passed.
 
 ## The CI job
 
-`leader-kind-e2e` builds the three images, runs `check-leader-image.sh`, then `up`, `run`
-and `down`. On the development machine those three ran straight after each other from built
-images on 2026-10-06 (see "The run of Task 3" below).
+`leader-kind-e2e` replaces `leader-image`: it builds the leader image and runs
+`check-leader-image.sh` on it, builds the next version's image and the follower's, then
+`up`, `run` and `down`.
+
+On the development machine the job's last three steps were run straight after each other
+from built images on 2026-10-06 (`up && run; down`, a new cluster): `the cluster
+swarmscribe-leader-e2e is up, ...`; `passed (tiny.en on cpu): ... (hook 5 s, 44 s in all)
+... failed none of 1044 requests and finished a recording in one attempt`; `deleted the
+cluster swarmscribe-leader-e2e`; 4m7.347s in all; `kind get clusters` then printed `No kind
+clusters found.` That was the fourth pass of the scenario.
+
+**The job has not run on a GitHub runner.** The workflow runs on pushes to `main` and on
+pull requests only, so pushing this branch started nothing; it runs when the pull request is
+opened. What may differ there: the runner's four slower cores (the recording in hand takes
+longer, which is the safe direction; the scenario allows 420 seconds for it after the
+rollout), kindnet's timing, and `kind load` on a Linux Docker (the driver's fallback is for
+Docker Desktop's image store). If it proves flaky there it is to be removed, not retried
+(owner's ruling 4).
 
 ## What this does not prove
 

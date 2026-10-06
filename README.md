@@ -422,7 +422,7 @@ while the database is silent, with a background step and requests stuck on it, e
 itself; and that its log holds neither the link key, nor the database password, nor any
 request. Every step has a time limit: a leader that keeps running where it should have
 refused fails the check with its last log lines instead of leaving it waiting. CI runs it
-(job `leader-image`). The Compose tests still use the older test image
+(job `leader-kind-e2e`). The Compose tests still use the older test image
 (`e2e/compose/Dockerfile`), which is not for deployment.
 
 ### Upgrading a leader

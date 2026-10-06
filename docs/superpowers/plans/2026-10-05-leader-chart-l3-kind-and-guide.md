@@ -14,7 +14,9 @@
 
 ## Global Constraints
 
-- **Work only in the worktree `C:\Users\walla\SwarmScribe-leader-chart`, on the branch `leader-chart`.** Other agents work in `C:\Users\walla\SwarmScribe`, `SwarmScribe-ui` and `SwarmScribe-f4`.
+- **Work only in the worktree `C:\Users\walla\SwarmScribe-leader-chart`, on the branch `leader-chart`.** Other agents work in `C:\Users\walla\SwarmScribe`, `SwarmScribe-ui`, `SwarmScribe-f4` and `SwarmScribe-leader-chart-l2`.
+- **The chart is not on this branch until pull request #24 is merged.** L2 was built in the worktree `SwarmScribe-leader-chart-l2`, on the branch `leader-chart-l2`. Before Task 1: `git fetch origin`, check that `origin/main` holds `deploy/helm/swarmscribe-leader/` (`git ls-tree origin/main deploy/helm/swarmscribe-leader`), and `git rebase origin/main`. If #24 is not merged, stop and report: do not copy the chart across, and do not work in the other worktree.
+- **The `chart` job must be green before this plan makes `leader-kind-e2e` a required job.** It was red on the runner once for a reason worth knowing here: inside `uv run`, the first `helm` on the PATH was the runner image's own Helm 3 (`/usr/local/bin/helm`), not the pinned 4.3.0 that the step's own shell found. Nothing printed a version, so it went unseen. This plan's job and driver therefore name the binary and check its version (Task 1, Step 7; Task 3, Step 1).
 - **The free-space floor.** A full disk corrupted Docker's data on this machine. Before **every** step that builds an image, loads one into a cluster, creates a cluster or starts a container: `bash docker/check-free-space.sh`, and stop if it does not print `ok:` (20 GB free on C:). The driver checks again itself before it creates a cluster and before each image it loads. If it says `STOP:`, stop the task and report; never free space with a `docker ... prune`.
 - **Another agent uses Docker on this machine.** Never stop, remove or retag a container, an image or a network you did not create; never run any `docker ... prune`; never restart Docker; **never kill a process by name**. Never touch a `kind` cluster that is not this plan's: this plan's is `swarmscribe-leader-e2e`, and `swarmscribe-follower-e2e` is somebody else's. Nothing here publishes a port.
 - **This test's image tags are its own**: `swarmscribe-leader:kind`, `swarmscribe-leader:kind-next`, `swarmscribe-follower:leader-kind`. Never build to `swarmscribe-leader:e2e` or `swarmscribe-follower:e2e`: those are the Compose tests' and the follower `kind` test's images, which another agent may be using, and `swarmscribe-leader:e2e` is a *different* image (the test image with the source tree in it).
@@ -131,6 +133,7 @@ Create `packages/leader/tests/test_leader_kind_driver.py`:
 values, its manifests and its driver agree with each other and with the two charts."""
 
 import importlib.util
+import os
 import re
 import shutil
 import subprocess
@@ -273,7 +276,18 @@ def test_an_image_without_a_tag_is_refused(driver, image):
         driver.image_parts(image)
 
 
-@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not on the PATH")
+def helm4() -> str | None:
+    """Helm 4, or None: $HELM, else the first on the PATH. CI's `test` job has only the
+    runner image's own Helm 3: this test is skipped there, and never renders with a Helm
+    nobody chose."""
+    path = os.environ.get("HELM") or shutil.which("helm")
+    if not path:
+        return None
+    done = subprocess.run([path, "version", "--short"], capture_output=True, text=True)
+    return path if done.stdout.startswith("v4.") else None
+
+
+@pytest.mark.skipif(helm4() is None, reason="Helm 4 is not on the PATH or named in $HELM")
 @pytest.mark.parametrize(
     ("chart", "values", "release"),
     [
@@ -283,7 +297,7 @@ def test_an_image_without_a_tag_is_refused(driver, image):
 )
 def test_both_charts_render_with_the_kind_values(driver, chart, values, release):
     done = subprocess.run(
-        ["helm", "template", release, str(chart), "-n", driver.NAMESPACE, "-f", str(KIND / values)],
+        [helm4(), "template", release, str(chart), "-n", driver.NAMESPACE, "-f", str(KIND / values)],
         capture_output=True, text=True,
     )
     assert done.returncode == 0, done.stderr
@@ -415,6 +429,8 @@ networkPolicy:
             matchLabels:
               app: postgres
 ```
+
+The chart refuses a key it does not have, at every depth, and `settings` takes eleven names and no other (L2's schema). Every key above is one of them, and `deploy/helm/swarmscribe-leader/ci/check_render.py` renders this file as a must-render case from the moment it exists (`KIND_VALUES_FILE`; until then it renders a copy of the block above, `KIND_VALUES`). After creating the file, run that check: if a value added here later is refused, the check says which, and the fix is here or in the schema, never a looser schema for the test's sake. When the file exists, delete `KIND_VALUES` from the check and its fallback.
 
 Create `e2e/leader-kind/follower-values.yaml`:
 
@@ -795,8 +811,24 @@ def kubectl(*arguments: str, stdin: str | bytes | None = None, check: bool = Tru
     )
 
 
+_helm: list[str] = []
+
+
+def helm_binary() -> str:
+    """The Helm this test runs: $HELM if set (CI names the pinned binary), else the first
+    on the PATH. Anything but Helm 4 is refused: a runner image has a Helm 3 of its own."""
+    if not _helm:
+        path = os.environ.get("HELM") or shutil.which("helm")
+        expect(path is not None, "helm is not on the PATH and $HELM is not set")
+        version = call(path, "version", "--short").strip()
+        print(f"helm: {path} is {version}", flush=True)
+        expect(version.startswith("v4."), f"{path} is Helm {version}; this test needs Helm 4")
+        _helm.append(path)
+    return _helm[0]
+
+
 def helm(*arguments: str) -> str:
-    return call("helm", "--kubeconfig", str(KUBECONFIG), "-n", NAMESPACE, *arguments)
+    return call(helm_binary(), "--kubeconfig", str(KUBECONFIG), "-n", NAMESPACE, *arguments)
 
 
 def image_parts(image: str) -> tuple[str, str]:
@@ -811,11 +843,22 @@ def install_leader(image: str) -> None:
     """Install or upgrade the leader's release. Helm waits for the migration hook itself;
     the pods are waited for by the caller."""
     repository, tag = image_parts(image)
-    helm(
-        "upgrade", "--install", LEADER, str(LEADER_CHART), "-f", str(HERE / "leader-values.yaml"),
-        "--set", f"image.repository={repository}", "--set", f"image.tag={tag}",
-        "--timeout", "300s",
-    )
+    try:
+        helm(
+            "upgrade", "--install", LEADER, str(LEADER_CHART),
+            "-f", str(HERE / "leader-values.yaml"),
+            "--set", f"image.repository={repository}", "--set", f"image.tag={tag}",
+            "--timeout", "300s",
+        )
+    except Exception:
+        # A failed hook: say why before failing. A pod that never started has no log.
+        selector = "app.kubernetes.io/component=migrate"
+        for arguments in (
+            ("describe", "pod", "-l", selector),
+            ("logs", f"job/{LEADER_NAME}-migrate", "--tail=80"),
+        ):
+            print(kubectl(*arguments, check=False), flush=True)
+        raise
 
 
 def until(check: Callable[[], Any], what: str, within: float = STEP_SECONDS) -> Any:
@@ -1076,8 +1119,9 @@ def load(image: str) -> None:
 
 
 def up() -> None:
-    for tool in ("kind", "kubectl", "helm", "docker"):
+    for tool in ("kind", "kubectl", "docker"):
         expect(shutil.which(tool) is not None, f"{tool} is not on the PATH")
+    helm_binary()
     expect(FIXTURE.is_file(), f"{FIXTURE} is missing")
     free_space()
     WORK.mkdir(exist_ok=True)
@@ -1492,6 +1536,13 @@ Then decide which of three things it is, and act accordingly:
 
 Keep a list of every change made and why: it goes into the outcomes document.
 
+**Run the failures the guide describes, once each, and write down what happened** (the README's "When the install or an upgrade fails" says of itself that nothing in it has been run; Task 4 corrects it from this record). On the test cluster, in a namespace of its own (`swarmscribe-e2e-fail`, deleted afterwards), with `--timeout 60s` and `--set migrate.activeDeadlineSeconds=45`:
+
+1. `helm install` with **no Secret**: the pod's status and the `describe pod` event; how long Helm waited and its last line; `helm list --all` and `helm status` (the release's state); `kubectl get all,cm,networkpolicy` (is anything but the Job there?).
+2. Then create the Secret and try, in this order, `helm upgrade --install` and, if that is refused, `helm uninstall` followed by `helm install`. **Record which one Helm 4 accepts and its exact message for the other.** That sentence replaces the guide's two commands.
+3. `helm install` with an **image that does not exist** (`--set image.tag=nope`, `pullPolicy: IfNotPresent`): the same four observations.
+4. A **failed upgrade**: install properly, then `helm upgrade` with a database URL that cannot be reached (a second Secret, `--set secrets.existingSecret=...`): the Job's log's last lines and its exit status; that the old pods are untouched and Ready; the release's revisions and states; then that a corrected `helm upgrade` goes through.
+
 - [ ] **Step 5: Run it until it has passed twice in a row, timed**
 
 ```bash
@@ -1520,6 +1571,13 @@ kubectl -n swarmscribe-e2e top pod 2>&1 | head -5
 helm --kubeconfig "$KUBECONFIG" -n swarmscribe-e2e history leader
 unset KUBECONFIG
 ```
+
+Also, by hand, for the outcomes:
+
+- **`fsGroup` on the claim**: `kubectl -n swarmscribe-e2e exec deploy/leader-swarmscribe-leader -- python -c "import os; s = os.stat('/data'); print(s.st_uid, s.st_gid, oct(s.st_mode))"`, and from `kubectl describe pod` of a leader the time between `Scheduled` and `Started` on its first start (how long the first mount took). Say whether kind's `local-path` honours `fsGroup` at all; if it does not, "fsGroup on a driver that honours it" stays unrun.
+- **A pod stopped mid-upload**: while the long recording's transcript is being uploaded is too short a moment to hit reliably; instead `kubectl delete pod` one leader while the prober runs, and record that pod's last state (`kubectl get pod -o jsonpath` of `lastState.terminated.exitCode`, or the events if the pod is gone) and whether a follower logged a retry. Do not assert the exit code in the scenario: a stopped leader ends with 143, not 0, and that is right.
+- **Nothing secret in what Helm keeps**: `helm get values leader` and `helm get all leader` hold neither the link key nor the database URL (the scenario checks this; look once yourself).
+- **The Job's pod on the upgrade**: from `kubectl get events`, that the migration pod of the upgrade was created, ran and ended; and that the NetworkPolicy selects it (`kubectl get pod -l app.kubernetes.io/component=migrate --show-labels` while it exists, or the Job's pod template labels against the policy's `podSelector`). It reached Postgres by the Service's name, or the upgrade would have failed.
 
 Write down: the pods and their restarts; the folder's owner and mode (it says how the claim was made writable, which differs by provisioner); the leader's memory (tini's is not the leader's: if `VmRSS` is tini's, read the leader's from `/proc/<its pid>/status` instead and say which); any event of type `Warning`; the release's two revisions. `kubectl top` will say the metrics API is not there: that is expected.
 
@@ -1565,6 +1623,8 @@ unset KUBECONFIG
 Expected: both pods `0/1`; `0` ready addresses; a prober line whose `failed` is above zero. Copy all three.
 
 **If the control run passes, the test does not see the defect: stop and report.** Do not go on to Step 8.
+
+(L1's reviewer built this control image as written: `$old` resolves to `2fc774b`, the grep finds its line, and the image runs. If L1's follow-up fixes have since changed `app.py` or `health.py` again, take the two files from the commit before L1's first, not from a later one.)
 
 - [ ] **Step 8: `down`, and remove the control images**
 
@@ -1650,6 +1710,15 @@ So the scenario's step 5 fails on the defect and passes on the fix.
 - **A network plugin other than kind's**, an IPv6 or dual-stack cluster, a node drain, and
   the PodDisruptionBudget doing anything.
 - **Load.** The leader's requests and limits were not measured beyond the one figure above.
+- **A stop during a database outage.** A leader stopped while its database does not answer
+  was not run on the cluster (L1's review measured the image alone: the whole grace period,
+  then killed; say here whether the leader under test limits its own stop).
+- **Sign-in behind a blocked egress or a proxy**: Ready pods, and `503` from the admin API.
+- **`fsGroup` on a driver that honours it, on a shared volume** (unless Step 6 showed kind's
+  does), and how long a first mount of a large volume takes.
+- **An ingress controller's annotations** (the guide's ingress-nginx example).
+- **A failed hook on a first install**, if Step 4's four failure runs were not all made: say
+  which were.
 - **A recording of people talking**: the recordings are one five-second fixture repeated.
 ```
 
@@ -1705,10 +1774,15 @@ In `.github/workflows/ci.yml`, replace the whole job `leader-image` (its comment
           echo "517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889  $RUNNER_TEMP/bin/kind" | sha256sum -c -
           chmod +x "$RUNNER_TEMP/bin/kind"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          # The driver runs this binary by its full path: the runner image has a Helm 3 of
+          # its own, which a child process can find first (the `chart` job did, once).
+          echo "HELM=$RUNNER_TEMP/bin/helm" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/bin/helm" version --short
+          test "$("$RUNNER_TEMP/bin/helm" version --short | cut -d+ -f1)" = "v4.3.0"
       - name: Build the leader image
         run: docker build -t swarmscribe-leader:kind -f docker/leader.Dockerfile .
       - name: Check it (a serving leader stays ready on a newer schema; a starting one refuses it)
-        run: bash docker/check-leader-image.sh swarmscribe-leader:kind
+        run: timeout 300 bash docker/check-leader-image.sh swarmscribe-leader:kind
       - name: Build the next version's image (one more migration; test only)
         run: >-
           docker build -t swarmscribe-leader:kind-next
@@ -1740,7 +1814,9 @@ In `.github/workflows/ci.yml`, replace the whole job `leader-image` (its comment
         run: python3 e2e/leader-kind/run_e2e.py down || true
 ```
 
-The leaders and followers never log a token, a credential or a link (the scenario checks the leaders' logs for the pool token, the link key and `/v1/files/`), so printing the logs on failure is safe. `python3` and `kubectl` are on GitHub's Ubuntu runners; the driver uses the standard library only, so there is no `uv sync`.
+This job replaces `leader-image`, so the image is built and checked once, here, and not in two jobs. The check is given five minutes (`timeout 300`): an image whose `serve` wrongly starts on a newer schema used to hold that script until the job's own limit (L1 review, I1); if L1's follow-up has bounded the script itself, the `timeout` costs nothing.
+
+The leaders and followers never log a token, a credential or a link (the scenario checks the leaders' logs for the pool token, the link key and `/v1/files/`: keep that assertion, since the image's own check cannot see a request line that a later change switches on), so printing the logs on failure is safe. `python3` and `kubectl` are on GitHub's Ubuntu runners; the driver uses the standard library only, so there is no `uv sync`.
 
 - [ ] **Step 2: Check the workflow**
 
@@ -1836,14 +1912,21 @@ translation, so the port that counts is the pod's, not the Service's 80.
 
 - [ ] **Step 2: "What has been run, and what has not"**
 
-Replace the whole subsection "### What has been run, and what has not" of "## Deploy the leader" with the text below. Every `<...>` comes from the outcomes document; if a sentence here says more than the outcomes document shows, change the sentence.
+First, **"When the install or an upgrade fails"** (the subsection L2 wrote from reading, which says so in its first paragraph): correct every row and both commands from Task 2's four failure runs, quote Helm's own last line for each, and replace its first paragraph with "Run on a `kind` cluster on <date>; Helm 4.3.0." If a case was not run, leave its row and say "not run" in it.
+
+The notes (`NOTES.txt`) print a shared-files paragraph for two or more replicas and, with sign-in on, a paragraph on a blocked identity provider; the driver does not compare notes text, and nothing in this plan uses `helm install --dry-run` (L2's check reads the notes with `helm template`).
+
+A chart fix found on `kind` changes `check_render.py` too: that check compares each rendered object with the whole object it must be (`expected_leader_pod`, `expected_job_pod`, `expected_policy`, `NOTES`), so a deliberate change to a pod, a policy or the notes means changing the expected object in the check in the same commit. Run it with `HELM` naming Helm 4.
+
+Then replace the whole subsection "### What has been run, and what has not" of "## Deploy the leader" with the text below. Every `<...>` comes from the outcomes document; if a sentence here says more than the outcomes document shows, change the sentence.
 
 ````markdown
 ### What has been run, and what has not
 
 CI lints the chart, validates what it renders against the Kubernetes 1.33 schemas, runs
-`deploy/helm/swarmscribe-leader/ci/check_render.py` (some 150 renders: what must hold and
-what must be refused), builds the image and checks it (`docker/check-leader-image.sh`), and
+`deploy/helm/swarmscribe-leader/ci/check_render.py` (every rendered object compared with
+the whole object it must be, and the values that must be refused), builds the image and
+checks it (`docker/check-leader-image.sh`), and
 installs the chart on a `kind` cluster (job `leader-kind-e2e`, `e2e/leader-kind`). The same
 run was made on a development machine and is recorded in
 `docs/superpowers/plans/2026-10-05-leader-chart-outcomes.md`.
@@ -1884,6 +1967,11 @@ What was not run:
 - **A request on a connection that was already open** to a pod that is then stopped.
 - A network plugin other than kind's; a node drain; the PodDisruptionBudget doing anything;
   the leader under load (its requests and limits are not measured).
+- **A stop during a database outage**, on a cluster: a pod stopped while the database does
+  not answer.
+- **Sign-in behind a blocked egress or a proxy.**
+- **`fsGroup` on a driver that honours it**, on a shared volume; **an ingress controller's
+  annotations** (the ingress-nginx example above); TLS to Postgres.
 - The CI job on a GitHub runner: it was run step for step on a development machine and
   has not yet run on GitHub. (Remove this line when it has, and say how long it took.)
 ````
@@ -1928,15 +2016,7 @@ with
 
 - [ ] **Step 5: The follow-ups**
 
-Create `docs/superpowers/plans/2026-10-05-leader-chart-followups.md`. Start from the spec's section 16 (F1 to F10), copied with their numbers, and add under "From the build" every item the three plans' reviews and Task 2 raised and did not fix: each with where it came from and what was seen. Mark as done any follow-up the build did do. Its first lines:
-
-```markdown
-# Leader chart: follow-ups
-
-From the leader chart spec (section 16) and from building plans L1 to L3. None blocks merge.
-
-## From the spec
-```
+`docs/superpowers/plans/2026-10-05-leader-chart-followups.md` exists since L2's review fixes: it has the spec's section 16 (F1 to F10) under "From the spec" and what L2's review raised and left under "From the build: L2". Add "From the build: L1" (what L1's review raised and its fixes left) and "From the build: L3" (what Task 2 raised and did not fix), each item with where it came from and what was seen. Mark as done any follow-up the build did do, and any L2 item that Task 2's runs settled (the failure runs, `fsGroup`).
 
 In `docs/superpowers/plans/2026-10-04-follower-f1-followups.md`, at the end of the item that begins "`leader.ca` (a private CA), `models.volume: persistentVolumeClaim`", replace the sentence "The leader's chart (roadmap item 6) will bring a TLS leader to test the first against." with:
 

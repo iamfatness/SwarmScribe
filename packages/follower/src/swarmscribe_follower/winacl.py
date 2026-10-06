@@ -51,6 +51,7 @@ _DACL = 0x4
 _OWNER_AND_DACL = 0x1 | _DACL
 _PROTECTED_DACL = 0x80000000
 _ACCESS_ALLOWED_ACE = 0
+_INHERIT_ONLY = 0x8  # ACE flag: for what is made inside, not for the object
 # ACE types (winnt.h) known not to grant access: deny, audit, alarm, their object and callback
 # variants, mandatory label, resource attribute, scoped policy, process trust label and access
 # filter. Allow (0), compound allow (4), allow object (5), allow callback (9) and allow
@@ -168,13 +169,13 @@ def current_user() -> str:
         kernel.CloseHandle(token)
 
 
-def read_acl(path: Path, descriptor_of: int | None = None) -> tuple[str, list[str] | None]:
-    """(the owner's SID, the SIDs with an allow entry) for a file or folder. The list is None
-    when the object has no access control list at all: then everyone may do anything.
-
-    `descriptor_of`: an open file descriptor of `path`. The file is then read through it and
-    not opened a second time: the answer is about the file that is being read, and another
-    writer's replace of the credential is not held up by a second open."""
+def _read(
+    path: Path, descriptor_of: int | None = None
+) -> tuple[str, list[tuple[str, int, int]] | None]:
+    """(the owner's SID, the entries that can let someone in) for a file or folder; each
+    entry is (SID, access mask, entry flags). An entry of a kind this code does not read is
+    (UNREADABLE + its type, every bit, its flags). The list is None when the object has no
+    access control list at all."""
     import msvcrt
     from ctypes import wintypes
 
@@ -195,23 +196,46 @@ def read_acl(path: Path, descriptor_of: int | None = None) -> tuple[str, list[st
         counts = (wintypes.DWORD * 3)()  # ACL_SIZE_INFORMATION: the entry count comes first
         if not advapi.GetAclInformation(dacl, counts, ctypes.sizeof(counts), 2):
             raise ctypes.WinError(ctypes.get_last_error())
-        allowed = []
+        entries = []
         for index in range(counts[0]):
             entry = ctypes.c_void_p()
             if not advapi.GetAce(dacl, index, ctypes.byref(entry)):
                 raise ctypes.WinError(ctypes.get_last_error())
             # ACE_HEADER is a type byte, a flags byte and a 16-bit size; an allow entry
             # follows it with a 32-bit mask and then the SID.
-            kind = ctypes.cast(entry, ctypes.POINTER(ctypes.c_ubyte))[0]
+            header = ctypes.cast(entry, ctypes.POINTER(ctypes.c_ubyte))
+            kind, flags = header[0], header[1]
             mask = ctypes.cast(entry.value + 4, ctypes.POINTER(wintypes.DWORD))[0]
             if kind == _ACCESS_ALLOWED_ACE:
                 if mask:
-                    allowed.append(_sid_text(advapi, kernel, entry.value + 8))
+                    entries.append((_sid_text(advapi, kernel, entry.value + 8), mask, flags))
             elif kind not in NOT_GRANTING:
-                allowed.append(f"{UNREADABLE}{kind}")
-        return owner_sid, allowed
+                entries.append((f"{UNREADABLE}{kind}", 0xFFFFFFFF, flags))
+        return owner_sid, entries
     finally:
         kernel.LocalFree(descriptor)
+
+
+def read_acl(path: Path, descriptor_of: int | None = None) -> tuple[str, list[str] | None]:
+    """(the owner's SID, the SIDs with an allow entry) for a file or folder. The list is None
+    when the object has no access control list at all: then everyone may do anything.
+
+    `descriptor_of`: an open file descriptor of `path`. The file is then read through it and
+    not opened a second time: the answer is about the file that is being read, and another
+    writer's replace of the credential is not held up by a second open."""
+    owner, entries = _read(path, descriptor_of)
+    return owner, None if entries is None else [sid for sid, _mask, _flags in entries]
+
+
+def read_grants(path: Path) -> tuple[str, list[tuple[str, int]] | None]:
+    """(the owner's SID, (SID, access mask) of every allow entry that applies to `path`
+    itself): what each principal may do with it, for `windows.image_problem`. An entry that is
+    only handed on to what is made inside a folder (inherit-only) is left out. The list is
+    None when there is no access control list at all."""
+    owner, entries = _read(path)
+    if entries is None:
+        return owner, None
+    return owner, [(sid, mask) for sid, mask, flags in entries if not flags & _INHERIT_ONLY]
 
 
 def _name(sid: str) -> str:

@@ -271,7 +271,7 @@ def test_the_install_plan_is_in_this_order():
     the service exists."""
     from swarmscribe_follower import winacl
 
-    plan = windows.install_plan([PYTHON, BOOT], ROOT)
+    plan = windows.install_plan([PYTHON, "-I", BOOT], ROOT)
     lock = ["icacls.exe", str(ROOT), "/inheritance:r", "/grant:r",
             "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"]
     account = r"NT SERVICE\SwarmScribeFollower"
@@ -286,7 +286,8 @@ def test_the_install_plan_is_in_this_order():
         value for kind, value in kinds if kind == "run" and value[:2] == ["sc.exe", "create"]
     ]
     assert create == [[
-        "sc.exe", "create", "SwarmScribeFollower", "binPath=", f'"{PYTHON}" "{BOOT}"',
+        "sc.exe", "create", "SwarmScribeFollower", "binPath=",
+        f'"{PYTHON}" "-I" "{BOOT}"',
         "start=", "delayed-auto", "obj=", account, "DisplayName=", "SwarmScribe Follower",
     ]]
     assert kinds[7] == ("run", create[0])
@@ -365,6 +366,61 @@ def test_a_data_folder_that_was_there_is_locked_before_anything_is_made_in_it(
     assert events[2][0] == ("sc.exe", "create")
 
 
+def test_a_data_folder_that_appeared_after_the_first_look_is_looked_at_again_before_the_lock(
+    tmp_path, monkeypatch
+):
+    """Absent at the owner check, there when the protected creation was tried: someone made
+    it in between. It was never examined, so it is examined now, before the lock is run and
+    before anything is made in it."""
+    from swarmscribe_follower import winacl
+
+    root, events = installing(tmp_path, monkeypatch, ok)
+    looked = []
+
+    def appeared(path):
+        events.append(("create", []))
+        path.mkdir()  # not by this install
+        return False
+
+    def problem(path):
+        looked.append(path.exists())
+        return "it exists and was not made by an administrator" if path.exists() else None
+
+    monkeypatch.setattr(winacl, "create_protected_directory", appeared)
+    monkeypatch.setattr(windows, "root_problem", problem)
+    out, err = io.StringIO(), io.StringIO()
+    assert windows.install(out, err, print_only=False) == 2
+    assert looked == [False, True]
+    assert "was not made by an administrator" in err.getvalue()
+    assert events == [("create", [])]  # no command was run: not the lock, not sc.exe
+    assert list(root.iterdir()) == []  # and nothing was made in it
+
+
+def test_a_data_folder_that_was_there_at_the_first_look_is_looked_at_once_before_the_lock(
+    tmp_path, monkeypatch
+):
+    root, events = installing(tmp_path, monkeypatch, ok, existed=True)
+    looked = []
+    monkeypatch.setattr(windows, "root_problem", lambda path: looked.append(1))
+    out, err = io.StringIO(), io.StringIO()
+    assert windows.install(out, err, print_only=False) == 0, err.getvalue()
+    assert looked == [1, 1]  # the first step and the last, as the plan has them
+
+
+@pytest.mark.parametrize("name", ["state", "models", "logs"])
+def test_a_plain_file_where_a_folder_belongs_is_refused_not_a_traceback(
+    tmp_path, monkeypatch, name
+):
+    root, events = installing(tmp_path, monkeypatch, ok, existed=True)
+    (root / name).write_text("not a folder", encoding="utf-8")
+    out, err = io.StringIO(), io.StringIO()
+    assert windows.install(out, err, print_only=False) == 2
+    said = err.getvalue()
+    assert f"{root / name} is a file where a folder belongs" in said
+    assert f"remove or rename the folder {root}" in said
+    assert not any(event[0][0] == "sc.exe" for event in events)  # nothing was registered
+
+
 def test_a_failure_after_the_service_was_registered_says_to_uninstall_before_trying_again(
     tmp_path, monkeypatch
 ):
@@ -415,17 +471,150 @@ def test_no_secret_is_in_the_settings_template_and_the_token_is_a_file_of_its_ow
     template = windows.env_template(ROOT)
     assert f"SWARMSCRIBE_JOIN_TOKEN_FILE={ROOT / 'join-token'}" in template
     assert "SWARMSCRIBE_JOIN_TOKEN=" not in template
+    # the follower reads the token again when it must register again (README: keep the file)
+    assert "keep that file" in template and "read once" not in template
     assert f"SWARMSCRIBE_FOLLOWER_STATE_DIR={ROOT / 'state'}" in template
     assert "SWARMSCRIBE_FOLLOWER_SHUTDOWN_GRACE_SECONDS=900" in template
 
 
-def test_a_store_python_or_an_install_inside_a_profile_cannot_be_a_service(monkeypatch):
-    monkeypatch.setenv("USERPROFILE", r"C:\Users\someone")
+def test_a_store_python_cannot_be_a_service():
     store = r"C:\Users\someone\AppData\Local\Microsoft\WindowsApps\Python.3.12\python.exe"
-    assert "Microsoft Store" in windows.image_problem([store, BOOT])
-    inside = r"C:\Users\someone\AppData\Roaming\uv\tools\swarmscribe-follower\boot.py"
-    assert "inside a user's profile" in windows.image_problem([PYTHON, inside])
-    assert windows.image_problem([PYTHON, BOOT]) is None
+    assert "Microsoft Store" in windows.image_problem([store, "-I", BOOT])
+
+
+def test_the_services_command_starts_the_interpreter_isolated():
+    """`-I`: no PYTHONPATH, no PYTHONHOME, no user site-packages, and not the script's own
+    folder: nothing outside the install decides what the service imports."""
+    command = windows.image(PYTHON)
+    assert command == [PYTHON, "-I", str(windows.boot_script())]
+    assert windows.image_line(command) == f'"{PYTHON}" "-I" "{windows.boot_script()}"'
+
+
+USERS, AUTHENTICATED, EVERYONE = "S-1-5-32-545", "S-1-5-11", "S-1-1-0"
+ADMINISTRATORS, SYSTEM = "S-1-5-32-544", "S-1-5-18"
+TRUSTED_INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+SOMEONE = "S-1-5-21-1-2-3-1001"
+FULL, MODIFY, READ_EXECUTE, READ = 0x1F01FF, 0x1301BF, 0x1200A9, 0x120089
+PRIVATE = [(ADMINISTRATORS, FULL), (SYSTEM, FULL)]
+
+
+def code(owner, grants):
+    return windows.code_problem(Path(BOOT), owner, grants)
+
+
+def test_code_the_service_account_can_read_and_only_administrators_can_change_passes():
+    """What a file under Program Files looks like, and the other ways the service's account
+    gets in."""
+    from swarmscribe_follower import winacl
+
+    service = winacl.service_sid(windows.SERVICE_NAME)
+    for reader in (USERS, AUTHENTICATED, EVERYONE, service):
+        assert code(ADMINISTRATORS, [*PRIVATE, (reader, READ_EXECUTE)]) is None, reader
+    installer = [(TRUSTED_INSTALLER, FULL), *PRIVATE, (USERS, READ_EXECUTE)]
+    assert code(TRUSTED_INSTALLER, installer) is None
+    assert code(SYSTEM, [*PRIVATE, (USERS, 0x80000000 | 0x20000000)]) is None  # generic R and X
+    # read here, execute there: the account holds both, and the rights add up
+    assert code(ADMINISTRATORS, [*PRIVATE, (USERS, READ), (AUTHENTICATED, 0x1200A0)]) is None
+    # an app container's read access is no ordinary user's write access
+    packages = [*PRIVATE, (USERS, READ_EXECUTE), ("S-1-15-2-1", READ_EXECUTE)]
+    assert code(ADMINISTRATORS, packages) is None
+
+
+def test_code_the_service_account_cannot_read_is_refused_naming_the_link_mode():
+    """A file `uv tool install` hard-linked from its cache keeps the installing user's list:
+    that user, SYSTEM and Administrators, and no entry the service's account matches."""
+    for grants in (
+        [(SOMEONE, FULL), *PRIVATE],
+        PRIVATE,
+        [*PRIVATE, (USERS, READ)],  # read without execute
+        [*PRIVATE, ("S-1-5-80-1-2-3-4-5", READ_EXECUTE)],  # another service's account
+    ):
+        problem = code(ADMINISTRATORS, grants)
+        assert problem is not None, grants
+        assert BOOT in problem and "UV_LINK_MODE=copy" in problem
+        assert "could not read" in problem
+
+
+def test_code_an_ordinary_account_can_change_is_refused_by_name():
+    from swarmscribe_follower import winacl
+
+    service = winacl.service_sid(windows.SERVICE_NAME)
+    readable = [*PRIVATE, (USERS, READ_EXECUTE)]
+    for writer, mask in (
+        (USERS, MODIFY), (SOMEONE, FULL), (EVERYONE, READ_EXECUTE | 0x2),  # write data
+        (USERS, READ_EXECUTE | 0x4), (USERS, READ_EXECUTE | 0x10000),  # append; delete
+        (USERS, READ_EXECUTE | 0x40000), (USERS, READ_EXECUTE | 0x80000),  # the list; the owner
+        (USERS, 0x40000000), (AUTHENTICATED, 0x10000000),  # generic write; generic all
+        (service, MODIFY),  # the service must not be able to rewrite its own code either
+        ("?9", 0xFFFFFFFF),  # an entry of a kind that is not read
+    ):
+        problem = code(ADMINISTRATORS, [*readable, (writer, mask)])
+        assert problem is not None, (writer, hex(mask))
+        assert BOOT in problem and "can be changed by" in problem, problem
+        assert "UV_LINK_MODE=copy" in problem
+    assert "Users (S-1-5-32-545)" in code(ADMINISTRATORS, [*PRIVATE, (USERS, MODIFY)])
+    # the owner may always rewrite the list, whatever the list says
+    problem = code(SOMEONE, readable)
+    assert "is owned by" in problem and SOMEONE in problem and "UV_LINK_MODE=copy" in problem
+    # no list at all: everyone may do anything
+    assert "has no access control list" in code(ADMINISTRATORS, None)
+
+
+def test_a_file_of_the_image_that_cannot_be_examined_is_a_problem_not_a_crash():
+    def missing(path):
+        raise FileNotFoundError(2, "The system cannot find the file specified")
+
+    problem = windows.image_problem([PYTHON, "-I", BOOT], read_grants=missing)
+    assert PYTHON in problem and "cannot be examined" in problem
+
+
+def test_the_interpreter_the_boot_script_and_the_package_are_all_examined():
+    asked = []
+
+    def read(path):
+        asked.append(str(path))
+        return ADMINISTRATORS, [*PRIVATE, (USERS, READ_EXECUTE)]
+
+    assert windows.image_problem([PYTHON, "-I", BOOT], read_grants=read) is None
+    assert asked == [PYTHON, BOOT, str(Path(BOOT).with_name("__init__.py"))]
+
+
+def test_install_print_warns_of_a_problem_with_the_image_and_still_prints_the_plan(monkeypatch):
+    monkeypatch.setattr(windows, "image", lambda: [PYTHON, "-I", BOOT])
+    monkeypatch.setattr(windows, "data_root", lambda: ROOT)
+    monkeypatch.setattr(windows, "image_problem", lambda command: "the code cannot be read")
+    out, err = io.StringIO(), io.StringIO()
+    assert windows.install(out, err, print_only=True) == 0
+    assert err.getvalue() == "warning: the code cannot be read\n"
+    lines = out.getvalue().splitlines()
+    assert any(line.startswith("sc.exe create ") for line in lines)
+    lock = next(n for n, line in enumerate(lines) if "/inheritance:r" in line)
+    # the line before the lock says when the lock runs
+    assert lines[lock - 1] == (
+        f"data folder: a new {ROOT} is created already restricted to Administrators and"
+        " SYSTEM; the next line runs only for a folder that is already there"
+    )
+    out, err = io.StringIO(), io.StringIO()
+    assert windows.install(out, err, print_only=False) == 2
+    assert err.getvalue() == "error: the code cannot be read\n" and out.getvalue() == ""
+
+
+def test_commands_whose_output_windows_writes_in_its_own_language_are_decoded_leniently(
+    tmp_path, monkeypatch
+):
+    """`sc.exe` and `icacls.exe` answer in the console's code page; text that does not decode
+    must not be what fails the install."""
+    seen = []
+
+    def run(argv, **kwargs):
+        seen.append(kwargs)
+        return ok(argv)
+
+    installing(tmp_path, monkeypatch, run)
+    out, err = io.StringIO(), io.StringIO()
+    assert windows.install(out, err, print_only=False) == 0, err.getvalue()
+    assert windows.uninstall(out, err, print_only=False) == 0
+    assert len(seen) == 10 and all(kwargs.get("errors") == "replace" for kwargs in seen)
 
 
 def test_the_grace_period_comes_from_the_environment_the_settings_file_filled(monkeypatch):
@@ -646,8 +835,12 @@ def test_the_services_command_runs_the_follower_in_the_real_interpreter_given_it
     # The real interpreter knows nothing of this checkout's environment (an installed
     # follower has its dependencies beside it; a development checkout has them in the venv).
     environment["PYTHONPATH"] = os.pathsep.join(entry for entry in sys.path if entry)
+    # Without `-I`: a development checkout's dependencies are in the venv, not beside the
+    # package, so the isolated start cannot find them. The test below and the Windows harness
+    # (an installed follower) run the command as it is registered.
+    python, boot = windows.image()[0], windows.image()[-1]
     done = subprocess.run(
-        [*windows.image(), "--foreground", "--env-file", str(settings)],
+        [python, boot, "--foreground", "--env-file", str(settings)],
         capture_output=True, text=True, timeout=120, env=environment,
     )
     assert done.returncode == 2, done.stderr
@@ -702,24 +895,38 @@ def test_the_boot_script_finds_the_environment_by_itself_and_hides_its_own_folde
     """What `service_boot.bootstrap()` is for, shown with the real interpreter, a clean
     environment and a stand-in install: a site-packages-like folder holding the package (with
     the real service_boot.py beside a stub `windows`, and a stub `logs` module like the real
-    package's) and one other library. The boot script is run as the control manager runs it:
-    the library is importable only because it added the folder, and the package's own
-    modules only by their package name, not bare."""
+    package's), one other library, and a `.pth` file naming a folder with a third. The boot
+    script is run as the control manager runs it: the libraries are importable only because it
+    added the folder (and read its `.pth` file), and the package's own modules only by their
+    package name, not bare.
+
+    And nothing outside the install wins over it. A decoy folder holds libraries of the same
+    names; it is offered through PYTHONPATH, which puts it ahead of every site-packages. The
+    registered command (`-I`) never sees it; and started without `-I`, the boot script still
+    puts the install's own folder first."""
     site = tmp_path / "site-packages"
     package = site / "swarmscribe_follower"
     package.mkdir(parents=True)
     (site / "stub_library.py").write_text("MARK = 'found'\n", encoding="utf-8")
+    (tmp_path / "linked").mkdir()
+    (tmp_path / "linked" / "pth_library.py").write_text("MARK = 'linked'\n", encoding="utf-8")
+    (site / "stand-in.pth").write_text(str(tmp_path / "linked") + "\n", encoding="utf-8")
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    for name in ("stub_library", "pth_library"):
+        (decoy / f"{name}.py").write_text("MARK = 'DECOY'\n", encoding="utf-8")
     (package / "__init__.py").write_text("", encoding="utf-8")
     (package / "logs.py").write_text("", encoding="utf-8")
     (package / "windows.py").write_text(
         "def service_process(argv):\n"
+        "    import pth_library\n"
         "    import stub_library\n"
         "    try:\n"
         "        import logs\n"
         "        bare = 'importable'\n"
         "    except ImportError:\n"
         "        bare = 'hidden'\n"
-        "    print(stub_library.MARK, bare, argv)\n"
+        "    print(stub_library.MARK, pth_library.MARK, bare, argv)\n"
         "    return 0\n",
         encoding="utf-8",
     )
@@ -731,16 +938,28 @@ def test_the_boot_script_finds_the_environment_by_itself_and_hides_its_own_folde
         if name.upper() not in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP")
         and not name.startswith("SWARMSCRIBE_")
     }
-    python = windows.image()[0]
+    registered = windows.image()
+    python, options = registered[0], registered[1:-1]
+    assert options == ["-I"]
+
+    def start(*command, **more):
+        return subprocess.run(
+            command, capture_output=True, text=True, env={**environment, **more}, timeout=60,
+            cwd=tmp_path,
+        )
+
     # without the boot script's bootstrap the library is not on the path
-    bare = subprocess.run(
-        [python, "-c", "import stub_library"], capture_output=True, text=True, env=environment,
-        timeout=60, cwd=tmp_path,
+    assert start(python, "-c", "import stub_library").returncode != 0
+    # and the decoy is one the bare interpreter does find, ahead of everything
+    shadowed = start(
+        python, "-c", "import stub_library; print(stub_library.MARK)", PYTHONPATH=str(decoy)
     )
-    assert bare.returncode != 0
-    done = subprocess.run(
-        [python, str(boot), "--x"], capture_output=True, text=True, timeout=60, env=environment,
-        cwd=tmp_path,
-    )
-    assert done.returncode == 0, done.stderr
-    assert done.stdout.strip() == "found hidden ['--x']"
+    assert shadowed.stdout.strip() == "DECOY", shadowed.stderr
+    for command in (
+        [python, *options, str(boot), "--x"],  # as registered
+        [python, str(boot), "--x"],  # not isolated: the install's folder is still first
+    ):
+        for more in ({}, {"PYTHONPATH": str(decoy)}):
+            done = start(*command, **more)
+            assert done.returncode == 0, done.stderr
+            assert done.stdout.strip() == "found linked hidden ['--x']", (command, more)

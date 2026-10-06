@@ -389,3 +389,103 @@ def test_a_list_that_also_holds_users_is_still_tightened_for_an_elevated_adminis
     assert winacl.make_private(folder) is True
     assert "S-1-5-32-545" not in winacl.read_acl(folder)[1]
     assert winacl.access_problem(folder) is None
+
+
+# --- the code a service runs (windows.image_problem), with real lists ---------------------------
+
+
+def code_file(folder, name, sddl):
+    path = folder / name
+    path.write_text("x", encoding="utf-8")
+    apply_sddl(path, sddl)
+    return path
+
+
+def as_installed(sddl_for):
+    """`image_problem` over three real files (the interpreter, the boot script, the package)
+    whose lists are `sddl_for(name)`, each read back from Windows. Only the owner is crafted,
+    as Administrators: ownership cannot be given away without privilege, and an elevated
+    administrator's files (the machine-wide install, and CI's runner) belong to that group,
+    while a user's belong to the user."""
+    from swarmscribe_follower import winacl, windows
+
+    def read(path):
+        return winacl.ADMINISTRATORS, winacl.read_grants(path)[1]
+
+    def problem(folder):
+        folder.mkdir()  # a new folder each time: a file just made read-only is not rewritten
+        python =code_file(folder, "python.exe", sddl_for("python.exe"))
+        code_file(folder, "__init__.py", sddl_for("__init__.py"))
+        boot = code_file(folder, "service_boot.py", sddl_for("service_boot.py"))
+        return windows.image_problem([str(python), "-I", str(boot)], read_grants=read)
+
+    return problem
+
+
+PROGRAM_FILES = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)"  # Users: read and execute
+
+
+def test_the_masks_of_a_list_are_read_and_inherit_only_entries_are_left_out(tmp_path):
+    from swarmscribe_follower import winacl
+
+    path = code_file(tmp_path, "file.py", PROGRAM_FILES)
+    owner, grants = winacl.read_grants(path)
+    assert sorted(grants) == sorted(
+        [(winacl.SYSTEM, 0x1F01FF), (winacl.ADMINISTRATORS, 0x1F01FF), ("S-1-5-32-545", 0x1200A9)]
+    )
+    # read_acl says what it always said of the same file
+    assert winacl.read_acl(path) == (owner, [sid for sid, _ in grants])
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    # Users' entry is for what is made inside the folder only (IO): it is not on the folder
+    apply_sddl(folder, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICIIO;FA;;;BU)")
+    try:
+        assert "S-1-5-32-545" in winacl.read_acl(folder)[1]  # the trust check counts it, as before
+        assert "S-1-5-32-545" not in [sid for sid, _ in winacl.read_grants(folder)[1]]
+    finally:
+        reset_to_own(folder)
+
+
+def test_code_readable_by_users_and_writable_by_administrators_and_system_only_passes(tmp_path):
+    assert as_installed(lambda name: PROGRAM_FILES)(tmp_path / "install") is None
+
+
+def test_code_with_the_installing_users_list_is_refused_naming_the_link_mode(tmp_path):
+    """What `uv tool install` leaves when it hard-links from its cache: the file keeps the
+    list it had in the installing user's profile (that user, SYSTEM, Administrators)."""
+    from swarmscribe_follower import winacl
+
+    linked = f"D:P(A;;FA;;;{winacl.current_user()})(A;;FA;;;SY)(A;;FA;;;BA)"
+    problem = as_installed(
+        lambda name: linked if name == "service_boot.py" else PROGRAM_FILES
+    )(tmp_path / "one")
+    assert str(tmp_path / "one" / "service_boot.py") in problem
+    assert "could not read" in problem and "UV_LINK_MODE=copy" in problem
+    # the package beside it is looked at too
+    problem = as_installed(lambda name: linked if name == "__init__.py" else PROGRAM_FILES)(
+        tmp_path / "two"
+    )
+    assert str(tmp_path / "two" / "__init__.py") in problem and "UV_LINK_MODE=copy" in problem
+
+
+def test_code_that_users_can_write_is_refused(tmp_path):
+    writable = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;BU)"  # Users: modify
+    problem = as_installed(lambda name: writable if name == "python.exe" else PROGRAM_FILES)(
+        tmp_path / "install"
+    )
+    assert str(tmp_path / "install" / "python.exe") in problem
+    assert "can be changed by" in problem and "Users (S-1-5-32-545)" in problem
+
+
+def test_code_owned_by_an_ordinary_account_is_refused_whatever_its_list_says(tmp_path):
+    from swarmscribe_follower import winacl, windows
+
+    boot = code_file(tmp_path, "service_boot.py", PROGRAM_FILES)
+    code_file(tmp_path, "__init__.py", PROGRAM_FILES)
+
+    def read(path):  # the real list; the owner an ordinary account's
+        return "S-1-5-21-1-2-3-1001", winacl.read_grants(path)[1]
+
+    problem = windows.image_problem([str(boot), "-I", str(boot)], read_grants=read)
+    assert "is owned by S-1-5-21-1-2-3-1001" in problem and "UV_LINK_MODE=copy" in problem
+

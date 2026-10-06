@@ -7,7 +7,7 @@ folder no loader searches by itself.
 
 What was measured on Windows (plan F4a, 2026-10-05, CTranslate2 4.8.2, an RTX 4090):
 
-    how the folder was offered         python.org / uv Python     Microsoft Store Python
+    how the folder was offered         uv's Python                Microsoft Store Python
     nothing                            not found                  not found
     PATH                               loads                      not found
     os.add_dll_directory               not found                  loads

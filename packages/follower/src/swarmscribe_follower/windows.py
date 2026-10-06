@@ -184,7 +184,8 @@ def env_template(root: Path) -> str:
     return (
         "# Settings of the SwarmScribe follower service (NAME=value; see the README).\n"
         "# The join or pool token is NOT written here: put it, alone, in the file that\n"
-        "# SWARMSCRIBE_JOIN_TOKEN_FILE names. It is read once, at the first start.\n"
+        "# SWARMSCRIBE_JOIN_TOKEN_FILE names, and keep that file: it is read whenever the\n"
+        "# follower has to register (the first start, and again if the leader stops knowing it).\n"
         "SWARMSCRIBE_LEADER_URL=\n"
         f"SWARMSCRIBE_JOIN_TOKEN_FILE={root / 'join-token'}\n"
         f"SWARMSCRIBE_FOLLOWER_STATE_DIR={root / 'state'}\n"
@@ -202,27 +203,115 @@ def image(base_python: str | None = None) -> list[str]:
     """The command the control manager starts: the real interpreter (not the environment's
     `python.exe`, which is a launcher that starts the interpreter as a child, so the control
     manager would be talking to the wrong process) with the boot script, which puts the
-    follower's environment on the import path itself."""
+    follower's environment on the import path itself. `-I` starts the interpreter isolated:
+    no `PYTHONPATH` or `PYTHONHOME`, no user site-packages and not the script's own folder,
+    so nothing outside the install decides what the service imports."""
     return [base_python or getattr(sys, "_base_executable", None) or sys.executable,
-            str(boot_script())]
+            "-I", str(boot_script())]
 
 
-def image_problem(command: list[str]) -> str | None:
-    """Why a service account could not start `command`, or None."""
-    python = command[0]
+# Access rights of a file (winnt.h). What `icacls` shows as (RX) is READ_EXECUTE.
+READ_EXECUTE = 0x1200A9  # FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
+GENERIC_READ, GENERIC_WRITE, GENERIC_EXECUTE, GENERIC_ALL = (
+    0x80000000, 0x40000000, 0x20000000, 0x10000000,
+)
+# FILE_WRITE_DATA, FILE_APPEND_DATA, DELETE, WRITE_DAC, WRITE_OWNER and the generic rights
+# that hold them: what lets an account change a file, or take it over.
+WRITE_ACCESS = 0x2 | 0x4 | 0x10000 | 0x40000 | 0x80000 | GENERIC_WRITE | GENERIC_ALL
+TRUSTED_INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+USERS, AUTHENTICATED_USERS, EVERYONE = "S-1-5-32-545", "S-1-5-11", "S-1-1-0"
+COPY_ADVICE = (
+    "install the follower again as the README says: as an administrator, under"
+    r' C:\Program Files, with UV_LINK_MODE=copy set (PowerShell: $env:UV_LINK_MODE = "copy")'
+)
+
+
+def code_problem(path: Path, owner: str, grants: list[tuple[str, int]] | None) -> str | None:
+    """Why the service must not, or could not, run the file `path`, given its owner and its
+    allow entries as `winacl.read_grants` gives them; or None.
+
+    The service's account must be able to read and execute it: through Users, Authenticated
+    Users or Everyone, which its token holds, or by its own SID. And nobody but
+    Administrators, SYSTEM and TrustedInstaller may be able to change it, by the list or by
+    owning it (an owner can always rewrite the list): what a service runs must not be an
+    ordinary user's to write. A file that `uv tool install` hard-linked from its cache fails
+    both ways: a hard link keeps the list the file had in the installing user's profile."""
+    from . import winacl
+
+    service = winacl.service_sid(SERVICE_NAME)
+    administrative = {winacl.ADMINISTRATORS, winacl.SYSTEM, TRUSTED_INSTALLER}
+
+    def name(sid: str) -> str:
+        if sid.startswith(winacl.UNREADABLE):
+            return f"an entry of a kind the follower does not read (type {sid[1:]})"
+        return f"{winacl.KNOWN[sid]} ({sid})" if sid in winacl.KNOWN else sid
+
+    if grants is None:
+        return (
+            f"{path} has no access control list (everyone may change it), and a service must"
+            f" not run code an ordinary account can change; {COPY_ADVICE}"
+        )
+    held = 0
+    for sid, mask in grants:
+        if sid in (USERS, AUTHENTICATED_USERS, EVERYONE, service):
+            held |= mask
+    if held & GENERIC_ALL or (held & GENERIC_READ and held & GENERIC_EXECUTE):
+        held |= READ_EXECUTE
+    if held & READ_EXECUTE != READ_EXECUTE:
+        return (
+            f"the service's account could not read {path}: its access list has no"
+            " read-and-execute entry for Users, Authenticated Users, Everyone or the service's"
+            " own account. A file inside a user's profile looks like that, and so does one that"
+            " uv hard-linked from its cache there (a hard link keeps that list wherever it is);"
+            f" {COPY_ADVICE}"
+        )
+    if owner not in administrative:
+        return (
+            f"{path} is owned by {name(owner)}, who can change it, and a service must not run"
+            f" code an ordinary account can change; {COPY_ADVICE}"
+        )
+    # CREATOR OWNER and OWNER RIGHTS stand for the owner, who has just been checked.
+    writers = sorted({
+        sid for sid, mask in grants
+        if mask & WRITE_ACCESS and sid not in administrative | winacl.OWNER_PLACEHOLDERS
+    })
+    if writers:
+        return (
+            f"{path} can be changed by {', '.join(name(sid) for sid in writers)}, and a service"
+            f" must not run code an ordinary account can change; {COPY_ADVICE}"
+        )
+    return None
+
+
+def image_problem(
+    command: list[str],
+    read_grants: Callable[[Path], tuple[str, list[tuple[str, int]] | None]] | None = None,
+) -> str | None:
+    """Why the service could not, or must not, run `command`, or None. The Microsoft Store's
+    Python belongs to one user. Otherwise the access lists of the interpreter, the boot
+    script and the package beside it are read (`read_grants`: `winacl.read_grants`) and
+    judged by `code_problem`. Three files stand for the install: the service opens them
+    first, and the two under `site-packages` were put there the way every other file of the
+    install was (copied, or hard-linked from uv's cache)."""
+    python, script = command[0], command[-1]
     if "\\windowsapps\\" in python.lower():
         return (
             "this follower is installed on the Microsoft Store's Python, which belongs to one"
             " user and cannot run a service; install it on a Python from uv or python.org"
             " (see the README: `uv python install`, then `uv tool install --python ...`)"
         )
-    profile = (os.environ.get("USERPROFILE") or "").lower()
-    for path in command:
-        if profile and path.lower().startswith(profile + "\\"):
-            return (
-                f"{path} is inside a user's profile, which the service's account cannot read;"
-                r" install the follower for the machine (see the README: under C:\Program Files)"
-            )
+    if read_grants is None:
+        from . import winacl
+
+        read_grants = winacl.read_grants
+    for path in (Path(python), Path(script), Path(script).with_name("__init__.py")):
+        try:
+            owner, grants = read_grants(path)
+        except OSError as error:
+            return f"{path} cannot be examined ({error.strerror or type(error).__name__})"
+        problem = code_problem(path, owner, grants)
+        if problem:
+            return problem
     return None
 
 
@@ -231,9 +320,10 @@ DIRECTORY = 0x10
 
 
 def is_reparse_point(path: Path) -> bool:
-    """A junction or a symbolic link, asked without following it."""
+    """A junction or a symbolic link, asked without following it. (Only Windows gives a file
+    attributes; elsewhere, where the install's tests also run, there is none to find.)"""
     try:
-        return bool(os.lstat(path).st_file_attributes & REPARSE_POINT)
+        return bool(getattr(os.lstat(path), "st_file_attributes", 0) & REPARSE_POINT)
     except OSError:
         return False
 
@@ -354,6 +444,13 @@ def install(out, err, *, print_only: bool) -> int:
         print(f"folders: {root} with {', '.join(FOLDERS)} inside", file=out)
         print(f"settings file: {root / 'follower.env'} (written if it is not there)", file=out)
         for step in steps:
+            if step.kind == "lock":
+                print(
+                    f"data folder: a new {root} is created already restricted to"
+                    " Administrators and SYSTEM; the next line runs only for a folder that is"
+                    " already there",
+                    file=out,
+                )
             if step.kind in ("run", "lock"):
                 print(command_line(step.value), file=out)
         return EXIT_OK
@@ -369,6 +466,7 @@ def install(out, err, *, print_only: bool) -> int:
         return EXIT_CONFIGURATION
     registered = False
     created = False
+    examined = False  # whether a data folder was there to be looked at by the first check
     after_create = (
         f"the service {SERVICE_NAME} was registered: run `swarmscribe-follower service uninstall`"
         " before trying again"
@@ -382,6 +480,7 @@ def install(out, err, *, print_only: bool) -> int:
 
     for step in steps:
         if step.kind == "check":
+            examined = examined or os.path.lexists(root)
             problem = root_problem(root)
             if problem:
                 return refuse(problem, EXIT_CONFIGURATION)
@@ -395,10 +494,22 @@ def install(out, err, *, print_only: bool) -> int:
                 return refuse(
                     f"could not create {root}: {error.strerror or error}", EXIT_UNEXPECTED
                 )
+            if not created and not examined:
+                # It was not there at the first check and is there now: someone made it in
+                # between. Nobody has looked at it, so look before it is locked or filled.
+                problem = root_problem(root)
+                if problem:
+                    return refuse(problem, EXIT_CONFIGURATION)
         elif step.kind == "mkdir":
             if is_reparse_point(step.value):
                 return refuse(
                     f"{step.value} is a junction or a symbolic link; remove or rename the"
+                    f" folder {root} and run `service install` again",
+                    EXIT_CONFIGURATION,
+                )
+            if os.path.lexists(step.value) and not step.value.is_dir():
+                return refuse(
+                    f"{step.value} is a file where a folder belongs; remove or rename the"
                     f" folder {root} and run `service install` again",
                     EXIT_CONFIGURATION,
                 )
@@ -414,7 +525,10 @@ def install(out, err, *, print_only: bool) -> int:
                     f"{step.value[1]} is a junction or a symbolic link and gets no grant",
                     EXIT_CONFIGURATION,
                 )
-            done = subprocess.run(step.value, capture_output=True, text=True)
+            # The text is for the message only: the return code decides.
+            done = subprocess.run(
+                step.value, capture_output=True, text=True, errors="replace"
+            )
             if done.returncode != 0:
                 said = (done.stdout + done.stderr).strip().splitlines()
                 return refuse(
@@ -441,8 +555,9 @@ def uninstall(out, err, *, print_only: bool) -> int:
     if not is_administrator():
         print("error: `service uninstall` must be run as an administrator", file=err)
         return EXIT_CONFIGURATION
-    subprocess.run(steps[0], capture_output=True, text=True)  # it may not be running
-    done = subprocess.run(steps[1], capture_output=True, text=True)
+    quiet = {"capture_output": True, "text": True, "errors": "replace"}
+    subprocess.run(steps[0], **quiet)  # it may not be running
+    done = subprocess.run(steps[1], **quiet)
     if done.returncode != 0:
         said = (done.stdout + done.stderr).strip().splitlines()
         print(f"error: `{command_line(steps[1])}` failed: {said[-1] if said else ''}", file=err)

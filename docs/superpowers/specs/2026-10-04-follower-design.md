@@ -1327,9 +1327,10 @@ follower chart (F3) and the outside-machine install (F4).
 **Amendments after F4** (built in plans F4a and F4b, 2026-10-05; the record is `plans/2026-10-05-follower-f4-outcomes.md`).
 - **GPU libraries in a native install (D15, 8.3).** There is no `setup-cuda` and no `LD_LIBRARY_PATH`: the
   follower loads cuBLAS from the `nvidia-cublas-cu12` wheel into its own process, by full path, before it loads
-  a model on a GPU (`cudalibs.py`). Measured on Windows: CTranslate2 opens `cublas64_12.dll` by its bare name
-  with `LoadLibraryA`, which reads `PATH` on a python.org or uv Python but not on the Microsoft Store's, and
-  never reads `os.add_dll_directory`; a library already in the process is found on both, and on Linux.
+  a model on a GPU (`cudalibs.py`). Measured on Windows: CTranslate2 opens `cublas64_12.dll` by its bare name,
+  which found the wheel's folder through `PATH` on uv's Python and not on the Microsoft Store's, and through
+  `os.add_dll_directory` on the Store's and not on uv's; a library already loaded by its full path was found
+  on both (a Python from python.org was not measured), and the same loading works on Linux.
   `cuda-paths` prints the wheels' folders, for looking. The images keep `LD_LIBRARY_PATH`.
 - **Install (8.3).** `uv tool install --python 3.12 --find-links <folder> --constraints
   <folder>/follower-constraints.txt "swarmscribe-follower[cuda]"`, from three wheels built from the repository
@@ -1341,8 +1342,10 @@ follower chart (F3) and the outside-machine install (F4).
   `EnvironmentFile=`; a validation error names the file; top-level option abbreviations are off (`--env PATH`
   is refused). The settings file is readable by the service's account and holds no secret. The token is
   a file of its own beside it (`SWARMSCRIBE_JOIN_TOKEN_FILE`), readable by root or administrators and the
-  service's account, and is in no unit, registration, command line or environment. It is read whenever a
-  registration needs it, so it stays in place: a follower whose credential the leader no longer knows
+  service's account, and is in no unit, registration, command line or environment. It is plain text (UTF-8 or
+  ASCII; UTF-8 or UTF-16 with a byte-order mark, as PowerShell 5.1 writes, is read too, and anything else is
+  exit 2 naming the file). It is read whenever a registration needs it, so it stays in place:
+  a follower whose credential the leader no longer knows
   registers again with it (a pool token; a join token is used up). `run` and `doctor` use the stored
   credential's leader when `SWARMSCRIBE_LEADER_URL` is not set, and say so ("from the stored credential"); the
   settings file and the environment win over the stored address; a stored plain-`http://` leader is used by
@@ -1358,9 +1361,15 @@ follower chart (F3) and the outside-machine install (F4).
   `nvidia-modprobe` from loading them (not run: no GPU has run under the unit).
 - **The Windows service (8.3, 5.6).** It runs as its own virtual account, `NT SERVICE\SwarmScribeFollower`,
   with its settings, token, state, models and log under `%ProgramData%\swarmscribe-follower`; the follower is
-  installed for the machine with uv's own Python. Its command is the real interpreter with `service_boot.py`
-  (the environment's `python.exe` is a launcher), and the service passes its settings file through the same
-  path as `run`. The stop control is one stop, reported "stop pending" with a wait hint of the grace period
+  installed for the machine with uv's own Python and `UV_LINK_MODE=copy` (a file hard-linked from uv's cache
+  keeps the installing user's access list, which the service's account cannot read). Its command is the real
+  interpreter, started isolated (`-I`), with `service_boot.py`, which puts the follower's `site-packages`
+  first on the import path (the environment's `python.exe` is a launcher), and the service passes its
+  settings file through the same path as `run`. `service install` refuses the Microsoft Store's Python, and
+  an interpreter, boot script or package that the service's account cannot read and execute or that anyone
+  but Administrators, SYSTEM and TrustedInstaller owns or can change (seen to refuse installs in a user's
+  folders; not yet seen to pass one under `C:\Program Files`).
+  The stop control is one stop, reported "stop pending" with a wait hint of the grace period
   plus 30 seconds; a shutdown (the pre-shutdown control) hands the job back at once. Exits 0, 4 and 5, and any
   exit after a stop was asked for, are reported `SERVICE_STOPPED` and never restarted; exits 1, 2 and 3 end
   the process without that report, so that the recovery actions (restart after a minute, twice; reset after a

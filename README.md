@@ -349,11 +349,14 @@ plain `http` there, which the follower accepts only with the development switch
 ```
 uv run swarmscribe-admin tokens create --pool default
 export SWARMSCRIBE_LEADER_URL=http://localhost:8080
-export SWARMSCRIBE_JOIN_TOKEN=<the token>
+read -rs SWARMSCRIBE_JOIN_TOKEN && export SWARMSCRIBE_JOIN_TOKEN     # paste the token, then Enter
 export SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1
 uv run swarmscribe-follower doctor
 uv run swarmscribe-follower run
 ```
+
+(`read -rs` takes the token without echoing it and keeps it off the command line and out of
+the shell's history; it is bash's, and zsh's.)
 
 Commands:
 
@@ -533,17 +536,19 @@ codes apart, and without a count a revoked follower (exit `4`) or a misconfigure
 docker run -d --restart on-failure:5 --read-only --cap-drop ALL --stop-timeout 930 \
   --security-opt no-new-privileges \
   -e SWARMSCRIBE_LEADER_URL=https://leader.example.org \
-  -e SWARMSCRIBE_JOIN_TOKEN=<the token> \
+  -v /path/to/join-token:/run/secrets/join-token:ro \
+  -e SWARMSCRIBE_JOIN_TOKEN_FILE=/run/secrets/join-token \
   -e SWARMSCRIBE_FOLLOWER_SHUTDOWN_GRACE_SECONDS=900 \
   -v swarmscribe-follower:/var/lib/swarmscribe-follower \
   -v swarmscribe-models:/models \
   swarmscribe-follower:cpu
 ```
 
-A token on the command line stays in the shell's history. To keep it out, put it in a file
-that user 10001 can read, mount it read-only and name it:
-`-v /path/to/join-token:/run/secrets/join-token:ro -e
-SWARMSCRIBE_JOIN_TOKEN_FILE=/run/secrets/join-token`.
+The token is in a file on the host that holds nothing else and that user 10001 can read
+(mode `0644`, say, in a folder only you can enter), mounted read-only and named by
+`SWARMSCRIBE_JOIN_TOKEN_FILE`; that is how the follower Compose test hands it over. The
+variable `SWARMSCRIBE_JOIN_TOKEN` exists too, for throwaway tests: a token written after
+`-e` stays in the shell's history and shows in `docker inspect`.
 
 For a GPU machine: the `cuda` tag and `--gpus all`. The shorter line of the design
 (`docker run -e SWARMSCRIBE_LEADER_URL=... -e SWARMSCRIBE_JOIN_TOKEN=... swarmscribe-follower:cpu`)
@@ -1861,9 +1866,10 @@ driver (`nvidia-smi` must work): no CUDA toolkit, nothing to copy, no `PATH` or
 `LD_LIBRARY_PATH`. The `cuda` extra brings cuBLAS as a wheel, and the follower loads it from
 there itself, by its full path, before it loads a model on a GPU; `swarmscribe-follower
 cuda-paths` shows where it is. (The planner measured why on Windows: CTranslate2 opens
-`cublas64_12.dll` by its bare name, which finds the wheel's folder through `PATH` on a uv or
-python.org Python, through nothing on the Microsoft Store's, and never through
-`os.add_dll_directory`; a library already loaded in the process is found on both.) uv
+`cublas64_12.dll` by its bare name, which found the wheel's folder through `PATH` on uv's
+Python and not on the Microsoft Store's, and through `os.add_dll_directory` on the Store's
+and not on uv's; a library already loaded by its full path was found on both, which is why
+the follower loads it itself. A Python from python.org was not measured.) uv
 downloads a Python of its own if the machine has none that fits. If the command is not found
 afterwards, `uv tool update-shell` puts uv's tool folder on the `PATH`.
 
@@ -1894,21 +1900,27 @@ As root, from the folder that holds `dist` and `deploy` (a copy of this reposito
 `/opt/swarmscribe-follower`, with its command in `/usr/local/bin`:
 
 ```
+umask 022
 export UV_TOOL_DIR=/opt/swarmscribe-follower/tools UV_TOOL_BIN_DIR=/usr/local/bin
 export UV_PYTHON_INSTALL_DIR=/opt/swarmscribe-follower/python UV_COMPILE_BYTECODE=1
 uv tool install --python 3.12 --find-links dist --constraints dist/follower-constraints.txt swarmscribe-follower
 
-useradd --system --home-dir /var/lib/swarmscribe-follower --shell /usr/sbin/nologin swarmscribe-follower
+useradd --system --user-group --home-dir /var/lib/swarmscribe-follower --shell /usr/sbin/nologin swarmscribe-follower
 install -d -o root -g swarmscribe-follower -m 0750 /etc/swarmscribe-follower
 install -o root -g swarmscribe-follower -m 0640 deploy/systemd/follower.env.example /etc/swarmscribe-follower/follower.env
 install -o root -g root -m 0644 deploy/systemd/swarmscribe-follower.service /etc/systemd/system/
 ```
 
-Two things about where it goes:
+Three things about where it goes:
 
 - The tool directory, Python and command must be outside `/home` and `/root`: the unit sets
   `ProtectHome=yes`, which hides them from the service. (`/opt` and `/usr/local/bin`, as
   above, are the documented place.)
+- The service's user must be able to read `/opt/swarmscribe-follower`, which is root's:
+  hence `umask 022`. Under a root umask of `077` uv makes the folders for root alone (mode
+  `700`), and the service's user cannot start the command (`Permission denied`; seen in the
+  test machine). (`--user-group` makes the group the `install` lines name; not every
+  distribution's `useradd --system` does that by itself.)
 - On a GPU host, install `"swarmscribe-follower[cuda]"`, and the NVIDIA kernel modules must
   already be loaded at boot: the unit's hardening (`ProtectKernelModules=yes`,
   `NoNewPrivileges=yes`) stops `nvidia-modprobe` from loading them on demand. **No GPU has
@@ -1947,6 +1959,23 @@ runuser -u swarmscribe-follower -- swarmscribe-follower --env-file /etc/swarmscr
 is not in the unit's cgroup. `leave` the same way, with the service stopped, gives the
 registration up.)
 
+**To upgrade** (not run): stop the service, install the new wheels over the old with the
+same variables and the same command plus `--reinstall`, and start it:
+
+```
+systemctl stop swarmscribe-follower
+umask 022
+export UV_TOOL_DIR=/opt/swarmscribe-follower/tools UV_TOOL_BIN_DIR=/usr/local/bin
+export UV_PYTHON_INSTALL_DIR=/opt/swarmscribe-follower/python UV_COMPILE_BYTECODE=1
+uv tool install --reinstall --python 3.12 --find-links dist --constraints dist/follower-constraints.txt swarmscribe-follower
+systemctl start swarmscribe-follower
+```
+
+Without `--reinstall` uv answers that the tool `is already installed` and changes nothing
+(seen with uv 0.12.22, on both systems; that is the only part of this that was run). Do not
+run the `install ... follower.env` line again: it would overwrite your settings with the
+example. Copy the unit again only if it changed, and then `systemctl daemon-reload`.
+
 **What the unit says** (`deploy/systemd/swarmscribe-follower.service`, its `[Unit]` and
 `[Service]` sections):
 
@@ -1972,6 +2001,8 @@ $root = "C:\Program Files\swarmscribe-follower"
 $env:UV_PYTHON_INSTALL_DIR = "$root\python"
 $env:UV_TOOL_DIR = "$root\tools"
 $env:UV_TOOL_BIN_DIR = "$root\bin"
+$env:UV_LINK_MODE = "copy"
+$env:UV_COMPILE_BYTECODE = "1"
 uv python install 3.12 --no-bin --no-registry
 $python = (Get-ChildItem "$root\python\cpython-3.12.*-windows-*\python.exe" | Select-Object -First 1).FullName
 uv tool install --python $python --find-links dist --constraints dist\follower-constraints.txt "swarmscribe-follower[cuda]"
@@ -1980,17 +2011,36 @@ uv tool install --python $python --find-links dist --constraints dist\follower-c
 ```
 
 (Write `swarmscribe-follower` without `[cuda]`, and without the quotes, on a machine without
-an NVIDIA GPU.) `--print` prints the plan below, preceded by a `warning:` line if the
-follower is on a Python that the service's account could not run (the Microsoft Store's, or
-one inside a user's profile): if you see that line, install again as above. The plan, as the
-command prints it for this install (the long number is the service's SID, which Windows
-derives from the name alone, so it is the same on every machine):
+an NVIDIA GPU.) `UV_LINK_MODE=copy` matters: without it uv hard-links the files from its
+cache in your profile, and a hard link keeps the access list the file has there (you, SYSTEM
+and Administrators), so the service's account could not read the follower's code and you,
+not elevated, could change it. `UV_COMPILE_BYTECODE` compiles the code now, as on Linux: the
+service's account cannot write beside it.
+
+`service install` checks this before it changes anything. It reads the access lists of the
+interpreter, of `service_boot.py` and of the package's `__init__.py`, and refuses (exit 2)
+unless the service's account can read and execute each (an entry for Users, Authenticated
+Users, Everyone or the account itself) and only Administrators, SYSTEM and TrustedInstaller
+own it or can change it. An install made without `UV_LINK_MODE=copy` is refused with `error:
+the service's account could not read ...\service_boot.py: ... install the follower again as
+the README says: as an administrator, under C:\Program Files, with UV_LINK_MODE=copy set`;
+the Microsoft Store's Python is refused too. `--print` prints the same message as a
+`warning:` line, followed by the plan: if you see that line, install again as above, with
+`--reinstall` added to the `uv tool install` line. The check has been run on installs made
+without administrator rights (which it refuses); **the install under `C:\Program Files` has
+not been made, so that the check passes there is expected, not seen.**
+
+The plan, as the command would print it for this install (composed from the code with
+these paths, not printed from an install under `C:\Program Files`; the long number is the
+service's SID, which Windows derives from the name alone, so it is the same on every
+machine):
 
 ```
 folders: C:\ProgramData\swarmscribe-follower with state, models, logs inside
 settings file: C:\ProgramData\swarmscribe-follower\follower.env (written if it is not there)
+data folder: a new C:\ProgramData\swarmscribe-follower is created already restricted to Administrators and SYSTEM; the next line runs only for a folder that is already there
 icacls.exe C:\ProgramData\swarmscribe-follower /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F
-sc.exe create SwarmScribeFollower binPath= "\"C:\Program Files\swarmscribe-follower\python\cpython-3.12.15-windows-x86_64-none\python.exe\" \"C:\Program Files\swarmscribe-follower\tools\swarmscribe-follower\Lib\site-packages\swarmscribe_follower\service_boot.py\"" start= delayed-auto obj= "NT SERVICE\SwarmScribeFollower" DisplayName= "SwarmScribe Follower"
+sc.exe create SwarmScribeFollower binPath= "\"C:\Program Files\swarmscribe-follower\python\cpython-3.12.15-windows-x86_64-none\python.exe\" \"-I\" \"C:\Program Files\swarmscribe-follower\tools\swarmscribe-follower\Lib\site-packages\swarmscribe_follower\service_boot.py\"" start= delayed-auto obj= "NT SERVICE\SwarmScribeFollower" DisplayName= "SwarmScribe Follower"
 sc.exe description SwarmScribeFollower "Takes recordings from a SwarmScribe leader and transcribes them."
 sc.exe failure SwarmScribeFollower reset= 86400 actions= restart/60000/restart/60000//60000
 sc.exe failureflag SwarmScribeFollower 0
@@ -2002,8 +2052,14 @@ icacls.exe C:\ProgramData\swarmscribe-follower\logs /grant:r *S-1-5-80-274616168
 
 (The `sc.exe create` line names the interpreter and the follower's own folder, so its paths
 differ on another install; the `\"` are how Python prints the quotes, and the installer runs
-each command as an argument list. The first `icacls` line, the lock, is always printed but
-runs only for a data folder that already existed.)
+each command as an argument list. `-I` starts the interpreter isolated: no `PYTHONPATH`, no
+user site-packages; and `service_boot.py` puts the follower's own `site-packages` first on
+the import path, so nothing installed elsewhere on the machine is imported in its place. The
+first `icacls` line, the lock, is always printed but runs only for a data folder that already
+existed, as the line before it says.)
+
+One machine runs one follower service: the service's name (`SwarmScribeFollower`) and its
+data folder (`C:\ProgramData\swarmscribe-follower`) are fixed.
 
 `service install` does this, in this order. It looks at everything already under
 `C:\ProgramData\swarmscribe-follower`, if the folder is there: every owner must be
@@ -2025,8 +2081,32 @@ so: run `service uninstall` before trying again.
 | `models\` | the model cache | the service writes |
 | `logs\follower.log` | the service's log (a service has no console); kept as `follower.log.1` and begun again when it is over 10 MiB at a start | the service writes |
 
-Set `SWARMSCRIBE_LEADER_URL` in `follower.env`, put the token into `join-token` (Notepad as
-administrator will do; the token is in no registry value and no command line), and:
+Set `SWARMSCRIBE_LEADER_URL` in `follower.env`, and put the token, alone, into `join-token`.
+Notepad opened as administrator will do. Or, in the elevated PowerShell, these lines, which
+ask for the token without showing it and put it on no command line and in no history:
+
+```
+$secure = Read-Host -AsSecureString "Token"
+$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+[Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) | Set-Content -Encoding ascii -NoNewline C:\ProgramData\swarmscribe-follower\join-token
+[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+```
+
+The token file is plain text: ASCII or UTF-8. What PowerShell 5.1 writes otherwise is read as
+well (UTF-8 with a byte-order mark, from `Set-Content -Encoding UTF8`, and UTF-16 with one,
+from `>` and `Out-File`); a file that is none of these is a settings error (exit 2) that
+names the file. Do not put the token itself after `echo` or in any command: it would stay in
+the history. The token is in no registry value and no command line.
+
+Before the first start, look at the follower's code as the service's account will find it:
+
+```
+icacls "$root\tools\swarmscribe-follower\Lib\site-packages\swarmscribe_follower\service_boot.py"
+```
+
+It should list `BUILTIN\Users:(I)(RX)`, inherited from `C:\Program Files`, and nobody but
+`NT AUTHORITY\SYSTEM` and `BUILTIN\Administrators` with more (expected, not seen: `service
+install` has checked the same thing). Then:
 
 ```
 sc.exe start SwarmScribeFollower
@@ -2037,7 +2117,10 @@ Get-Content C:\ProgramData\swarmscribe-follower\logs\follower.log -Tail 20
 As on Linux, keep the token file: the follower reads it again if the leader stops knowing its
 credential. A start-up failure of the follower's own code is written to the log as `error:
 unexpected <ClassName>`. A leader on plain `http` (a test leader) needs
-`SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1` in `follower.env`.
+`SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1` in `follower.env`. Behind a proxy, set `HTTPS_PROXY`
+(and `NO_PROXY`) in `follower.env`, on either system: the file's lines become the follower's
+environment, and its connections to an `https` leader and to `https` file links honour them
+(a plain-`http` leader is never reached through a proxy).
 
 `swarmscribe-follower service foreground` runs the service's own code in the console instead,
 printing each status it would report to Windows; Ctrl+C is the stop control. It is the way to
@@ -2053,16 +2136,35 @@ service's settings file:
 ```
 
 The follower trusts the service's account on its own folder only when the process doing the
-asking is an elevated administrator; from a prompt that is not elevated the state folder is
-refused, by design (`state folder: FAILED: ... will not be trusted with the credential`).
-`leave` needs the service stopped first (it takes the state folder's lock).
+asking is an elevated administrator. From a prompt that is not elevated the command does not
+get that far: the data folder admits SYSTEM, Administrators and the service's account only,
+so the settings file cannot be opened, and the command ends with `error: the settings file
+C:\ProgramData\swarmscribe-follower\follower.env cannot be read: Permission denied` and exit
+2 (what the code does; not seen against a real service's folder). `leave` needs the service
+stopped first (it takes the state folder's lock).
 
-The service's registration names the interpreter and the follower's environment by their
-paths. After an upgrade that replaces either (`uv tool upgrade`, `uv tool install` again, a
-new Python), run `service uninstall` and `service install` again. `service uninstall` removes
-the service and keeps `C:\ProgramData\swarmscribe-follower`, which holds the credential; it
-stops the service first, and the name may stay busy for up to the grace period (900 s as
-installed) before it can be registered again.
+**To upgrade** (not run). The service's registration names the interpreter and the
+follower's environment by their paths, and while the service runs its interpreter and
+libraries are in use, so an install over them can fail part-way. The order, in an elevated
+PowerShell with `$root`, the five `$env:UV_...` lines and `$python` of the install set again:
+
+```
+sc.exe stop SwarmScribeFollower
+(Get-Service SwarmScribeFollower).WaitForStatus('Stopped', '00:16:00')
+& "$root\bin\swarmscribe-follower.exe" service uninstall
+uv tool install --reinstall --python $python --find-links dist --constraints dist\follower-constraints.txt "swarmscribe-follower[cuda]"
+& "$root\bin\swarmscribe-follower.exe" service install
+sc.exe start SwarmScribeFollower
+```
+
+The stop lets a recording in hand finish or hands it back, which can take up to the grace
+period (900 s as installed): the second line waits until the service has stopped, and
+nothing is installed before that. `service uninstall` removes the registration (by itself it
+would also stop a running service, and the name could then stay busy for up to the grace
+period); it keeps `C:\ProgramData\swarmscribe-follower`, with the settings, the token and
+the credential, so the follower comes back as itself. `--reinstall` is needed: without it uv
+answers that the tool `is already installed` and changes nothing. If the Python is to be a
+new one, install it first, as in the install above.
 
 ### Stopping, and what restarts it
 
@@ -2118,18 +2220,20 @@ is from it.
   again it is the same follower; killed with `SIGKILL` it is restarted and the recording
   redone; `MemoryMax=` refuses an hour-long recording; drained it exits 0 and stays stopped;
   revoked it exits 4 and is not restarted; unable to work it is restarted and then left
-  failed. It passed twice; in the second run, with the harness fixed after review, the
-  follower registered in 24 s after `systemctl enable --now`, the 900 s stop finished the
-  recording in 39 s, the 1 s stop handed it back in 1.5 s, and the whole `run` took 3 min
-  49 s. In a separate run of the planner's, in a plain container with the GPU passed in (an
+  failed. It passed three times; in the latest run, after the final review's fixes, the
+  follower registered in 23 s after `systemctl enable --now`, the 900 s stop finished the
+  recording in 37 s, the 1 s stop handed it back in 1.0 s, and the whole `run` took 3 min
+  34 s. In a separate run of the planner's, in a plain container with the GPU passed in (an
   RTX 4090), `doctor` loaded and ran `tiny.en` on the GPU with no `LD_LIBRARY_PATH`, which the
   engine alone could not (`Library libcublas.so.12 is not found`).
 - **Windows, in a console, without administrator rights.** `e2e/follower-windows/run_e2e.py`
-  installs the follower with its `cuda` extra on uv's Python and runs the service's own
-  command (the real interpreter with `service_boot.py`) in a console, on an RTX 4090 with
-  `large-v3`. It passed once on the GPU (1 min 13 s) and once on the CPU with `tiny.en`
-  (45 s): the follower registered (in 5 s on the GPU), the stop control arriving mid-job handed
-  the recording back and ended it in 0.4 s with `SERVICE_STOPPED`, it came back as the same
+  installs the follower with its `cuda` extra on uv's Python, its files copied
+  (`UV_LINK_MODE=copy`), in a folder of the user's, and runs the service's own command (the
+  real interpreter, isolated, with `service_boot.py`) in a console, on an RTX 4090 with
+  `large-v3`. In its latest runs, after the final review's fixes, it passed once on the GPU
+  (1 min 17 s) and once on the CPU with `tiny.en` (44 s); the earlier runs are in the record.
+  The follower registered (in 5 s on the GPU), the stop control arriving mid-job handed
+  the recording back and ended it in 2.4 s with `SERVICE_STOPPED`, it came back as the same
   follower, revocation was reported as a stop with error 4, and a machine that could not do
   the work ended with code 3 and no `SERVICE_STOPPED`. What the service tells Windows and what
   its controls do is also tested on every platform, and the follower's tests are a CI job
@@ -2141,6 +2245,14 @@ is from it.
   the procedure is in the record, under "The owner's run (needs an administrator)", and its
   result is not filled in. Until it is, the Windows service is built and tested as far as
   tests reach, and not proven as a service.
+- **Not run: the machine-wide install under `C:\Program Files`, and the service account
+  reading it.** Every install so far was made without administrator rights, in a folder of
+  the user's. That a `UV_LINK_MODE=copy` install under `C:\Program Files` gives files the
+  service's account can read and an ordinary user cannot change rests on a measurement
+  elsewhere (in a scratch folder, copied files took the folder's inherited list and
+  hard-linked ones kept the cache's) and on `service install`'s check of the access lists,
+  which on a real install has only been seen to refuse (its tests make it pass, with real
+  lists and a stand-in owner). The upgrade orders, on both systems, are not run either.
 - **Not run: a real Linux host, a GPU under the systemd unit, a reboot on either system.**
   Starting at boot rests on `WantedBy=multi-user.target` and on the Windows service's start
   type, not on a run. The record lists the rest: other distributions, systemd versions and

@@ -47,32 +47,42 @@ The GPU, separately: in a plain container from the same image with `--gpus all` 
 (float16) loaded and ran`. The engine alone in that environment, without the follower's
 loading of the library, failed with `Library libcublas.so.12 is not found or cannot be loaded`.
 
-## The run of Task 7 (plan F4a)
+## The runs of Task 7 (plan F4a)
 
-Run on 2026-10-06, from the branch `follower-f4` at `735dc75`, on the same Windows 11 machine.
-The scenario ran once and passed.
+Both on 2026-10-06, on the same Windows 11 machine (Docker 29.8.1, uv 0.12.22), against the
+leader image `swarmscribe-leader:f4-e2e` built from the branch `follower-f4`. In the machine:
+systemd 252 (252.39-1~deb12u2), Debian GNU/Linux 12 (bookworm), uv 0.12.22
+(x86_64-unknown-linux-gnu); `cmd /c ver`: `Microsoft Windows [Version 10.0.26200.9457]`.
 
-- Versions, from the commands: `cmd /c ver`: `Microsoft Windows [Version 10.0.26200.9457]`;
-  `docker version --format '{{.Server.Version}}'`: `29.8.1`; `python -m uv --version`:
-  `uv 0.12.22 (70fe1196a 2026-10-01 x86_64-pc-windows-msvc)`; in the machine,
-  `systemctl --version | head -1`: `systemd 252 (252.39-1~deb12u2)`, `/etc/os-release`:
-  `Debian GNU/Linux 12 (bookworm)`, `uv --version`: `uv 0.12.22 (x86_64-unknown-linux-gnu)`,
-  Python `3.12.15` (the one uv fetched into `/opt/swarmscribe-follower/python`).
-- The leader image `swarmscribe-leader:f4-e2e` already existed from this branch; the build was
-  all cache hits.
-- How the driver was started: `.venv/Scripts/python.exe e2e/follower-systemd/run_e2e.py ...`
-  with `UV="python -m uv"`, not through `python -m uv run`. `uv run` overwrites the `UV`
-  environment variable with the path of `uv.exe`, which the driver's `shlex.split` then breaks
-  on its backslashes (`FileNotFoundError` on the first `uv build`). The driver was not changed.
+### First run, at `735dc75`: passed once, with a harness that was then fixed
+
+- Launched with the venv's python (`.venv/Scripts/python.exe e2e/follower-systemd/run_e2e.py`,
+  `UV="python -m uv"`), because the driver did not work under `uv run` on Windows: `uv run`
+  overwrote `UV` with the path of `uv.exe`, which the driver split on its backslashes.
+- `up` `real 0m16.554s`; `run` `real 4m32.316s`; `down` `real 0m1.877s`. The last line of `run`:
+  `passed (tiny.en on cpu, systemd 252): installed with uv tool install and registered in 22 s; a stop with 900 s of grace finished the recording (50 s) and one with 1 s released it (3.0 s, no attempt counted); a killed follower was restarted and its recording redone; MemoryMax= refused an hour; drain exited 0 and stayed stopped; revoke exited 4 and was not restarted; exit 3 was restarted 5 times, then left failed`
+- **Its "nothing is listening" result is not evidence.** The machine's image had no `ss`, so
+  that check of the harness could not fail. The harness was fixed on review (`369e26a`), and
+  the second run is the one that counts for it. The same review made step 9 wait for a new
+  follower id and reset the unit's start counter, and step 10 read only the journal written
+  after it began; the first run's results for those steps were obtained without those fixes.
+
+### Second run, at `369e26a`, with the fixed harness: passed
+
+- Launched with the brief's own command: `python -m uv run python e2e/follower-systemd/run_e2e.py <cmd>`.
+- The leader image was rebuilt (cache hits, `real 0m2.543s`); `up` rebuilt the machine's
+  image, which now installs iproute2 (`/usr/bin/ss` exists in the machine).
 - `up`: `up: a leader at http://follower-systemd-leader:8080 and a machine with systemd 252
-  (252.39-1~deb12u2)`; `real 0m16.554s`.
-- `run`, `real 4m32.316s`:
+  (252.39-1~deb12u2)`; `real 0m13.386s`.
+- `run`, `real 3m49.189s`:
 
   ```
-  passed (tiny.en on cpu, systemd 252): installed with uv tool install and registered in 22 s; a stop with 900 s of grace finished the recording (50 s) and one with 1 s released it (3.0 s, no attempt counted); a killed follower was restarted and its recording redone; MemoryMax= refused an hour; drain exited 0 and stayed stopped; revoke exited 4 and was not restarted; exit 3 was restarted 5 times, then left failed
+  passed (tiny.en on cpu, systemd 252): installed with uv tool install and registered in 24 s; a stop with 900 s of grace finished the recording (39 s) and one with 1 s released it (1.5 s, no attempt counted); a killed follower was restarted and its recording redone; MemoryMax= refused an hour; drain exited 0 and stayed stopped; revoke exited 4 and was not restarted; exit 3 was restarted 5 times, then left failed
   ```
 
-- The machine looked at by hand before `down` (step 4's output, whole):
+  The driver's listening check (`ss -Hltnp`, matching the follower's pid) is part of that
+  pass: it ran with `ss` present and found no listening socket of the follower.
+- The machine looked at by hand before `down`:
 
   ```
   Result=exit-code
@@ -91,9 +101,8 @@ The scenario ran once and passed.
   Failed to start swarmscribe-follower.service - SwarmScribe follower.
   ```
 
-- `down`: `real 0m1.877s`, no output. Afterwards no container, network or volume named
-  `follower-systemd*` remained (`docker ps -a`, `docker network ls`, `docker volume ls`); the
-  images `follower-systemd:e2e` and `swarmscribe-leader:f4-e2e` were kept.
+- `down`: `real 0m1.729s`; afterwards no container, network or volume named `follower-systemd*`
+  was left. The images `follower-systemd:e2e` and `swarmscribe-leader:f4-e2e` were kept.
 
 ## What this does not prove
 

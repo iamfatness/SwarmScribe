@@ -1,7 +1,9 @@
 {{- if .Values.ingress.enabled }}
 {{- $host := include "swarmscribe-leader.host" . }}
 {{- $service := include "swarmscribe-leader.fullname" . }}
-# Explicit paths under /v1, never "/" and never the probes (the validation refuses them).
+# Explicit paths, each /v1 or under it and matched as Exact or Prefix: never "/", never a
+# probe, never a pattern (the schema and the validation refuse them). No default backend
+# and one rule, for the host of publicUrl: nothing else of the leader is published.
 # File links carry a signed token in their path: see values.yaml on request logging.
 apiVersion: networking.k8s.io/v1
 kind: Ingress

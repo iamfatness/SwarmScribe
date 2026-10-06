@@ -9,7 +9,12 @@
 # Delete policy: before-hook-creation removes the previous Job when the next one is made, so
 # an old Job never blocks an upgrade; hook-succeeded removes a Job that worked. A FAILED Job
 # is kept (hook-failed is deliberately not listed), so `kubectl logs job/...` shows why, and
-# the failed hook fails the install or upgrade.
+# the failed hook fails the install or upgrade. What the log holds: for settings the leader
+# refuses, one line per setting and exit status 2; for a migration that failed or a database
+# that cannot be reached, the error, which may be a long Python traceback, and exit status
+# 1. A pod that never started (no Secret, a wrong key, an image that cannot be pulled) has
+# no log: `kubectl describe pod` says why. extraEnv is not passed to this Job, and neither
+# are podLabels and podAnnotations.
 #
 # During a pre-upgrade migration the old pods keep running against the new schema, and stay
 # Ready: the leader's /readyz is ready when the schema is its own or newer. Migrations must
@@ -36,6 +41,7 @@ spec:
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false
+      enableServiceLinks: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

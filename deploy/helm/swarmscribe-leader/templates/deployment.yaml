@@ -39,6 +39,9 @@ spec:
     spec:
       serviceAccountName: {{ include "swarmscribe-leader.serviceAccountName" . }}
       automountServiceAccountToken: false
+      # No variable per Service of the namespace: a Service named so that its variable
+      # begins SWARMSCRIBE_ would otherwise be read as a setting.
+      enableServiceLinks: false
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -91,7 +94,8 @@ spec:
             failureThreshold: 3
           {{- if gt (int .Values.preStopSleepSeconds) 0 }}
           # The pod is taken out of the Service while it still answers: only then is the
-          # leader told to stop, and it finishes the requests it has.
+          # leader told to stop. It then finishes the requests it has, for as long as the
+          # grace period lasts.
           lifecycle:
             preStop:
               exec:

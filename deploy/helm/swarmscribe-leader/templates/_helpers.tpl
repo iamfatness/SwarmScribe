@@ -64,8 +64,12 @@ is https and has no port. */}}
 {{- end }}
 {{- $rest := $url | trimPrefix "https://" | trimPrefix "http://" }}
 {{- $host := regexReplaceAll ":[0-9]{1,5}$" $rest "" }}
+{{- $port := trimPrefix (printf "%s:" $host) $rest }}
 {{- if or (not (or $https (hasPrefix "http://" $url))) (not (regexMatch `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$` $host)) (gt (len $host) 253) (regexMatch `(^|\.)[0-9]+$` $host) }}
 {{- fail (printf "publicUrl must be exactly https://<lowercase DNS hostname>, with an optional :port: no path, query, fragment, user, uppercase letters or IP address (got %q)" $url) }}
+{{- end }}
+{{- if and (ne $host $rest) (or (lt (atoi $port) 1) (gt (atoi $port) 65535)) }}
+{{- fail (printf "publicUrl: %s is not a port (1 to 65535) (got %q)" $port $url) }}
 {{- end }}
 {{- if .Values.ingress.enabled }}
 {{- if not $https }}
@@ -112,58 +116,104 @@ bad mapping fails the render and not every pod at start-up. */}}
 {{- if and (or $entra $google) (not (or $admin.entraGroups $admin.googleGroups $admin.emails $admin.domains)) }}
 {{- fail "roles.admin names nobody: with sign-in on, the first administrator is whoever roles.admin lists (a group, an email or a domain), and nothing else creates one" }}
 {{- end }}
-{{- /* Names the chart sets itself or reads from the Secret, without the prefix. The leader
-reads its environment case-insensitively, so every comparison is on the upper-cased name. */}}
-{{- $owned := list "PUBLIC_URL" "ENTRA_TENANT_ID" "ENTRA_CLIENT_ID" "GOOGLE_CLIENT_ID" "GOOGLE_HOSTED_DOMAIN" }}
-{{- $secret := list "DATABASE_URL" "LINK_KEY" "GOOGLE_SERVICE_ACCOUNT" }}
-{{- /* The twelve role lists (roles.*). ROLE_CACHE_SECONDS is not one: it goes in settings. */}}
-{{- $roleList := "^ROLE_(VIEWER|OPERATOR|ADMIN)_" }}
-{{- range $name, $_ := .Values.settings }}
-{{- $upper := upper $name }}
-{{- if or (has $upper $secret) (hasSuffix "_SECRET" $upper) }}
-{{- fail (printf "settings.%s is a secret: secrets come from secrets.existingSecret, never from values" $name) }}
+{{- /* `settings` takes the names of swarmscribe-leader.settingNames and no other: a secret
+(they come from the Secret), a name another value sets (publicUrl, oidc, roles) and a
+misspelt name (the leader ignores a variable it does not know, so it would be silently
+without effect) are all refused. The schema says the same; this is the second line. */}}
+{{- $allowed := splitList " " (include "swarmscribe-leader.settingNames" .) }}
+{{- range $name, $value := .Values.settings }}
+{{- if not (has $name $allowed) }}
+{{- fail (printf "settings.%s is not a setting the chart passes on. settings takes %s. Secrets come from secrets.existingSecret; publicUrl, oidc and roles set the others" $name (join ", " $allowed)) }}
 {{- end }}
-{{- if or (has $upper $owned) (regexMatch $roleList $upper) }}
-{{- fail (printf "settings.%s is set by the chart: use publicUrl, oidc or roles" $name) }}
-{{- end }}
-{{- if not (regexMatch "^[A-Z][A-Z0-9_]*$" $name) }}
-{{- fail (printf "settings key %q must match ^[A-Z][A-Z0-9_]*$ (an upper-case environment name without the SWARMSCRIBE_ prefix)" $name) }}
+{{- if not (or (kindIs "string" $value) (kindIs "float64" $value) (kindIs "int64" $value) (kindIs "int" $value)) }}
+{{- fail (printf "settings.%s must be a number or a string (got %s)" $name (kindOf $value)) }}
 {{- end }}
 {{- end }}
+{{- /* The leader's own two rules across settings (config.py), with its defaults for what is
+not set: a leader that broke one would refuse to start, and the migration Job with it. */}}
+{{- $settings := .Values.settings | default dict }}
+{{- $lease := atoi (include "swarmscribe-leader.settingValue" (get $settings "LEASE_SECONDS" | default 120)) }}
+{{- $heartbeat := atoi (include "swarmscribe-leader.settingValue" (get $settings "HEARTBEAT_SECONDS" | default 30)) }}
+{{- $gone := atoi (include "swarmscribe-leader.settingValue" (get $settings "FOLLOWER_GONE_AFTER_SECONDS" | default 600)) }}
+{{- if ge $heartbeat $lease }}
+{{- fail (printf "settings: HEARTBEAT_SECONDS (%d) must be shorter than LEASE_SECONDS (%d); the leader's defaults are 30 and 120" $heartbeat $lease) }}
+{{- end }}
+{{- if le $gone $lease }}
+{{- fail (printf "settings: FOLLOWER_GONE_AFTER_SECONDS (%d) must be longer than LEASE_SECONDS (%d); the leader's defaults are 600 and 120" $gone $lease) }}
+{{- end }}
+{{- /* extraEnv is for what is not a setting of the leader (a proxy, a CA bundle's path). The
+leader reads its environment case-insensitively, so the prefix is compared in upper case. */}}
+{{- $extra := list }}
 {{- range .Values.extraEnv }}
-{{- $upper := upper (toString .name) }}
-{{- if hasPrefix "SWARMSCRIBE_" $upper }}
-{{- $base := trimPrefix "SWARMSCRIBE_" $upper }}
-{{- if or (has $base $secret) (hasSuffix "_SECRET" $base) (has $base $owned) (regexMatch $roleList $base) }}
-{{- fail (printf "extraEnv %s collides with a variable the chart owns or reads from the Secret: use secrets.existingSecret, publicUrl, oidc or roles" .name) }}
+{{- if hasPrefix "SWARMSCRIBE_" (upper (toString .name)) }}
+{{- fail (printf "extraEnv %s is a setting of the leader: secrets come from secrets.existingSecret, and publicUrl, oidc, roles and settings set the others (those reach the migration Job too; extraEnv does not)" .name) }}
+{{- end }}
+{{- if has .name $extra }}
+{{- fail (printf "extraEnv %s is listed twice" .name) }}
+{{- end }}
+{{- if and (hasKey . "value") (hasKey . "valueFrom") }}
+{{- fail (printf "extraEnv %s has both value and valueFrom" .name) }}
+{{- end }}
+{{- $extra = append $extra .name }}
+{{- end }}
+{{- /* The chart's own labels and its checksum are not the operator's to replace: a changed
+selector label fails at the API server, after the migration hook has already run. */}}
+{{- range $key, $_ := .Values.podLabels }}
+{{- if or (hasPrefix "app.kubernetes.io/" $key) (eq $key "helm.sh/chart") }}
+{{- fail (printf "podLabels must not set %s: the chart sets it, and the Deployment's selector, the Service and the NetworkPolicy match on it" $key) }}
 {{- end }}
 {{- end }}
+{{- if hasKey .Values.podAnnotations "checksum/settings" }}
+{{- fail "podAnnotations must not set checksum/settings: the chart sets it, so that a changed setting restarts the pods" }}
 {{- end }}
 {{- if not .Values.storage.volumes }}
 {{- fail "storage.volumes is required: the leader's only storage backend today is a folder on a filesystem, so without a volume no location can be added. Name a PersistentVolumeClaim you created (see values.yaml)" }}
 {{- end }}
 {{- $names := list }}
 {{- $paths := list }}
-{{- range .Values.storage.volumes }}
-{{- if eq (empty .existingClaim) (empty .volume) }}
-{{- fail (printf "storage.volumes %q needs exactly one of existingClaim and volume" .name) }}
+{{- range $entry := .Values.storage.volumes }}
+{{- if eq (empty $entry.existingClaim) (empty $entry.volume) }}
+{{- fail (printf "storage.volumes %q needs exactly one of existingClaim and volume" $entry.name) }}
 {{- end }}
-{{- if and .volume (hasKey .volume "emptyDir") }}
-{{- fail (printf "storage.volumes %q is an emptyDir: every pod would get a folder of its own, and it is lost with the pod. Recordings need a volume every replica sees" .name) }}
+{{- /* A volume source is one of three kinds that can hold files every replica sees. The
+others are a folder per pod (emptyDir, ephemeral), a folder per node (hostPath), or not
+storage at all (secret, configMap, projected, downwardAPI: a projected volume could also put
+a service-account token into a pod the chart says has none). */}}
+{{- range $kind, $_ := ($entry.volume | default dict) }}
+{{- if eq $kind "emptyDir" }}
+{{- fail (printf "storage.volumes %q is an emptyDir: every pod would get a folder of its own, and it is lost with the pod. Recordings need a volume every replica sees" $entry.name) }}
+{{- else if eq $kind "ephemeral" }}
+{{- fail (printf "storage.volumes %q is an ephemeral volume: every pod would get a volume of its own, and it is lost with the pod. Recordings need a volume every replica sees" $entry.name) }}
+{{- else if eq $kind "hostPath" }}
+{{- fail (printf "storage.volumes %q is a hostPath: a folder of one node, so pods on two nodes would see different files, and it opens the node's own filesystem to the pod. Use a claim, nfs or csi" $entry.name) }}
+{{- else if not (has $kind (list "persistentVolumeClaim" "nfs" "csi")) }}
+{{- fail (printf "storage.volumes %q: a volume of kind %s cannot hold the recordings. Use existingClaim, or a volume of kind persistentVolumeClaim, nfs or csi" $entry.name $kind) }}
 {{- end }}
-{{- $path := clean .mountPath }}
-{{- if or (ne $path .mountPath) (eq $path "/") (eq $path "/app") (hasPrefix "/app/" $path) }}
-{{- fail (printf "storage.volumes %q: mountPath %q must be a clean absolute path, not / and not under /app (the leader's own files)" .name .mountPath) }}
 {{- end }}
+{{- $path := clean $entry.mountPath }}
+{{- if or (ne $path $entry.mountPath) (eq $path "/") }}
+{{- fail (printf "storage.volumes %q: mountPath %q must be a clean absolute path, and not /" $entry.name $entry.mountPath) }}
+{{- end }}
+{{- range $root := list "/app" "/bin" "/boot" "/dev" "/etc" "/lib" "/lib64" "/proc" "/run" "/sbin" "/sys" "/tmp" "/usr" }}
+{{- if or (eq $path $root) (hasPrefix (printf "%s/" $root) $path) }}
+{{- fail (printf "storage.volumes %q: mountPath %q is %s or under it, which is the image's own (the leader's files are in /app, and it needs no /tmp). Mount storage somewhere of its own, for example /data" $entry.name $entry.mountPath $root) }}
+{{- end }}
+{{- end }}
+{{- with $entry }}
 {{- if or (has .name $names) (has $path $paths) }}
 {{- fail (printf "storage.volumes %q: a name or mountPath is used twice" .name) }}
 {{- end }}
 {{- $names = append $names .name }}
 {{- $paths = append $paths $path }}
 {{- end }}
+{{- end }}
+{{- /* Every published path is /v1 or under it, matched as Exact or Prefix. Nothing else can
+then reach "/" or a probe: not another prefix, and not a pattern (ImplementationSpecific is
+whatever the controller makes of it: "/*" is everything on some). */}}
 {{- range .Values.ingress.paths }}
-{{- if or (eq .path "/") (hasPrefix "/healthz" .path) (hasPrefix "/readyz" .path) }}
-{{- fail (printf "ingress.paths must not hold %q: \"/\" and the probes are never published (/readyz tells an anonymous caller whether the database is up). Everything the leader serves to the outside is under /v1" .path) }}
+{{- $path := toString .path }}
+{{- if or (not (regexMatch "^/v1(/|$)" $path)) (contains ".." $path) (contains "//" $path) (not (has .pathType (list "Exact" "Prefix"))) }}
+{{- fail (printf "ingress.paths must not hold %q as %s: every path is /v1 or under it, as Exact or Prefix. \"/\" and the probes are never published (/readyz tells an anonymous caller whether the database is up), and everything the leader serves to the outside is under /v1" $path (toString .pathType)) }}
 {{- end }}
 {{- end }}
 {{- if and .Values.ingress.enabled (not .Values.ingress.tls.secretName) }}
@@ -182,7 +232,37 @@ reads its environment case-insensitively, so every comparison is on the upper-ca
 {{- if and .Values.networkPolicy.ingress.from .Values.networkPolicy.ingress.anySource }}
 {{- fail "networkPolicy.ingress.from and networkPolicy.ingress.anySource are both set: choose one" }}
 {{- end }}
+{{- /* In a NetworkPolicy rule an empty list of peers means every address and an empty list
+of ports means every port: an empty value would open the policy, not close it. */}}
+{{- if not .Values.networkPolicy.egress.dns.peers }}
+{{- fail "networkPolicy.egress.dns.peers is empty: a rule without peers allows port 53 to every address. Name the cluster's DNS (the default is kube-dns in kube-system)" }}
 {{- end }}
+{{- if not .Values.networkPolicy.egress.https.cidrs }}
+{{- fail "networkPolicy.egress.https.cidrs is empty: a rule without peers allows every address, the cloud metadata addresses included. Name the ranges the identity providers are in (a leader without sign-in gets no HTTPS egress at all)" }}
+{{- end }}
+{{- if not .Values.networkPolicy.egress.https.ports }}
+{{- fail "networkPolicy.egress.https.ports is empty: a rule without ports allows every port" }}
+{{- end }}
+{{- range $index, $rule := .Values.networkPolicy.egress.extra }}
+{{- if or (not $rule.to) (not $rule.ports) }}
+{{- fail (printf "networkPolicy.egress.extra[%d] needs both `to` and `ports`, neither empty: without `to` it allows every address, without `ports` every port" $index) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/* The names `settings` takes: every setting of the leader (config.py) that is not a
+secret and that no other value of the chart sets. values.schema.json holds the same list,
+and ci/check_render.py derives it from config.py and fails when the three differ. */}}
+{{- define "swarmscribe-leader.settingNames" -}}
+LEASE_SECONDS HEARTBEAT_SECONDS MAX_ATTEMPTS CLAIM_RETRY_AFTER REAPER_INTERVAL_SECONDS SCANNER_INTERVAL_SECONDS FOLLOWER_GONE_AFTER_SECONDS DOWNLOAD_LINK_TTL_SECONDS UPLOAD_LINK_TTL_SECONDS LINKS_REFRESH_MIN_SECONDS ROLE_CACHE_SECONDS
+{{- end }}
+
+{{/* One setting's value as the leader must read it. A string is passed as written. A number
+is written out in full: Helm holds every number of a values file as a float, and printed as
+one, 1000000 would arrive as "1e+06", which the leader refuses. */}}
+{{- define "swarmscribe-leader.settingValue" -}}
+{{- if kindIs "string" . }}{{ . }}{{ else }}{{ toJson . }}{{ end }}
 {{- end }}
 
 {{/* Non-secret settings as a YAML map of environment names to strings. */}}
@@ -208,7 +288,7 @@ SWARMSCRIBE_ROLE_{{ upper $role }}_{{ $suffix }}: {{ join "," . | quote }}
 {{- end }}
 {{- end }}
 {{- range $name, $value := .Values.settings }}
-SWARMSCRIBE_{{ $name }}: {{ $value | toString | quote }}
+SWARMSCRIBE_{{ $name }}: {{ include "swarmscribe-leader.settingValue" $value | quote }}
 {{- end }}
 {{- end }}
 
@@ -248,13 +328,16 @@ SWARMSCRIBE_{{ $name }}: {{ $value | toString | quote }}
 {{- end }}
 {{- end }}
 
-{{/* The leader pods. fsGroup: the storage volumes are opened with the leader's group. */}}
+{{/* The leader pods. fsGroup: the storage volumes are opened with the leader's group
+(storage.fsGroup: null leaves the volumes' ownership alone). */}}
 {{- define "swarmscribe-leader.podSecurityContext" -}}
 runAsNonRoot: true
 runAsUser: 10001
 runAsGroup: 10001
+{{- if not (kindIs "invalid" .Values.storage.fsGroup) }}
 fsGroup: {{ .Values.storage.fsGroup }}
 fsGroupChangePolicy: OnRootMismatch
+{{- end }}
 {{- with .Values.storage.supplementalGroups }}
 supplementalGroups:
   {{- toYaml . | nindent 2 }}

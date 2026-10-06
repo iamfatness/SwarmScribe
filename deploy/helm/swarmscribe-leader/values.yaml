@@ -2,6 +2,8 @@
 # one of `oidc.entra` / `oidc.google` with an administrator under `roles.admin`, at least
 # one entry in `storage.volumes`, and with the NetworkPolicy on (the default)
 # `networkPolicy.egress.postgres.peers` and `networkPolicy.ingress.from`.
+# A key this file does not have is refused (values.schema.json): a misspelt one would
+# otherwise be silently without effect. Kubernetes 1.27 or later.
 
 # Names. fullnameOverride replaces <release>-swarmscribe-leader as the base of every object
 # name; either way the base is cut to 55 characters, so that -migrate still fits the 63 a
@@ -13,8 +15,9 @@ fullnameOverride: ""
 # credentials are in Postgres, the reaper and the scanner run in one replica at a time
 # (advisory locks), and any replica serves any file link. Two conditions come with more
 # than one: every replica must see the same files (storage.volumes, below), and Postgres
-# must have room for 15 connections per replica (SQLAlchemy's default pool: 5, and 10 of
-# overflow) plus one for the migration job.
+# must have room for 15 connections per pod (SQLAlchemy's default pool: 5, and 10 of
+# overflow). A rollout runs one pod more than replicaCount (maxSurge 1) and the migration
+# Job takes one connection: allow 15 x (replicaCount + 1) + 1, which is 46 for two replicas.
 replicaCount: 2
 
 # The image is not published: there is no working default. Build it and load it into the
@@ -44,6 +47,8 @@ secrets:
   keys:
     # SWARMSCRIBE_DATABASE_URL: the leader's own Postgres,
     # e.g. postgresql://leader:...@db.internal:5432/swarmscribe
+    # For TLS to the database add ?ssl=require to the URL (encrypted, the server's
+    # certificate not verified). The chart has no way to mount a private CA for Postgres.
     databaseUrl: database-url
     # SWARMSCRIBE_LINK_KEY: at least 32 random characters
     # (python -c "import secrets; print(secrets.token_urlsafe(48))"). It signs every file
@@ -99,19 +104,37 @@ roles:
     emails: []
     domains: []
 
-# Other non-secret settings, without the SWARMSCRIBE_ prefix, for example
-#   LEASE_SECONDS: "120"
-#   HEARTBEAT_SECONDS: "30"
-#   SCANNER_INTERVAL_SECONDS: "30"
-# Names are upper case (^[A-Z][A-Z0-9_]*$). The render refuses a secret (DATABASE_URL,
-# LINK_KEY, *_SECRET, GOOGLE_SERVICE_ACCOUNT, in any letter case) and a name the chart sets
-# itself (PUBLIC_URL, the oidc ones and the twelve ROLE_<role>_<list> names; ROLE_CACHE_SECONDS
-# is an ordinary setting and goes here).
+# The leader's other settings, without the SWARMSCRIBE_ prefix. These eleven names and no
+# other (the leader's defaults in brackets; seconds unless said):
+#   LEASE_SECONDS [120]                how long a follower holds a job without a heartbeat
+#   HEARTBEAT_SECONDS [30]             must be shorter than LEASE_SECONDS
+#   MAX_ATTEMPTS [3]                   tries per job
+#   CLAIM_RETRY_AFTER [10]             what a follower is told to wait when there is no job
+#   REAPER_INTERVAL_SECONDS [15]       may be a fraction
+#   SCANNER_INTERVAL_SECONDS [30]      may be a fraction
+#   FOLLOWER_GONE_AFTER_SECONDS [600]  must be longer than LEASE_SECONDS
+#   DOWNLOAD_LINK_TTL_SECONDS [1800]
+#   UPLOAD_LINK_TTL_SECONDS [7200]
+#   LINKS_REFRESH_MIN_SECONDS [60]     0 is allowed
+#   ROLE_CACHE_SECONDS [300]
+# for example
+#   LEASE_SECONDS: 120
+# A value is a number or a string of digits. Anything else is refused: a secret (they come
+# from the Secret), a name another value sets (publicUrl, oidc, roles), and a misspelt name,
+# which the leader would ignore without a word. They reach the migration Job as well.
 settings: {}
 
-# Extra environment for the leader container, as a list of {name, value|valueFrom}, for
-# example HTTPS_PROXY for identity-provider calls. A SWARMSCRIBE_ name that the chart owns
-# or reads from the Secret is refused, in any letter case.
+# Extra environment for the leader container, as a list of {name, value | valueFrom}: what
+# is not a setting of the leader. For example, where the identity providers are reached
+# through a proxy:
+#   - {name: HTTPS_PROXY, value: "http://proxy.internal:3128"}
+#   - {name: NO_PROXY, value: ".svc,.cluster.local"}
+# A proxy that re-signs TLS with a CA of its own also needs SSL_CERT_FILE, naming a bundle
+# INSIDE the container that holds that CA and the public ones; the chart has no value that
+# mounts such a file, so today that means an image built with it. Use valueFrom for anything
+# secret: a plain value is readable in `helm get values`. A SWARMSCRIBE_ name is refused, in
+# any letter case (settings, above), and so is a name listed twice. extraEnv is NOT passed
+# to the migration Job, which calls nobody but Postgres.
 extraEnv: []
 
 # Where recordings and transcripts live. Today the leader's only storage backend is a
@@ -119,22 +142,34 @@ extraEnv: []
 # mounts one volume you provide into every leader pod; a location's root
 # (`swarmscribe-admin locations add NAME --root /data/recordings`) is a folder inside one.
 #   - name: recordings              a DNS label, unique
-#     mountPath: /data/recordings   absolute, unique, never / or under /app
+#     mountPath: /data/recordings   absolute, unique; never /, and never the image's own
+#                                   folders (/app, /etc, /tmp, /usr and the like)
 #     existingClaim: recordings     a PersistentVolumeClaim you created ...
 #     # volume: {nfs: {server: nas.internal, path: /exports/recordings}}   ... or a volume source
 #     readOnly: false               true: recordings can be read, transcripts cannot be written
+# A volume source is one of nfs, csi and persistentVolumeClaim, written as Kubernetes
+# writes them. A csi volume here is mounted by the driver for each pod: use it only with a
+# driver that mounts a share which exists outside the pod (a file share), never one that
+# makes an empty volume per pod. Everything else is refused: emptyDir and ephemeral (a
+# folder per pod, lost with it), hostPath (a folder per node, and the node's filesystem in
+# the pod), secret, configMap, projected and downwardAPI (not storage).
 # EVERY REPLICA MUST SEE THE SAME FILES. With pods on more than one node that means a
 # ReadWriteMany claim (NFS, CephFS, Azure Files, Filestore, ...). A ReadWriteOnce claim
 # works only while every leader pod is on one node, and a rollout whose new pod lands on
 # another node hangs on "Multi-Attach error" until that pod is deleted; with such a claim
 # on a cluster of several nodes set replicaCount: 1 and updateStrategy: Recreate, and
 # accept that every upgrade is an outage of the leader. The chart cannot see a claim's
-# access mode. An emptyDir is refused: it is one folder per pod.
+# access mode.
 storage:
   volumes: []
   # The group the volumes are opened with (fsGroup); files the leader writes belong to
   # user 10001 and this group. On NFS and other volumes that ignore fsGroup, make the
-  # export writable by this group or by uid 10001 yourself.
+  # export writable by this group or by uid 10001 yourself. Where the driver honours it,
+  # the kubelet gives the WHOLE volume to this group the first time the volume's root
+  # belongs to another (fsGroupChangePolicy: OnRootMismatch): on a large archive the pod
+  # sits in ContainerCreating while it does, and files another system wrote change group.
+  # `fsGroup: null` leaves ownership alone: then the volume must already be writable by
+  # uid 10001, gid 10001 or one of supplementalGroups.
   fsGroup: 10001
   # More groups for the leader's process, to read recordings another system wrote.
   supplementalGroups: []
@@ -142,6 +177,9 @@ storage:
 # The port the leader listens on in the pod (the Service and NetworkPolicy follow it).
 port: 8080
 
+# ClusterIP: the Ingress is the way in. NodePort and LoadBalancer publish the pods' plain
+# HTTP as it is, with no TLS and with /healthz and /readyz: only behind something of your
+# own that ends TLS and publishes /v1 alone.
 service:
   type: ClusterIP
   port: 80
@@ -160,13 +198,20 @@ ingress:
     # Required when the Ingress is enabled: the leader is published over TLS only.
     secretName: ""
   # The paths sent to the leader. Everything it serves to the outside is under /v1
-  # (/v1/followers, /v1/jobs, /v1/files, /v1/admin). Never "/" and never the probes:
-  # /readyz tells an anonymous caller whether the database is up.
+  # (/v1/followers, /v1/jobs, /v1/files, /v1/admin). Each path is /v1 or under it, and its
+  # pathType is Exact or Prefix; anything else is refused, so that "/" and the probes can
+  # never be published (/readyz tells an anonymous caller whether the database is up).
+  # ImplementationSpecific is refused too: it is a pattern on some controllers.
   paths:
     - {path: /v1, pathType: Prefix}
 
 # The schema migration: a Job run as a pre-install and pre-upgrade hook, before any leader
 # pod of the new version starts. The old pods keep serving while and after it runs.
+# A migration longer than activeDeadlineSeconds needs that raised AND `helm --timeout`
+# raised with it (Helm waits 5 minutes for a hook by default). The Job's pod gets
+# nodeSelector, tolerations and imagePullSecrets, but not podLabels, podAnnotations or
+# extraEnv: on a mesh that adds a sidecar to every pod, exclude this Job in the mesh's own
+# way (a Job with a sidecar never completes).
 migrate:
   enabled: true
   backoffLimit: 3
@@ -192,7 +237,9 @@ updateStrategy: RollingUpdate
 
 # A stopping pod waits this long before the leader is told to stop, so that Services and
 # ingress controllers stop sending it new requests first. Then the leader finishes the
-# requests in hand. terminationGracePeriodSeconds must be longer than this.
+# requests in hand, for as long as the grace period lasts: what is still running when
+# terminationGracePeriodSeconds is over is cut off with the pod (the follower retries).
+# terminationGracePeriodSeconds must be longer than preStopSleepSeconds.
 preStopSleepSeconds: 5
 terminationGracePeriodSeconds: 60
 
@@ -200,6 +247,7 @@ podDisruptionBudget:
   # Rendered only when replicaCount is above 1. Unready pods stay evictable
   # (unhealthyPodEvictionPolicy: AlwaysAllow), so a database outage cannot stall a drain.
   enabled: true
+  # A number of pods, at least 1, or a percentage ("50%"). Zero would block every drain.
   maxUnavailable: 1
 
 networkPolicy:
@@ -215,7 +263,10 @@ networkPolicy:
     # objects). Your ingress controller, the follower pools in this cluster that use the
     # Service directly, a console in this cluster, for example
     #   - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: ingress-nginx}}
-    #   - podSelector: {matchLabels: {app.kubernetes.io/name: swarmscribe-follower}}
+    #   - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: transcribe}}
+    #     podSelector: {matchLabels: {app.kubernetes.io/name: swarmscribe-follower}}
+    # A podSelector WITHOUT a namespaceSelector matches pods in the leader's own namespace
+    # only; put the two in one entry, as above, for pods of another namespace.
     # Peers are matched on the address a packet arrives with: a follower that comes through
     # the Ingress arrives as the ingress controller. The kubelet's probes come from the
     # pod's own node, which most network plugins never cut off; where they are cut off,
@@ -223,6 +274,8 @@ networkPolicy:
     from: []
     # true allows any source instead (the leader authenticates every caller itself).
     anySource: false
+  # In every list below an EMPTY list is refused: in a NetworkPolicy, no peers means every
+  # address and no ports means every port, so an empty value would open the policy.
   egress:
     dns:
       # Where the pods resolve names. Add an ipBlock for NodeLocal DNSCache
@@ -241,7 +294,8 @@ networkPolicy:
       # Peers are matched AFTER Service address translation. For a Postgres inside the
       # cluster use a podSelector (with a namespaceSelector for another namespace) and the
       # pod's own port: never the Service's ClusterIP. The migration hook runs under the
-      # PREVIOUS release's policy.
+      # PREVIOUS release's policy: when the database moves, first upgrade with the new
+      # address ADDED here, then move the database, then take the old address out.
       peers: []
     https:
       # The identity providers (Entra ID and Microsoft Graph, Google): rendered only when
@@ -249,16 +303,21 @@ networkPolicy:
       # these ports except the ranges no identity provider lives in".
       ports: [443]
       cidrs: ["0.0.0.0/0", "::/0"]
-      # More ranges to cut out of 0.0.0.0/0 and ::/0, for example the cluster's own pod
-      # and service ranges.
+      # More ranges to cut out of 0.0.0.0/0 and ::/0. The default leaves addresses inside
+      # the cluster reachable on these ports (a proxy may live there): name the cluster's
+      # own pod and service ranges here to close that, e.g. ["10.244.0.0/16", "10.96.0.0/12"].
       extraExcept: []
-    # Extra raw egress rules (NetworkPolicyEgressRule objects), e.g. an HTTPS proxy.
+    # Extra egress rules, e.g. an HTTPS proxy. Each needs both `to` and `ports`:
+    #   - to: [{ipBlock: {cidr: 10.9.9.9/32}}]
+    #     ports: [{protocol: TCP, port: 3128}]
     extra: []
 
 serviceAccount:
   create: true
   name: ""
 
+# For the leader pods (not the migration Job's). The chart's own labels
+# (app.kubernetes.io/..., helm.sh/chart) and checksum/settings are refused here.
 podAnnotations: {}
 podLabels: {}
 nodeSelector: {}

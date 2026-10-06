@@ -49,7 +49,11 @@ networkPolicy:
       - namespaceSelector:
           matchLabels:
             kubernetes.io/metadata.name: traefik
-      - podSelector:
+      # Pods of another namespace: the two selectors in ONE entry.
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: transcribe
+        podSelector:
           matchLabels:
             app.kubernetes.io/name: swarmscribe-follower
   egress:

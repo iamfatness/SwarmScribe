@@ -19,7 +19,7 @@ from typing import Any, TextIO
 from pydantic import SecretStr, ValidationError
 from swarmscribe_engine import DeviceUnavailableError
 
-from . import FOLLOWER_VERSION, cudalibs, logs
+from . import FOLLOWER_VERSION, cudalibs, envfile, logs
 from .agent import Agent
 from .config import Settings
 from .credentials import CredentialFileError, CredentialStore
@@ -62,13 +62,14 @@ def load_settings(err: TextIO, **given: Any) -> Settings | None:
         return None
 
 
-def leave_settings(out: TextIO, err: TextIO) -> Settings | int:
-    """The settings for `leave`: the environment's, or, when no leader is set, the leader the
-    credential was issued by. An exit code when there is nothing to do or nothing can be
-    done: only an ABSENT credential file means "has not joined"; an invalid setting or a
-    credential file that cannot be read is an error (exit 2), never a success."""
+def stored_leader(err: TextIO) -> dict[str, Any] | int:
+    """What to add to the settings when SWARMSCRIBE_LEADER_URL is not set: the leader the
+    stored credential was issued by, so that `run`, `doctor` and `leave` work after
+    `join --leader URL` without the URL being set anywhere. Empty when a leader is set or
+    nothing is stored; an exit code when the other settings or the credential file are wrong
+    (exit 2, never taken for "has not joined")."""
     if os.environ.get("SWARMSCRIBE_LEADER_URL", "").strip():
-        return load_settings(err) or EXIT_CONFIGURATION
+        return {}
     # A placeholder leader that is never contacted: it lets the other settings (the state
     # folder above all) be validated and reported as usual.
     base = load_settings(err, leader_url="https://placeholder.invalid")
@@ -80,19 +81,32 @@ def leave_settings(out: TextIO, err: TextIO) -> Settings | int:
         print(f"error: {error}", file=err)
         return EXIT_CONFIGURATION
     if stored is None:
-        print("this follower has not joined a leader", file=out)
-        return EXIT_OK
+        return {}
     given: dict[str, Any] = {"leader_url": stored.leader_url}
     if stored.leader_url.lower().startswith("http://"):
-        given["allow_http"] = True  # it was issued under that switch; leaving needs no more
+        given["allow_http"] = True  # it was issued under that switch
+    return given
+
+
+def leave_settings(out: TextIO, err: TextIO) -> Settings | int:
+    """The settings for `leave`: the environment's, or, when no leader is set, the leader the
+    credential was issued by. An exit code when there is nothing to do or nothing can be
+    done: only an ABSENT credential file means "has not joined"; an invalid setting or a
+    credential file that cannot be read is an error (exit 2), never a success."""
+    given = stored_leader(err)
+    if isinstance(given, int):
+        return given
+    if not given and not os.environ.get("SWARMSCRIBE_LEADER_URL", "").strip():
+        print("this follower has not joined a leader", file=out)
+        return EXIT_OK
     return load_settings(err, **given) or EXIT_CONFIGURATION
 
 
-def doctor_settings(out: TextIO) -> Settings | int:
+def doctor_settings(out: TextIO, **given: Any) -> Settings | int:
     """`doctor` says what is wrong with the settings as one of its checks, in plain words,
     instead of refusing to start."""
     try:
-        return Settings()
+        return Settings(**given)
     except (ValidationError, RuntimeError) as error:
         print(f"swarmscribe-follower {FOLLOWER_VERSION}", file=out)
         if isinstance(error, ValidationError):
@@ -394,6 +408,12 @@ def parser() -> argparse.ArgumentParser:
         " 5 protocol version refused; 1 unexpected error (doctor: leader unreachable).",
     )
     top.add_argument("--version", action="version", version=f"%(prog)s {FOLLOWER_VERSION}")
+    top.add_argument(
+        "--env-file",
+        metavar="PATH",
+        help="read settings (NAME=value lines) from this file first; they win over the"
+        " environment. What the systemd unit and the Windows service use",
+    )
     commands = top.add_subparsers(dest="command", required=True, metavar="command")
     commands.add_parser("run", help="join if needed, then work until stopped")
     join = commands.add_parser("join", help="register with the leader and store the credential")
@@ -434,19 +454,34 @@ def main(
     args = parser().parse_args(argv)
     if args.command == "cuda-paths":
         return command_cuda_paths(out, err)
-    if args.command == "doctor":
-        settings = doctor_settings(out)
-        if isinstance(settings, int):
-            return settings
-    elif args.command == "leave":
+    if args.env_file:
+        try:
+            envfile.load(args.env_file)
+        except envfile.EnvFileError as error:
+            print(f"error: {error}", file=err)
+            return EXIT_CONFIGURATION
+    if args.command == "leave":
         settings = leave_settings(out, err)
         if isinstance(settings, int):
             return settings
-    else:
-        given = {"leader_url": args.leader} if args.command == "join" and args.leader else {}
-        settings = load_settings(err, **given)
+    elif args.command == "join" and args.leader:
+        settings = load_settings(err, leader_url=args.leader)
         if settings is None:
             return EXIT_CONFIGURATION
+    else:
+        # Without SWARMSCRIBE_LEADER_URL, `run` and `doctor` use the leader this follower
+        # joined (`join --leader URL` needs nothing set afterwards).
+        given = stored_leader(err) if args.command in ("run", "doctor") else {}
+        if isinstance(given, int):
+            return given
+        if args.command == "doctor":
+            settings = doctor_settings(out, **given)
+            if isinstance(settings, int):
+                return settings
+        else:
+            settings = load_settings(err, **given)
+            if settings is None:
+                return EXIT_CONFIGURATION
     logs.configure_logging(settings.log_format, stream=err)
     try:
         if args.command == "run":

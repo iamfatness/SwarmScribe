@@ -500,3 +500,37 @@ def test_the_no_leader_and_no_model_flags_reach_doctor(monkeypatch):
     assert seen == {"load_model": True, "ask_leader": False}
     assert cli.main(["doctor", "--no-model", "--no-leader"]) == 0
     assert seen == {"load_model": False, "ask_leader": False}
+
+
+def test_after_join_with_a_leader_run_and_doctor_need_no_leader_url(
+    tmp_path, leader, engine, monkeypatch
+):
+    """F1 follow-up M4: `join --leader URL` on an outside machine, and nothing else to set."""
+    monkeypatch.delenv("SWARMSCRIBE_LEADER_URL")
+    code, _out, err, _ = run_cli(tmp_path, leader, engine, "join", "--leader", BASE)
+    assert code == 0, err
+    leader.state = "draining"  # so that `run` ends by itself, after its first claim
+    asked = []
+
+    def build(settings):
+        asked.append(settings.leader_url)
+        return make_agent(tmp_path, leader, engine)
+
+    out, err = io.StringIO(), io.StringIO()
+    assert cli.main(["run"], build=build, out=out, err=err) == 0, err.getvalue()
+    assert asked == [BASE]
+    out, err = io.StringIO(), io.StringIO()
+    assert cli.main(["doctor", "--no-model", "--no-leader"], out=out, err=err) == 0
+    assert f"settings: ok (leader {BASE}, pool default)" in out.getvalue()
+
+
+def test_without_a_leader_url_and_without_a_credential_run_still_says_what_is_missing(
+    monkeypatch,
+):
+    monkeypatch.delenv("SWARMSCRIBE_LEADER_URL")
+    out, err = io.StringIO(), io.StringIO()
+    assert cli.main(["run"], out=out, err=err) == 2
+    assert "SWARMSCRIBE_LEADER_URL" in err.getvalue() or "leader_url" in err.getvalue()
+    out, err = io.StringIO(), io.StringIO()
+    assert cli.main(["doctor", "--no-model", "--no-leader"], out=out, err=err) == 2
+    assert "settings: FAILED" in out.getvalue()

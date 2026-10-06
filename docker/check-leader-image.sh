@@ -107,7 +107,8 @@ pg="leader-check-pg-$$"
 name="leader-check-$$"
 net="leader-check-net-$$"
 cleanup() {
-  docker rm -f "$name" "$name-ahead" "$name-early" "$pg" >/dev/null 2>&1 || true
+  # -v: postgres keeps its data in an anonymous volume, which would otherwise be left behind.
+  docker rm -f -v "$name" "$name-ahead" "$name-early" "$pg" >/dev/null 2>&1 || true
   docker network rm "$net" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT

@@ -18,11 +18,13 @@ image with Postgres beside it, administered with the leader's own functions thro
 token, a credential or a link.
 
 Environment: E2E_PREFIX names the containers, the network and the image (default
-`follower-systemd`); LEADER_IMAGE is the leader's test image (`swarmscribe-leader:e2e`); UV is
-how uv is run (`uv`; on the development machine `python -m uv`)."""
+`follower-systemd`); LEADER_IMAGE is the leader's test image (`swarmscribe-leader:e2e`); E2E_UV is
+how uv is run to build the wheels (default: see uv_command)."""
 
+import importlib.util
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -42,7 +44,24 @@ NETWORK, POSTGRES, LEADER, MACHINE = (
 )
 MACHINE_IMAGE = f"{PREFIX}:e2e"
 LEADER_IMAGE = os.environ.get("LEADER_IMAGE", "swarmscribe-leader:e2e")
-UV = shlex.split(os.environ.get("UV", "uv"))
+
+
+def uv_command(environ=os.environ, find_spec=importlib.util.find_spec) -> list[str]:
+    """How uv is run to build the wheels: E2E_UV if given (not named UV: `uv run` sets UV to the
+    path of uv.exe, whose backslashes a shlex split would eat); else the running interpreter's
+    own uv; else the uv that launched this driver under `uv run` (that interpreter is the
+    project's venv, which has no uv module); else `uv` on the PATH."""
+    if environ.get("E2E_UV"):
+        return shlex.split(environ["E2E_UV"], posix=os.name != "nt")
+    if find_spec("uv"):
+        return [sys.executable, "-m", "uv"]
+    launcher = environ.get("UV")
+    if launcher and Path(launcher).is_file():
+        return [launcher]
+    return ["uv"]
+
+
+UV = uv_command()
 SERVICE = "swarmscribe-follower"
 ENV_FILE = "/etc/swarmscribe-follower/follower.env"
 DROP_IN = f"/etc/systemd/system/{SERVICE}.service.d/test.conf"
@@ -67,6 +86,10 @@ INSTALL_ENV = {
 }
 # Postgres needs a moment after its container starts.
 MIGRATE = "for i in $(seq 60); do swarmscribe-leader migrate && exit 0; sleep 2; done; exit 1"
+GRACE_SECONDS = 900  # SWARMSCRIBE_FOLLOWER_SHUTDOWN_GRACE_SECONDS in the settings example
+MEMORY_LIMIT_MIB = 2500  # the MemoryMax= of step 7, and the figure the refusal must name
+EXIT_3_RESTARTS = 4  # StartLimitBurst=5: the first start, then four restarts
+NOT_RESTARTED_STATUSES = (4,)  # the unit's RestartPreventExitStatus; step 9 covers 4
 LONG_REPEATS = 96  # the 5-second speech fixture 96 times: eight minutes
 STEP_SECONDS = 180.0
 
@@ -117,8 +140,9 @@ def unit() -> dict[str, str]:
     return dict(line.split("=", 1) for line in shown.splitlines() if "=" in line)
 
 
-def journal() -> str:
-    return machine(f"journalctl -u {SERVICE} --no-pager -o cat")
+def journal(since: str | None = None) -> str:
+    after = f" --since '{since}'" if since else ""
+    return machine(f"journalctl -u {SERVICE} --no-pager -o cat{after}")
 
 
 def job(key: str) -> dict:
@@ -262,14 +286,17 @@ def scenario() -> None:
         modes == ["swarmscribe-follower 700"] * 2 + ["swarmscribe-follower 600"],
         f"the state folder or the credential is not private: {modes}",
     )
-    exposed = machine(
-        f"tr '\\0' '\\n' < /proc/{pid}/environ | grep -c '^SWARMSCRIBE_JOIN_TOKEN=' || true\n"
-        f"systemctl show {SERVICE} -p Environment --value | grep -c TOKEN || true\n"
-        "ss -Hltnp 2>/dev/null | grep -c python || true"
-    ).split()
+    # Each probe's own failure fails the step (no `|| true`, no discarded stderr); what is
+    # looked for is then matched here.
+    environ = machine(f"tr '\\0' '\\n' < /proc/{pid}/environ")
     expect(
-        exposed == ["0", "0", "0"], f"a token in the environment, or a listening port: {exposed}"
+        "SWARMSCRIBE_JOIN_TOKEN=" not in environ, "the join token is in the process's environment"
     )
+    shown = machine(f"systemctl show {SERVICE} -p Environment --value")
+    expect("TOKEN" not in shown, "a token is in the unit's environment")
+    listening = machine("ss -Hltnp")  # needs iproute2: a missing ss fails here, loudly
+    mine = [line for line in listening.splitlines() if re.search(rf"pid={pid}[,)]", line)]
+    expect(not mine, f"the follower is listening on a port: {mine}")
 
     # 2. A recording is transcribed.
     queue("short.wav", 1)
@@ -301,11 +328,11 @@ def scenario() -> None:
     stop_releases = time.monotonic() - began
     back = job("released.wav")
     expect(
-        back["state"] == "queued" and back["tried"][-1][1] == "released",
+        back["state"] == "queued" and bool(back["tried"]) and back["tried"][-1][1] == "released",
         f"a stop with 1 s of grace did not release the recording: {back}",
     )
     expect(stop_releases < 15, f"the stop took {stop_releases:.1f} s")
-    set_env("SWARMSCRIBE_FOLLOWER_SHUTDOWN_GRACE_SECONDS", "900")
+    set_env("SWARMSCRIBE_FOLLOWER_SHUTDOWN_GRACE_SECONDS", str(GRACE_SECONDS))
 
     # 5. Started again it is the same follower: the credential was kept, nothing registers.
     machine(f"systemctl start {SERVICE}")
@@ -332,14 +359,16 @@ def scenario() -> None:
 
     # 7. MemoryMax= on the unit is the memory guard's limit.
     machine(
-        f"echo 'MemoryMax=2500M' >> {DROP_IN}\n"
+        f"echo 'MemoryMax={MEMORY_LIMIT_MIB}M' >> {DROP_IN}\n"
         f"systemctl daemon-reload\nsystemctl restart {SERVICE}"
     )
     admin("silence", "talks", "an-hour.wav", "3600")
     wait("the hour to be refused", lambda: job("an-hour.wav")["state"] == "failed")
     reason = job("an-hour.wav")["failure_reason"] or ""
     expect(
-        "out_of_resources" in reason and "may use 2500 MiB" in reason and "cgroup" in reason,
+        "out_of_resources" in reason
+        and f"may use {MEMORY_LIMIT_MIB} MiB" in reason
+        and "cgroup" in reason,
         f"the hour was not refused by the unit's MemoryMax: {reason}",
     )
 
@@ -353,8 +382,17 @@ def scenario() -> None:
     expect(ended == ("inactive", "0", restarts), f"a drained follower was started again: {state}")
 
     # 9. Revoked: exit 4, and RestartPreventExitStatus keeps it out.
-    machine(f"rm /var/lib/swarmscribe-follower/state/credential.json\nsystemctl start {SERVICE}")
-    wait("a second follower to register", lambda: followers("active"))
+    # reset-failed also clears the unit's start-limit counter: the earlier steps may have
+    # started it five times inside the 600 s of StartLimitIntervalSec, and a refused start
+    # would look like a failure of the revoke.
+    machine(
+        "rm /var/lib/swarmscribe-follower/state/credential.json\n"
+        f"systemctl reset-failed {SERVICE}\nsystemctl start {SERVICE}"
+    )
+    wait(
+        "a second follower to register",
+        lambda: [row for row in followers("active") if row["id"] != first],
+    )
     admin("revoke-pool", "outside")
     wait("the revoked follower to exit", lambda: unit()["ActiveState"] == "failed", 60)
     time.sleep(5)
@@ -367,18 +405,20 @@ def scenario() -> None:
 
     # 10. Exit 3 (no GPU where one is demanded) is restarted, but not for ever.
     set_env("SWARMSCRIBE_FOLLOWER_DEVICE", "cuda")
+    since = machine("date '+%Y-%m-%d %H:%M:%S'").strip()  # the machine's clock, as journalctl's
     machine(f"systemctl reset-failed {SERVICE}\nsystemctl start {SERVICE}", check=False)
     wait(
         "systemd to give up on exit 3",
-        lambda: unit()["ActiveState"] == "failed" and "repeated too quickly" in journal(),
+        lambda: unit()["ActiveState"] == "failed"
+        and "repeated too quickly" in journal(since),
         90,
     )
     state = unit()
     expect(
-        state["ExecMainStatus"] == "3" and int(state["NRestarts"]) >= 4,
+        state["ExecMainStatus"] == "3" and int(state["NRestarts"]) >= EXIT_3_RESTARTS,
         f"exit 3 was not restarted up to the start limit: {state}",
     )
-    expect("cuda was requested" in journal(), "the journal does not say why")
+    expect("cuda was requested" in journal(since), "the journal does not say why")
 
     print(
         f"passed (tiny.en on cpu, systemd {machine('systemctl --version').split()[1]}):"
@@ -396,7 +436,16 @@ def main() -> int:
     if command not in ("up", "run", "down"):
         print(__doc__, file=sys.stderr)
         return 2
-    {"up": up, "run": scenario, "down": down}[command]()
+    try:
+        {"up": up, "run": scenario, "down": down}[command]()
+    except SystemExit as failed:
+        if command == "run" and failed.code:
+            print(
+                f"left up for inspection: {MACHINE}, {LEADER}, {POSTGRES} and the network"
+                f" {NETWORK}; remove them with `python {Path(__file__).as_posix()} down`",
+                file=sys.stderr,
+            )
+        raise
     return 0
 
 

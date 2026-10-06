@@ -117,7 +117,7 @@ database driver.
 
 ```
 swarmscribe_follower/
-  main.py         CLI: run, join, leave, doctor (F1); setup-cuda, cuda-paths, service (F4)
+  main.py         CLI: run, join, leave, doctor (F1); cuda-paths, service, --env-file (F4)
   config.py       settings from the environment (section 4.1)
   errors.py       exit codes
   agent.py        supervisor: states, signals, exit codes
@@ -131,7 +131,11 @@ swarmscribe_follower/
   credentials.py  the credential file
   health.py       /healthz and /metrics (F2)
   logs.py         JSON logging, redaction
-  windows.py      DLL placement, service control handler (F4)
+  cudalibs.py     the GPU library, loaded from its wheel (F4)
+  envfile.py      a settings file for --env-file (F4)
+  winacl.py       Windows: the state folder's access control list (F4)
+  windows.py      the Windows service: host, install commands, control handler (F4)
+  service_boot.py what the Windows service control manager starts (F4)
 ```
 
 Each module has one job and is tested alone. `agent`, `lease` and `job` take
@@ -1319,3 +1323,78 @@ follower chart (F3) and the outside-machine install (F4).
 - **Chart test (10).** `e2e/follower-kind/` installs the chart on `kind` beside a leader
   and Postgres in the cluster. It is run by hand and recorded in
   `plans/2026-10-05-follower-f3-outcomes.md`; a GPU pool has not been run on Kubernetes.
+
+**Amendments after F4** (built in plans F4a and F4b, 2026-10-05; the record is `plans/2026-10-05-follower-f4-outcomes.md`).
+- **GPU libraries in a native install (D15, 8.3).** There is no `setup-cuda` and no `LD_LIBRARY_PATH`: the
+  follower loads cuBLAS from the `nvidia-cublas-cu12` wheel into its own process, by full path, before it loads
+  a model on a GPU (`cudalibs.py`). Measured on Windows: CTranslate2 opens `cublas64_12.dll` by its bare name
+  with `LoadLibraryA`, which reads `PATH` on a python.org or uv Python but not on the Microsoft Store's, and
+  never reads `os.add_dll_directory`; a library already in the process is found on both, and on Linux.
+  `cuda-paths` prints the wheels' folders, for looking. The images keep `LD_LIBRARY_PATH`.
+- **Install (8.3).** `uv tool install --python 3.12 --find-links <folder> --constraints
+  <folder>/follower-constraints.txt "swarmscribe-follower[cuda]"`, from three wheels built from the repository
+  and `deploy/follower-constraints.txt` (`uv.lock`'s versions). The bare `uv tool install swarmscribe-follower`
+  needs the packages on an index, and nothing is published to one. A Git URL with
+  `#subdirectory=packages/follower` also works (run against a local clone, not against GitHub).
+- **Settings and the token (4.1, 8.3).** `swarmscribe-follower --env-file PATH <command>` reads `NAME=value`
+  lines into the environment first; the unit and the Windows service start the follower with it, in place of
+  `EnvironmentFile=`; a validation error names the file; top-level option abbreviations are off (`--env PATH`
+  is refused). The settings file is readable by the service's account and holds no secret. The token is
+  a file of its own beside it (`SWARMSCRIBE_JOIN_TOKEN_FILE`), readable by root or administrators and the
+  service's account, and is in no unit, registration, command line or environment. It is read whenever a
+  registration needs it, so it stays in place: a follower whose credential the leader no longer knows
+  registers again with it (a pool token; a join token is used up). `run` and `doctor` use the stored
+  credential's leader when `SWARMSCRIBE_LEADER_URL` is not set, and say so ("from the stored credential"); the
+  settings file and the environment win over the stored address; a stored plain-`http://` leader is used by
+  `run` and `doctor` only with `SWARMSCRIBE_FOLLOWER_ALLOW_HTTP` (`leave` may use it without it). With no
+  leader set and another setting wrong, `doctor` reports a failed `settings` check instead of exiting.
+- **The systemd unit (8.3, 6.5).** As listed, with `StartLimitBurst=5` in `StartLimitIntervalSec=600` and
+  `RestartSec=30`: exits 1, 2 and 3 and a kill are restarted, the fifth start in ten minutes being the last;
+  0 is final; 4 and 5 are never restarted (`RestartPreventExitStatus=4 5`). A stop is `SIGTERM`
+  (`KillMode=mixed`, `TimeoutStopSec=930`, 30 s over the 900 s grace period of the settings example). The
+  user is a static system user. Settings come from `--env-file`. The unit sets `ProtectHome=yes`, so the tool
+  directory must be outside `/home` and `/root` (the documented install uses `/opt` and `/usr/local/bin`); on
+  a GPU host the NVIDIA kernel modules must be loaded at boot, because the unit's hardening stops
+  `nvidia-modprobe` from loading them (not run: no GPU has run under the unit).
+- **The Windows service (8.3, 5.6).** It runs as its own virtual account, `NT SERVICE\SwarmScribeFollower`,
+  with its settings, token, state, models and log under `%ProgramData%\swarmscribe-follower`; the follower is
+  installed for the machine with uv's own Python. Its command is the real interpreter with `service_boot.py`
+  (the environment's `python.exe` is a launcher), and the service passes its settings file through the same
+  path as `run`. The stop control is one stop, reported "stop pending" with a wait hint of the grace period
+  plus 30 seconds; a shutdown (the pre-shutdown control) hands the job back at once. Exits 0, 4 and 5, and any
+  exit after a stop was asked for, are reported `SERVICE_STOPPED` and never restarted; exits 1, 2 and 3 end
+  the process without that report, so that the recovery actions (restart after a minute, twice; reset after a
+  day) run. It logs to a file (a start-up failure is `error: unexpected <ClassName>`). `service foreground`
+  runs the same code in a console; `--env-file` belongs to it alone and `--print` is refused with it.
+  `service install` creates the data root already protected (SYSTEM and Administrators only), checks the
+  owner of everything under it and refuses any junction or symbolic link in it, refuses a pre-existing root
+  it does not accept (remove or rename it), names the service account by SID in its grants, and says to run
+  `service uninstall` first when it fails after the service was created; `service install --print` prints
+  the plan, the lock line included (it runs only for a root that already existed). `service uninstall` says
+  the name may stay busy for up to the grace period. **As of F4 it has not run under the service control
+  manager** (that needs an administrator; the procedure is in the outcomes document).
+- **The memory guard (5.7).** The limit is `SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB`, else the smaller of the
+  machine's memory and the smallest `memory.max` from the process's own cgroup up to the root (a container's
+  limit, a unit's `MemoryMax=`, a slice's; cgroup v2: on cgroup v1 only the root's limit file is read, so a
+  unit's limit is not seen there). On Windows the guard counts the process's working set, as it counts the
+  resident set on Linux (a job object's memory limit is not read); macOS still counts the job alone.
+- **The credential on Windows (5.3).** The state folder and the credential file may be reachable only by the
+  follower's account, SYSTEM and Administrators (their access control lists are read; `winacl.py`). A folder
+  of the account's own is made so before a credential exists, on every supported Python; one that others can
+  reach is refused with exit 2 and the `icacls` command that fixes it, as is a list with an entry of a kind
+  the follower does not understand. A state folder that is itself a junction or a symbolic link is refused; a
+  link higher up its path is not checked. Deny entries are not read. When the calling process is an elevated
+  administrator the follower's own service account is trusted as well, which lets an administrator run
+  `doctor` and `leave` against the service's folder; a prompt that is not elevated is refused there.
+- **The health listener (D18).** Off in a native install, as decided: neither the unit nor the service sets
+  it. Under the Windows service the supervisor's tick comes from `run_supervised`, which the service runs.
+- **Windows CI (10).** Job `follower-windows` runs the follower package's tests on `windows-latest`. It has
+  not yet run on GitHub.
+- **Native tests (10).** `e2e/follower-systemd/` (a container with systemd as PID 1; passed twice, the second
+  run with the harness fixed after review) and `e2e/follower-windows/` (the service's command in a console, on
+  a GPU; passed once on the GPU and once on the CPU) are run by hand and recorded: the systemd proof is a
+  recorded local run, not a CI job.
+- **F4's result (11).** "Joins with one command" holds once the follower is installed (`join --leader URL
+  --token-stdin`, or the service's first start with its token file). "Survives a reboot" is not proven on
+  either system. Not run: the Windows service under the service control manager, a real Linux host, a GPU
+  under the systemd unit, a reboot on either system.

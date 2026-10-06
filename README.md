@@ -14,7 +14,7 @@ Design: [`docs/superpowers/specs/2026-10-02-swarmscribe-architecture-design.md`]
 | `swarmscribe-protocol` — leader–follower wire models | Built |
 | `swarmscribe-engine` — single-file transcriber | Built |
 | `swarmscribe-leader` — catalogue, consent, jobs, admin API and `swarmscribe-admin` | Built (local storage); cloud storage and vocabulary next |
-| `swarmscribe-follower` — the agent, its two images and its Helm chart (`deploy/helm/swarmscribe-follower`, one release per pool) | Built; the service install for outside machines is next |
+| `swarmscribe-follower` — the agent, its two images, its Helm chart (`deploy/helm/swarmscribe-follower`, one release per pool) and the native install for outside machines (a systemd unit, a Windows service) | Built; the Windows service is waiting for its first run under the service control manager (see "Run a follower on an outside machine") |
 | `swarmscribe-console` — fleet console: backend, web app, image and Helm chart (`deploy/helm/swarmscribe-console`) | Built |
 | Helm chart for the leader, and autoscaling | Not started |
 
@@ -381,17 +381,36 @@ Commands:
   means "has not joined" (exit 0); a credential file that cannot be read, or an
   invalid setting, is an error (exit 2). If the leader cannot be reached the credential is deleted
   anyway and the leader notices the silence.
+- `cuda-paths` prints the folders of the GPU libraries that the `cuda` extra installed
+  (`swarmscribe-follower[cuda]`), joined as `PATH` and `LD_LIBRARY_PATH` want them, or exits
+  `3` and says the extra is missing. The follower does not need the variable: it loads cuBLAS
+  from there itself before it loads a model on a GPU.
+- `service install | uninstall | foreground` is the Windows service; see "Run a follower on
+  an outside machine".
+
+Every command takes `--env-file PATH` before its name (`swarmscribe-follower --env-file PATH
+doctor`; the option is not abbreviated): `NAME=value` lines that are read into the
+environment first and win over it (`#` comments, nothing expanded; a mistake is reported by
+its line number and never by its content, and a validation error names the file). That is how
+the systemd unit and the Windows service are configured, and how `doctor` and `leave` are run
+by hand with the same settings. After `join --leader URL`, `run` and `doctor` use the leader
+the stored credential names when `SWARMSCRIBE_LEADER_URL` is not set, and say so (`leader
+https://... from the stored credential`); the settings file and the environment win over the
+stored address. A stored plain-`http://` leader is used by `run` and `doctor` only with
+`SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1` (`leave` may use it without, to tell the leader it is
+going). With no leader set and another setting wrong, `doctor` reports a failed `settings`
+check and `run` exits `2`.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SWARMSCRIBE_LEADER_URL` | required (except for `join --leader` and `leave`) | the leader; `https`, or `http` only with `SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1` |
-| `SWARMSCRIBE_JOIN_TOKEN`, `SWARMSCRIBE_JOIN_TOKEN_FILE` | none | a join or pool token, read only when there is no stored credential (the file wins) |
+| `SWARMSCRIBE_LEADER_URL` | required (except for `join --leader`, `leave`, and `run` and `doctor` after a join: they use the stored credential's leader) | the leader; `https`, or `http` only with `SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1` |
+| `SWARMSCRIBE_JOIN_TOKEN`, `SWARMSCRIBE_JOIN_TOKEN_FILE` | none | a join or pool token, read only when a registration needs it: with no stored credential, and again if the leader stops knowing the credential (the file wins) |
 | `SWARMSCRIBE_LEADER_CA_FILE` | none | PEM certificates trusted in addition to the public roots |
 | `SWARMSCRIBE_FOLLOWER_ALLOW_HTTP` | `0` | `1`: accept a plain `http` leader URL and plain `http` file links (development only) |
 | `SWARMSCRIBE_FOLLOWER_STARTUP_MODEL` | the device default | the model loaded and exercised at start-up, before registering; a model name or `owner/name`, in `ALLOWED_MODELS` when that is set. With `OFFLINE=1` a model that is not in the cache is exit `3`, naming this setting. An image that bakes one model sets it to that model |
 | `SWARMSCRIBE_FOLLOWER_DEVICE` | `auto` | `auto`, `cuda` or `cpu` |
 | `SWARMSCRIBE_FOLLOWER_POOL` | `default` | the pool name it reports; the token decides the real pool |
-| `SWARMSCRIBE_FOLLOWER_STATE_DIR` | the user's data folder | credential and lock file |
+| `SWARMSCRIBE_FOLLOWER_STATE_DIR` | the user's data folder | credential and lock file (on Windows it must be reachable only by this account, SYSTEM and Administrators: see "Known limits") |
 | `SWARMSCRIBE_FOLLOWER_SCRATCH_DIR` | `<state>/scratch` | working files; **everything in it is deleted** |
 | `SWARMSCRIBE_FOLLOWER_MODEL_DIR` | Hugging Face's default | model cache |
 | `SWARMSCRIBE_FOLLOWER_OFFLINE` | `0` | `1`: never download a model |
@@ -400,7 +419,7 @@ Commands:
 | `SWARMSCRIBE_FOLLOWER_ON_DRAINED` | `exit` | `exit`, or `park` under a supervisor that restarts whatever exits |
 | `SWARMSCRIBE_FOLLOWER_LOG_FORMAT` | `json` | `json` or `text` |
 | `SWARMSCRIBE_FOLLOWER_HEALTH_ADDR` | none (the images: `127.0.0.1:9108`) | `host:port` to listen on for `/healthz` and `/metrics`; unset, the follower opens no port |
-| `SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB` | the container's limit or the machine's memory, the smaller | the memory the follower may use, at least 64; a recording that cannot fit is failed `out_of_resources` before it is transcribed |
+| `SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB` | the cgroup's limit (a container's, or a systemd unit's `MemoryMax=`) or the machine's memory, the smaller | the memory the follower may use, at least 64; a recording that cannot fit is failed `out_of_resources` before it is transcribed |
 
 Only one follower may use a state folder at a time (a second one exits `2`).
 It refuses a scratch folder that holds files it did not put there. The
@@ -419,7 +438,8 @@ How it ends:
 | `1` | a bug in the follower (`error: unexpected ...`); `doctor`: the leader does not answer | report it |
 | `130` | Ctrl+C before `run` started supervising (any other command) | n/a |
 
-**Stopping.** Ctrl+C or `SIGTERM` (on Windows also Ctrl+Break) stops claiming.
+**Stopping.** Ctrl+C or `SIGTERM` (on Windows also Ctrl+Break, and the Windows service's
+stop control) stops claiming.
 The handlers are installed before anything else is even imported, so a stop also
 works during start-up (in the first moments of the process, against a leader that
 is down, while registering, or while the model loads): the process exits `0` and
@@ -457,9 +477,19 @@ credentials.
 
 **Known limits.**
 
-- The credential file is protected by the profile folder it lives in. On
-  Windows nothing else restricts it (no ACL beyond the folder's inherited one);
-  on POSIX it is `0600` in a `0700` folder.
+- The credential file is `0600` in a `0700` folder on POSIX. On Windows the folder and the
+  file may be reachable only by the follower's account, SYSTEM and Administrators (their
+  access control lists are read): a state folder of the account's own is made so before the
+  follower registers, and one that other accounts can reach once it holds a credential is
+  refused (exit `2`) with the `icacls` command that fixes it. An entry of a kind the follower
+  does not understand is refused too. A state folder that is itself a junction or a symbolic
+  link is refused; a link higher up its path is not checked. When the calling process is an
+  elevated administrator the follower's own service account (`NT SERVICE\SwarmScribeFollower`)
+  is trusted as well, which is what lets an administrator run `doctor` and `leave` against the
+  service's folder; a prompt that is not elevated is refused there. A follower that joined on
+  Windows in a state folder that others can reach, before this check existed, may be refused
+  once: run the printed command, or `leave` and join again. Deny entries are not read, and a
+  custom scratch folder is made private but never refused.
 - A download that is interrupted starts again from the beginning; it does not
   resume.
 - A stop during the upload can leave outputs in storage that were never
@@ -640,18 +670,20 @@ what the process keeps after a long recording: see "Sizing a pool"), and one for
 about 12.6 GiB; a GPU follower with `large-v3` needs 3.1 GiB to load its model at all. Before each
 job the follower adds its estimate for the recording to what the process already holds and
 compares that with what it may use: `SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB`, else the smaller
-of the container's memory limit and the machine's memory (`doctor` prints the figure and
+of the cgroup's memory limit and the machine's memory (`doctor` prints the figure and
 where it comes from). A recording that cannot fit is failed `out_of_resources` at once, with
 its length and the limit in the reason, instead of being killed half-way three times, hours
-apart. Give the container a memory limit (`--memory 8g`) and the guard follows it. On a
-native Linux install run under systemd, a `MemoryMax=` on the unit is not seen (the guard
-reads the container's cgroup file, else the machine's memory), so set
-`SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB` there.
+apart. Give the container a memory limit (`--memory 8g`) and the guard follows it; under
+systemd a `MemoryMax=` on the unit (or on its slice) does the same, because the guard reads
+the smallest limit from the process's own cgroup upwards. That is cgroup v2; on cgroup v1
+only the root's limit file is read, so a unit's limit is not seen there: set
+`SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB`.
 
-On Windows and macOS the platform does not say what the process already holds, so the guard
-counts the recording alone, not the loaded model, and when no limit is set its limit is the
-machine's total physical memory, not what is free. There, set
-`SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB` to what the follower may really use.
+On Windows the guard counts what the process holds (its working set), as on Linux; on macOS
+the platform does not say, and the recording is counted alone. On both, when no limit is set
+the limit is the machine's total physical memory, not what is free: set
+`SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB` to what the follower may really use. (A Windows job
+object's memory limit is not read.)
 
 `bash docker/check-follower-image.sh <image> <cpu|cuda> [<baked model>]` checks an image
 without a leader: its labels (title, source, description, and a version that is the
@@ -674,9 +706,8 @@ image on this machine's GPU.
 - A model downloaded at run time, not baked, is whatever its repository's `main` is that
   day; only baked models are pinned and checked.
 - A long recording needs a great deal of memory (the table above); nothing splits it.
-- Where the platform does not say what a process holds (Windows, macOS), the memory guard
-  counts the recording alone and not the loaded model, and its default limit is the machine's
-  total memory.
+- On macOS the memory guard counts the recording alone and not the loaded model; on Windows
+  and macOS its default limit is the machine's total memory.
 - The images are not published: build them, or push them to a registry of your own.
 - With `--init`, or in a pod that shares its process namespace, `tini` is not PID 1 and says
   so in one warning line on stderr; it still forwards signals.
@@ -1787,6 +1818,335 @@ Not run:
 - The kind test is run by hand, not in CI.
 - Autoscaling on queue depth belongs to the leader's chart (roadmap item 6).
 
+## Run a follower on an outside machine
+
+An outside machine is one that is not in the cluster: an office PC, a workstation with a GPU,
+a volunteer's computer. It dials out to the leader over HTTPS and needs nothing opened towards
+it. There are two ways to run a follower on one:
+
+- **Docker**, where Docker is there already: "Follower images" above. Nothing more to install.
+- **Natively**, which is what most Windows PCs want: the follower installed with `uv`, started
+  by systemd or as a Windows service. This section.
+
+Either way the machine receives recordings that are marked OK to publish, and only those; do
+not give a join token to a machine you would not trust with them.
+
+What has and has not been run is at the end of this section, and it matters: the Linux unit
+has been run in a container with systemd as PID 1, the Windows follower has been run in a
+console on a GPU, and **the Windows service has not yet been run under the Windows service
+control manager**.
+
+### What the machine installs
+
+The packages are not on an index. Build three wheels from this repository, once, and hand
+the machine the folder (with the constraints file, which pins every dependency to the
+versions `uv.lock` has and CI tested):
+
+```
+uv build --package swarmscribe-protocol --wheel -o dist
+uv build --package swarmscribe-engine --wheel -o dist
+uv build --package swarmscribe-follower --wheel -o dist
+cp deploy/follower-constraints.txt dist/
+```
+
+On the machine, with [uv](https://docs.astral.sh/uv/) installed and `dist` copied to it:
+
+```
+uv tool install --python 3.12 --find-links dist --constraints dist/follower-constraints.txt swarmscribe-follower
+```
+
+(`dist\follower-constraints.txt` in PowerShell.) On a machine with an NVIDIA GPU, write
+`"swarmscribe-follower[cuda]"` in place of the last word. That is all a GPU needs besides its
+driver (`nvidia-smi` must work): no CUDA toolkit, nothing to copy, no `PATH` or
+`LD_LIBRARY_PATH`. The `cuda` extra brings cuBLAS as a wheel, and the follower loads it from
+there itself, by its full path, before it loads a model on a GPU; `swarmscribe-follower
+cuda-paths` shows where it is. (The planner measured why on Windows: CTranslate2 opens
+`cublas64_12.dll` by its bare name, which finds the wheel's folder through `PATH` on a uv or
+python.org Python, through nothing on the Microsoft Store's, and never through
+`os.add_dll_directory`; a library already loaded in the process is found on both.) uv
+downloads a Python of its own if the machine has none that fits. If the command is not found
+afterwards, `uv tool update-shell` puts uv's tool folder on the `PATH`.
+
+Where the machine has `git` and can reach the repository, this does the same without the
+wheels (take the constraints file from the same commit to get the same versions):
+
+```
+uv tool install --python 3.12 --constraints deploy/follower-constraints.txt "swarmscribe-follower[cuda] @ git+https://github.com/iamfatness/SwarmScribe@<commit>#subdirectory=packages/follower"
+```
+
+(That form was run against a local clone of this repository, without the `cuda` extra, not
+against the address on GitHub.) For yourself, without a service, either is enough:
+
+```
+swarmscribe-follower join --leader https://leader.example.org --token-stdin
+swarmscribe-follower doctor
+swarmscribe-follower run
+```
+
+`join` asks for the token on the terminal without echoing it; `doctor` and `run` then use the
+leader the credential names. `doctor` loads the model and runs it once, on the GPU if there
+is one; on a GPU machine its `device:` line must say `cuda`.
+
+### Linux, with systemd
+
+As root, from the folder that holds `dist` and `deploy` (a copy of this repository's
+`deploy/systemd` will do). The follower is installed for the machine under
+`/opt/swarmscribe-follower`, with its command in `/usr/local/bin`:
+
+```
+export UV_TOOL_DIR=/opt/swarmscribe-follower/tools UV_TOOL_BIN_DIR=/usr/local/bin
+export UV_PYTHON_INSTALL_DIR=/opt/swarmscribe-follower/python UV_COMPILE_BYTECODE=1
+uv tool install --python 3.12 --find-links dist --constraints dist/follower-constraints.txt swarmscribe-follower
+
+useradd --system --home-dir /var/lib/swarmscribe-follower --shell /usr/sbin/nologin swarmscribe-follower
+install -d -o root -g swarmscribe-follower -m 0750 /etc/swarmscribe-follower
+install -o root -g swarmscribe-follower -m 0640 deploy/systemd/follower.env.example /etc/swarmscribe-follower/follower.env
+install -o root -g root -m 0644 deploy/systemd/swarmscribe-follower.service /etc/systemd/system/
+```
+
+Two things about where it goes:
+
+- The tool directory, Python and command must be outside `/home` and `/root`: the unit sets
+  `ProtectHome=yes`, which hides them from the service. (`/opt` and `/usr/local/bin`, as
+  above, are the documented place.)
+- On a GPU host, install `"swarmscribe-follower[cuda]"`, and the NVIDIA kernel modules must
+  already be loaded at boot: the unit's hardening (`ProtectKernelModules=yes`,
+  `NoNewPrivileges=yes`) stops `nvidia-modprobe` from loading them on demand. **No GPU has
+  run under the unit** (see the end of this section).
+
+Set `SWARMSCRIBE_LEADER_URL` in `/etc/swarmscribe-follower/follower.env`, and put the join
+token (or a pool token), alone, into `/etc/swarmscribe-follower/join-token`:
+
+```
+( umask 027; cat > /etc/swarmscribe-follower/join-token )     # paste the token, then Ctrl+D
+chgrp swarmscribe-follower /etc/swarmscribe-follower/join-token
+systemctl daemon-reload
+systemctl enable --now swarmscribe-follower
+journalctl -u swarmscribe-follower -f
+```
+
+(Ctrl+D twice, when the pasted token has no newline after it.) The token is in no unit file,
+no command line and no process's environment. The settings example names the file
+(`SWARMSCRIBE_JOIN_TOKEN_FILE=/etc/swarmscribe-follower/join-token`), the service's group may
+read it, and it stays that way: the follower reads it when it first registers and again
+whenever the leader stops knowing its credential (a replaced leader database, say), and a
+join token is used up by its first registration, so only a pool token can register again.
+Do not delete or empty it. The credential the token was exchanged for is in
+`/var/lib/swarmscribe-follower/state` (mode `0700`), with the scratch folder; the models are
+in `/var/lib/swarmscribe-follower/models`. A leader on plain `http` (a test leader) also
+needs `SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1` in `follower.env`.
+
+To run a command by hand with the service's settings, run it as the service's user with the
+same file:
+
+```
+runuser -u swarmscribe-follower -- swarmscribe-follower --env-file /etc/swarmscribe-follower/follower.env doctor
+```
+
+(`doctor`'s `memory:` line then describes the machine, not the unit: a command run by hand
+is not in the unit's cgroup. `leave` the same way, with the service stopped, gives the
+registration up.)
+
+**What the unit says** (`deploy/systemd/swarmscribe-follower.service`, its `[Unit]` and
+`[Service]` sections):
+
+```
+StartLimitIntervalSec=600
+StartLimitBurst=5
+Restart=on-failure
+RestartSec=30
+RestartPreventExitStatus=4 5
+KillMode=mixed
+TimeoutStopSec=930
+```
+
+### Windows, as a service
+
+A service runs as an account of its own, which cannot read a user's profile and cannot use
+the Microsoft Store's Python. So the follower is installed for the machine, with a Python
+that uv fetches, under `C:\Program Files\swarmscribe-follower`. In PowerShell 5.1 opened with
+"Run as administrator", from the folder that holds `dist`:
+
+```
+$root = "C:\Program Files\swarmscribe-follower"
+$env:UV_PYTHON_INSTALL_DIR = "$root\python"
+$env:UV_TOOL_DIR = "$root\tools"
+$env:UV_TOOL_BIN_DIR = "$root\bin"
+uv python install 3.12 --no-bin --no-registry
+$python = (Get-ChildItem "$root\python\cpython-3.12.*-windows-*\python.exe" | Select-Object -First 1).FullName
+uv tool install --python $python --find-links dist --constraints dist\follower-constraints.txt "swarmscribe-follower[cuda]"
+& "$root\bin\swarmscribe-follower.exe" service install --print     # what it will do; changes nothing
+& "$root\bin\swarmscribe-follower.exe" service install
+```
+
+(Write `swarmscribe-follower` without `[cuda]`, and without the quotes, on a machine without
+an NVIDIA GPU.) `--print` prints the plan below, preceded by a `warning:` line if the
+follower is on a Python that the service's account could not run (the Microsoft Store's, or
+one inside a user's profile): if you see that line, install again as above. The plan, as the
+command prints it for this install (the long number is the service's SID, which Windows
+derives from the name alone, so it is the same on every machine):
+
+```
+folders: C:\ProgramData\swarmscribe-follower with state, models, logs inside
+settings file: C:\ProgramData\swarmscribe-follower\follower.env (written if it is not there)
+icacls.exe C:\ProgramData\swarmscribe-follower /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F
+sc.exe create SwarmScribeFollower binPath= "\"C:\Program Files\swarmscribe-follower\python\cpython-3.12.15-windows-x86_64-none\python.exe\" \"C:\Program Files\swarmscribe-follower\tools\swarmscribe-follower\Lib\site-packages\swarmscribe_follower\service_boot.py\"" start= delayed-auto obj= "NT SERVICE\SwarmScribeFollower" DisplayName= "SwarmScribe Follower"
+sc.exe description SwarmScribeFollower "Takes recordings from a SwarmScribe leader and transcribes them."
+sc.exe failure SwarmScribeFollower reset= 86400 actions= restart/60000/restart/60000//60000
+sc.exe failureflag SwarmScribeFollower 0
+icacls.exe C:\ProgramData\swarmscribe-follower /grant:r *S-1-5-80-274616168-3456989120-2567103782-416646175-3250980778:(OI)(CI)RX
+icacls.exe C:\ProgramData\swarmscribe-follower\state /grant:r *S-1-5-80-274616168-3456989120-2567103782-416646175-3250980778:(OI)(CI)M
+icacls.exe C:\ProgramData\swarmscribe-follower\models /grant:r *S-1-5-80-274616168-3456989120-2567103782-416646175-3250980778:(OI)(CI)M
+icacls.exe C:\ProgramData\swarmscribe-follower\logs /grant:r *S-1-5-80-274616168-3456989120-2567103782-416646175-3250980778:(OI)(CI)M
+```
+
+(The `sc.exe create` line names the interpreter and the follower's own folder, so its paths
+differ on another install; the `\"` are how Python prints the quotes, and the installer runs
+each command as an argument list. The first `icacls` line, the lock, is always printed but
+runs only for a data folder that already existed.)
+
+`service install` does this, in this order. It looks at everything already under
+`C:\ProgramData\swarmscribe-follower`, if the folder is there: every owner must be
+Administrators, SYSTEM or the service's own account, and there must be no junction or
+symbolic link at any depth; a folder it does not accept is refused, and it says to remove or
+rename it. A folder it makes itself is created already protected, so that SYSTEM and
+Administrators are the only accounts that can reach it, before anything is put in it. It then
+makes `state`, `models` and `logs` and the settings file, registers the service
+`SwarmScribeFollower` (not started; delayed automatic start) running as its own account
+`NT SERVICE\SwarmScribeFollower` (no password to keep), grants that account its access by SID,
+and looks at the owners and links again. If it fails after the service was created, it says
+so: run `service uninstall` before trying again.
+
+| There, under `C:\ProgramData\swarmscribe-follower` | What | Who |
+|---|---|---|
+| `follower.env` | the settings (`NAME=value`); written with the folders already filled in | administrators write, the service reads |
+| `join-token` | the join or pool token, alone; you create it, and it takes the folder's list | administrators write, the service reads |
+| `state\` | the credential and scratch | the service writes |
+| `models\` | the model cache | the service writes |
+| `logs\follower.log` | the service's log (a service has no console); kept as `follower.log.1` and begun again when it is over 10 MiB at a start | the service writes |
+
+Set `SWARMSCRIBE_LEADER_URL` in `follower.env`, put the token into `join-token` (Notepad as
+administrator will do; the token is in no registry value and no command line), and:
+
+```
+sc.exe start SwarmScribeFollower
+sc.exe query SwarmScribeFollower
+Get-Content C:\ProgramData\swarmscribe-follower\logs\follower.log -Tail 20
+```
+
+As on Linux, keep the token file: the follower reads it again if the leader stops knowing its
+credential. A start-up failure of the follower's own code is written to the log as `error:
+unexpected <ClassName>`. A leader on plain `http` (a test leader) needs
+`SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1` in `follower.env`.
+
+`swarmscribe-follower service foreground` runs the service's own code in the console instead,
+printing each status it would report to Windows; Ctrl+C is the stop control. It is the way to
+see why a service does not start (as a user who may read `follower.env`, or with
+`--env-file` naming another file: `service foreground` is the one `service` action that takes
+`--env-file`, and `--print` is refused with it).
+
+To run `doctor` or `leave` against the service's folder, use an **elevated** prompt and the
+service's settings file:
+
+```
+& "$root\bin\swarmscribe-follower.exe" --env-file C:\ProgramData\swarmscribe-follower\follower.env doctor
+```
+
+The follower trusts the service's account on its own folder only when the process doing the
+asking is an elevated administrator; from a prompt that is not elevated the state folder is
+refused, by design (`state folder: FAILED: ... will not be trusted with the credential`).
+`leave` needs the service stopped first (it takes the state folder's lock).
+
+The service's registration names the interpreter and the follower's environment by their
+paths. After an upgrade that replaces either (`uv tool upgrade`, `uv tool install` again, a
+new Python), run `service uninstall` and `service install` again. `service uninstall` removes
+the service and keeps `C:\ProgramData\swarmscribe-follower`, which holds the credential; it
+stops the service first, and the name may stay busy for up to the grace period (900 s as
+installed) before it can be registered again.
+
+### Stopping, and what restarts it
+
+Exit `0` (stopped, or drained), `4` (revoked, or the token was refused) and `5` (protocol)
+are final: nothing restarts them. Exits `1` (a bug), `2` (settings) and `3` (this machine
+cannot do the work: `doctor` says why) are retried a limited number of times. The systemd
+column was run (in a container); the Windows column is what the code does, tested without
+Windows' control manager, and **has not been seen under it**.
+
+| | systemd | Windows service |
+|---|---|---|
+| A stop (`systemctl stop`; `sc.exe stop`, the Services console) | `SIGTERM`. The recording in hand is finished if its estimated time left fits `SWARMSCRIBE_FOLLOWER_SHUTDOWN_GRACE_SECONDS` (900 in both settings files), else handed back with no attempt counted. At `TimeoutStopSec=930` systemd kills what is left | the stop control: the same rule. The service reports "stop pending" with a wait hint of the grace period plus 30 seconds |
+| A reboot or shutdown | the same stop, so it can wait as long as the grace period for a recording that fits it (not run) | the pre-shutdown control: the recording is handed back at once, whatever the grace period (not run) |
+| Sleep or hibernation (Windows: also a shutdown with Fast Startup) | not a stop: the process is frozen. When the machine wakes the lease has run out, the leader has given the recording to another follower, and this one starts on the next. One counted attempt (by design; not run) | the same |
+| Exit `0`: stopped, or drained | left stopped | left stopped |
+| Exit `4`, `5` | `failed`; `RestartPreventExitStatus=4 5`: never restarted | left stopped, with the code as the service's exit code (`sc.exe query`); never restarted |
+| Exit `2`, `3`, `1` | `Restart=on-failure`, `RestartSec=30`, and at most five starts in ten minutes (`StartLimitBurst=5`, `StartLimitIntervalSec=600`); then `failed` | the process ends without telling Windows, and the recovery actions restart it after a minute, twice (`restart/60000/restart/60000`); then it is left stopped (the reason is in `follower.log`). The count starts again after a day (`reset= 86400`) |
+| Killed (out of memory, a crash) | restarted, as above | restarted, as above |
+
+In the recorded Linux run, with the restart delay shortened to 2 s so that the test is quick,
+an exit `3` was restarted until systemd said `Start request repeated too quickly` and left
+the unit `failed` (`NRestarts=5`).
+
+A drained follower stays stopped across restarts and reboots (it keeps its credential and is
+told `drain` again): `leave` and join again to put the machine back to work. A revoked one
+needs a new token: put it in `join-token`, delete `state/credential.json` (`state\credential.json`
+on Windows), start the service.
+
+### Memory, and the health listener
+
+Under systemd, `MemoryMax=` on the unit is the memory guard's limit (`systemctl edit
+swarmscribe-follower`, then `[Service]` and `MemoryMax=8G`): a recording that cannot fit is
+refused with a reason instead of being killed half-way. That is cgroup v2, which every
+current distribution mounts; on cgroup v1 a unit's limit is not seen, so set
+`SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB` in `follower.env`. On Windows the guard counts what
+the process holds (its working set) against the machine's total memory; on a PC that is used
+for other things, set `SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB` in `follower.env`. "Sizing a
+pool" has the figures.
+
+A native install opens no port. For `/healthz` and `/metrics` on the machine itself, set
+`SWARMSCRIBE_FOLLOWER_HEALTH_ADDR=127.0.0.1:9108` in `follower.env`.
+
+### What has been run, and what has not
+
+The record is `docs/superpowers/plans/2026-10-05-follower-f4-outcomes.md`. Every figure below
+is from it.
+
+- **Linux, in a container.** `e2e/follower-systemd/run_e2e.py` installs the follower as above
+  in a container that runs systemd 252 as PID 1 (Debian 12), with `tiny.en` on the CPU, and
+  checks, against a real leader with Postgres: it registers as its own user with a private
+  state folder, no token in its environment and no listening TCP port; a stop with 900 s of
+  grace finishes the recording and one with 1 s hands it back with no attempt counted; started
+  again it is the same follower; killed with `SIGKILL` it is restarted and the recording
+  redone; `MemoryMax=` refuses an hour-long recording; drained it exits 0 and stays stopped;
+  revoked it exits 4 and is not restarted; unable to work it is restarted and then left
+  failed. It passed twice; in the second run, with the harness fixed after review, the
+  follower registered in 24 s after `systemctl enable --now`, the 900 s stop finished the
+  recording in 39 s, the 1 s stop handed it back in 1.5 s, and the whole `run` took 3 min
+  49 s. In a separate run of the planner's, in a plain container with the GPU passed in (an
+  RTX 4090), `doctor` loaded and ran `tiny.en` on the GPU with no `LD_LIBRARY_PATH`, which the
+  engine alone could not (`Library libcublas.so.12 is not found`).
+- **Windows, in a console, without administrator rights.** `e2e/follower-windows/run_e2e.py`
+  installs the follower with its `cuda` extra on uv's Python and runs the service's own
+  command (the real interpreter with `service_boot.py`) in a console, on an RTX 4090 with
+  `large-v3`. It passed once on the GPU (1 min 13 s) and once on the CPU with `tiny.en`
+  (45 s): the follower registered (in 5 s on the GPU), the stop control arriving mid-job handed
+  the recording back and ended it in 0.4 s with `SERVICE_STOPPED`, it came back as the same
+  follower, revocation was reported as a stop with error 4, and a machine that could not do
+  the work ended with code 3 and no `SERVICE_STOPPED`. What the service tells Windows and what
+  its controls do is also tested on every platform, and the follower's tests are a CI job
+  on `windows-latest` (`follower-windows`; **it has not yet run on GitHub**).
+- **Not run: the Windows service under the service control manager.** Registering the service,
+  the control manager starting it, the service's account reading its settings and writing its
+  state, a GPU used from a service session, the stop control arriving from Windows, a
+  shutdown and the recovery actions all need an administrator, and wait for the owner's run:
+  the procedure is in the record, under "The owner's run (needs an administrator)", and its
+  result is not filled in. Until it is, the Windows service is built and tested as far as
+  tests reach, and not proven as a service.
+- **Not run: a real Linux host, a GPU under the systemd unit, a reboot on either system.**
+  Starting at boot rests on `WantedBy=multi-user.target` and on the Windows service's start
+  type, not on a run. The record lists the rest: other distributions, systemd versions and
+  cgroup v1, other Windows versions and GPUs, a leader on TLS, and recordings of people
+  talking.
+
 ## Develop
 
 ```
@@ -1821,6 +2181,18 @@ checks apply only to the built app on the console's own origin.
 `av` is pinned below 19 in `packages/engine/pyproject.toml`: faster-whisper
 1.2.1 passes `metadata_errors=` to `av.open`, which av 19 removed. Lift the
 bound when faster-whisper supports av 19.
+
+`deploy/follower-constraints.txt` is `uv.lock`'s versions for a native install of the
+follower; a test fails when the two disagree. After a change of `uv.lock`, regenerate it:
+
+```
+uv export --frozen --no-dev --no-emit-workspace --package swarmscribe-follower --extra cuda --no-hashes -o deploy/follower-constraints.txt
+```
+
+The two native end-to-end tests are run by hand and recorded in
+`docs/superpowers/plans/2026-10-05-follower-f4-outcomes.md`: `e2e/follower-systemd/run_e2e.py`
+(a container with systemd as PID 1) and `e2e/follower-windows/run_e2e.py` (Windows, with the
+GPU).
 
 If you change a wire model, the schema snapshot test fails. Decide whether
 `PROTOCOL_VERSION` must change, then regenerate:

@@ -23,6 +23,12 @@ def private_folder(path: Path) -> None:
         except FileExistsError:
             pass
         else:
+            if os.name == "nt":
+                # os.mkdir's mode makes a private list only from Python 3.12.4; before that
+                # the folder inherits its parent's, which may let Users in.
+                from . import winacl
+
+                winacl.make_private(path)
             return
         info = os.lstat(path)
     if not stat.S_ISDIR(info.st_mode):

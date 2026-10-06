@@ -8,13 +8,20 @@ for anything. A folder under the user's profile (the default state folder) and o
 `swarmscribe-follower service install` pass; a folder made at the root of a drive does not
 (there `Authenticated Users` may write).
 
-Only allow entries are read. A deny entry can only take access away, and the two entry kinds
-Windows never puts on a file (object and callback entries) are ignored.
+Only plain allow entries (type 0) name who is let in. The entry types that can only take
+access away or record something (deny, audit, alarm, labels, policy: NOT_GRANTING) are
+ignored. Any other kind could grant access in a way this code does not read (a conditional or
+an object entry), so the check refuses a list that holds one rather than guess.
+
+A state folder that is itself a junction or a symbolic link is refused: its list is read by
+path, which would follow the link, as a separate step from the later opens. A link higher up
+in the path is not checked.
 
 Every function here raises OSError when Windows refuses a call, and is called on Windows only."""
 
 import ctypes
 import functools
+import os
 from pathlib import Path
 
 SYSTEM = "S-1-5-18"
@@ -34,6 +41,14 @@ _DACL = 0x4
 _OWNER_AND_DACL = 0x1 | _DACL
 _PROTECTED_DACL = 0x80000000
 _ACCESS_ALLOWED_ACE = 0
+# ACE types (winnt.h) known not to grant access: deny, audit, alarm, their object and callback
+# variants, mandatory label, resource attribute, scoped policy, process trust label and access
+# filter. Allow (0), compound allow (4), allow object (5), allow callback (9) and allow
+# callback object (11) can grant; a type not listed at all is unknown. Both are refused
+# unless plain allow.
+NOT_GRANTING = frozenset({1, 2, 3, 6, 7, 8, 10, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21})
+UNREADABLE = "?"  # marks, in the list read_acl returns, an entry that cannot be read
+_REPARSE_POINT = 0x400
 _TOKEN_QUERY = 0x8
 _TOKEN_USER = 1
 
@@ -144,8 +159,11 @@ def read_acl(path: Path, descriptor_of: int | None = None) -> tuple[str, list[st
             # follows it with a 32-bit mask and then the SID.
             kind = ctypes.cast(entry, ctypes.POINTER(ctypes.c_ubyte))[0]
             mask = ctypes.cast(entry.value + 4, ctypes.POINTER(wintypes.DWORD))[0]
-            if kind == _ACCESS_ALLOWED_ACE and mask:
-                allowed.append(_sid_text(advapi, kernel, entry.value + 8))
+            if kind == _ACCESS_ALLOWED_ACE:
+                if mask:
+                    allowed.append(_sid_text(advapi, kernel, entry.value + 8))
+            elif kind not in NOT_GRANTING:
+                allowed.append(f"{UNREADABLE}{kind}")
         return owner_sid, allowed
     finally:
         kernel.LocalFree(descriptor)
@@ -167,6 +185,11 @@ def access_problem(
     (`doctor` on a folder that `run` would make private before it uses it). `acl`: what
     `read_acl` already said of `path` (the credential file, read while it was open)."""
     me = current_user()
+    if acl is None and os.lstat(path).st_file_attributes & _REPARSE_POINT:
+        return (
+            f"the {what} {path} is a junction or a symbolic link and will not be trusted with"
+            " the credential; point the setting at the real folder"
+        )
     owner, allowed = acl if acl is not None else read_acl(path)
     trusted = {me, SYSTEM, ADMINISTRATORS}
     fix = (
@@ -189,6 +212,13 @@ def access_problem(
             f"the {what} {path} has no access control list (everyone may do anything) and will"
             f" not be trusted with the credential; run: {fix}"
         )
+    unknown = sorted(entry for entry in allowed if entry.startswith(UNREADABLE))
+    if unknown:
+        return (
+            f"the {what} {path} has an access list with an entry of a kind the follower does"
+            f" not understand (type {', '.join(entry[1:] for entry in unknown)}) and will not"
+            f" be trusted with the credential; make it private with: {fix}"
+        )
     others = sorted({sid for sid in allowed if sid not in trusted | OWNER_PLACEHOLDERS})
     if others:
         removes = " ".join(f'/remove "*{sid}"' for sid in others)
@@ -209,6 +239,8 @@ def make_private(path: Path) -> bool:
     from ctypes import wintypes
 
     me = current_user()
+    if os.lstat(path).st_file_attributes & _REPARSE_POINT:
+        return False  # a link: not followed, and refused by the check
     owner, allowed = read_acl(path)
     if owner != me:
         return False

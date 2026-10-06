@@ -1,0 +1,2 @@
+# Not part of the packaged chart: the values and the check that CI renders it with.
+ci/

@@ -250,3 +250,15 @@ jobs:
         run: >-
           uv run --no-project --with pyyaml
           python deploy/helm/swarmscribe-follower/ci/check_render.py
+      - name: Lint the leader chart
+        run: >-
+          helm lint deploy/helm/swarmscribe-leader
+          -f deploy/helm/swarmscribe-leader/ci/test-values.yaml --strict
+      - name: Validate the leader chart's manifests against the Kubernetes schemas
+        run: |
+          helm template leader deploy/helm/swarmscribe-leader --namespace swarmscribe             -f deploy/helm/swarmscribe-leader/ci/test-values.yaml > "$RUNNER_TEMP/leader.yaml"
+          kubeconform -strict -summary -kubernetes-version 1.33.0 "$RUNNER_TEMP/leader.yaml"
+      - name: Check what the leader chart renders
+        run: >-
+          uv run --no-project --with pyyaml
+          python deploy/helm/swarmscribe-leader/ci/check_render.py --only core,storage

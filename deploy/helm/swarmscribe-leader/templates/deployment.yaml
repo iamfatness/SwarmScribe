@@ -1,0 +1,148 @@
+{{- include "swarmscribe-leader.validate" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "swarmscribe-leader.fullname" . }}
+  labels:
+    {{- include "swarmscribe-leader.labels" . | nindent 4 }}
+    app.kubernetes.io/component: leader
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    {{- if eq .Values.updateStrategy "Recreate" }}
+    type: Recreate
+    {{- else }}
+    # No pod is missing during a rollout: a new one is Ready before an old one is stopped.
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "swarmscribe-leader.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: leader
+  template:
+    metadata:
+      labels:
+        {{- include "swarmscribe-leader.labels" . | nindent 8 }}
+        app.kubernetes.io/component: leader
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # A changed setting restarts the pods.
+        checksum/settings: {{ include "swarmscribe-leader.settings" . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "swarmscribe-leader.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "swarmscribe-leader.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: leader
+          image: {{ include "swarmscribe-leader.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve", "--host", "0.0.0.0", "--port", {{ .Values.port | toString | quote }}]
+          ports:
+            - name: http
+              containerPort: {{ .Values.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "swarmscribe-leader.fullname" . }}
+          env:
+            {{- include "swarmscribe-leader.secretEnv" . | nindent 12 }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          securityContext:
+            {{- include "swarmscribe-leader.containerSecurityContext" . | nindent 12 }}
+          # /healthz: the process answers (startup and liveness; never /readyz, so a database
+          # outage restarts nothing). /readyz: the database answers and its schema is this
+          # leader's or newer; it gives up on the database after 3 s, so the timeout is 5 s.
+          # Neither asks an identity provider.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+          {{- if gt (int .Values.preStopSleepSeconds) 0 }}
+          # The pod is taken out of the Service while it still answers: only then is the
+          # leader told to stop, and it finishes the requests it has.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", {{ .Values.preStopSleepSeconds | toString | quote }}]
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            {{- range .Values.storage.volumes }}
+            - name: {{ printf "storage-%s" .name | quote }}
+              mountPath: {{ .mountPath | quote }}
+              {{- if .readOnly }}
+              readOnly: true
+              {{- end }}
+            {{- end }}
+      volumes:
+        {{- range .Values.storage.volumes }}
+        - name: {{ printf "storage-%s" .name | quote }}
+          {{- if .existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .existingClaim | quote }}
+            {{- if .readOnly }}
+            readOnly: true
+            {{- end }}
+          {{- else }}
+          {{- toYaml .volume | nindent 10 }}
+          {{- end }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml .Values.topologySpreadConstraints | nindent 8 }}
+      {{- else if and .Values.spreadAcrossNodes (gt (int .Values.replicaCount) 1) }}
+      # Soft: prefer different nodes, never leave a replica unscheduled for it.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "swarmscribe-leader.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: leader
+      {{- end }}

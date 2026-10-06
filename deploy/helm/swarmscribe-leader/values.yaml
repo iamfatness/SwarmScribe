@@ -1,0 +1,271 @@
+# SwarmScribe leader. What you must set: `image`, `publicUrl`, `secrets.existingSecret`,
+# one of `oidc.entra` / `oidc.google` with an administrator under `roles.admin`, at least
+# one entry in `storage.volumes`, and with the NetworkPolicy on (the default)
+# `networkPolicy.egress.postgres.peers` and `networkPolicy.ingress.from`.
+
+# Names. fullnameOverride replaces <release>-swarmscribe-leader as the base of every object
+# name; either way the base is cut to 55 characters, so that -migrate still fits the 63 a
+# Service name or a label value may have.
+nameOverride: ""
+fullnameOverride: ""
+
+# Leader replicas (at least 1). Replicas hold no state of their own: jobs, leases and
+# credentials are in Postgres, the reaper and the scanner run in one replica at a time
+# (advisory locks), and any replica serves any file link. Two conditions come with more
+# than one: every replica must see the same files (storage.volumes, below), and Postgres
+# must have room for 15 connections per replica (SQLAlchemy's default pool: 5, and 10 of
+# overflow) plus one for the migration job.
+replicaCount: 2
+
+# The image is not published: there is no working default. Build it and load it into the
+# cluster (README, "Deploy the leader"), then name it here. Both are required.
+image:
+  repository: ""
+  tag: ""
+  # "sha256:..." pins the image by digest and wins over the tag.
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# SWARMSCRIBE_PUBLIC_URL: the one address followers, administrators and consoles reach
+# this leader at, e.g. https://leader.example.org. The leader builds every file link from
+# it, so pods in this cluster and machines outside it must both be able to reach it.
+# Exactly https://<lowercase DNS hostname>, with an optional :port when the Ingress is off;
+# no path, query, fragment, user, uppercase or IP address. It is also the Ingress host.
+publicUrl: ""
+# true accepts an http:// publicUrl: a test cluster only. Credentials, pool tokens and
+# signed file links then cross the network in the clear. Never with the Ingress on.
+allowHttpPublicUrl: false
+
+# The chart never creates a Secret: values files and Helm's release history are not a
+# place for the link key or a database password. Create one Secret yourself and name it.
+secrets:
+  existingSecret: ""
+  keys:
+    # SWARMSCRIBE_DATABASE_URL: the leader's own Postgres,
+    # e.g. postgresql://leader:...@db.internal:5432/swarmscribe
+    databaseUrl: database-url
+    # SWARMSCRIBE_LINK_KEY: at least 32 random characters
+    # (python -c "import secrets; print(secrets.token_urlsafe(48))"). It signs every file
+    # link; changing it makes the links already handed out worthless (followers ask again).
+    linkKey: link-key
+    # Read only when oidc.entra.clientSecret.
+    entraClientSecret: entra-client-secret
+    # Read only when oidc.google.enabled.
+    googleClientSecret: google-client-secret
+    # Read only when oidc.google.serviceAccount: the service account's JSON key.
+    googleServiceAccount: google-service-account
+
+# Administrators' sign-in. Enable Entra ID, Google, or both. A leader without sign-in
+# refuses every admin call (401): nobody could create a pool token or a console credential.
+oidc:
+  # true renders a leader with no sign-in at all. For tests only.
+  allowNone: false
+  entra:
+    enabled: false
+    # The tenant's GUID (not its domain name).
+    tenantId: ""
+    clientId: ""
+    # true reads the application's client secret from the Secret: needed only to look up
+    # people in too many groups for the token (Microsoft Graph, GroupMember.Read.All).
+    clientSecret: false
+  google:
+    enabled: false
+    clientId: ""
+    # Optional: only this Google Workspace domain may sign in.
+    hostedDomain: ""
+    # true reads the Google Groups service-account key from the Secret.
+    serviceAccount: false
+
+# Who gets which role (README, "Administrators: sign-in and roles"). Roles are cumulative.
+# entraGroups: group object ids (needs oidc.entra). googleGroups: group emails (needs
+# oidc.google.serviceAccount). emails, domains: Google sign-ins only (needs oidc.google).
+# With sign-in on, roles.admin must name someone: the first administrator is whoever these
+# lists say, and nothing else creates one.
+roles:
+  viewer:
+    entraGroups: []
+    googleGroups: []
+    emails: []
+    domains: []
+  operator:
+    entraGroups: []
+    googleGroups: []
+    emails: []
+    domains: []
+  admin:
+    entraGroups: []
+    googleGroups: []
+    emails: []
+    domains: []
+
+# Other non-secret settings, without the SWARMSCRIBE_ prefix, for example
+#   LEASE_SECONDS: "120"
+#   HEARTBEAT_SECONDS: "30"
+#   SCANNER_INTERVAL_SECONDS: "30"
+# Names are upper case (^[A-Z][A-Z0-9_]*$). The render refuses a secret (DATABASE_URL,
+# LINK_KEY, *_SECRET, GOOGLE_SERVICE_ACCOUNT, in any letter case) and a name the chart sets
+# itself (PUBLIC_URL, the oidc ones and the twelve ROLE_<role>_<list> names; ROLE_CACHE_SECONDS
+# is an ordinary setting and goes here).
+settings: {}
+
+# Extra environment for the leader container, as a list of {name, value|valueFrom}, for
+# example HTTPS_PROXY for identity-provider calls. A SWARMSCRIBE_ name that the chart owns
+# or reads from the Secret is refused, in any letter case.
+extraEnv: []
+
+# Where recordings and transcripts live. Today the leader's only storage backend is a
+# folder on a filesystem (`backend: local`); cloud object storage is not built. Each entry
+# mounts one volume you provide into every leader pod; a location's root
+# (`swarmscribe-admin locations add NAME --root /data/recordings`) is a folder inside one.
+#   - name: recordings              a DNS label, unique
+#     mountPath: /data/recordings   absolute, unique, never / or under /app
+#     existingClaim: recordings     a PersistentVolumeClaim you created ...
+#     # volume: {nfs: {server: nas.internal, path: /exports/recordings}}   ... or a volume source
+#     readOnly: false               true: recordings can be read, transcripts cannot be written
+# EVERY REPLICA MUST SEE THE SAME FILES. With pods on more than one node that means a
+# ReadWriteMany claim (NFS, CephFS, Azure Files, Filestore, ...). A ReadWriteOnce claim
+# works only while every leader pod is on one node, and a rollout whose new pod lands on
+# another node hangs on "Multi-Attach error" until that pod is deleted; with such a claim
+# on a cluster of several nodes set replicaCount: 1 and updateStrategy: Recreate, and
+# accept that every upgrade is an outage of the leader. The chart cannot see a claim's
+# access mode. An emptyDir is refused: it is one folder per pod.
+storage:
+  volumes: []
+  # The group the volumes are opened with (fsGroup); files the leader writes belong to
+  # user 10001 and this group. On NFS and other volumes that ignore fsGroup, make the
+  # export writable by this group or by uid 10001 yourself.
+  fsGroup: 10001
+  # More groups for the leader's process, to read recordings another system wrote.
+  supplementalGroups: []
+
+# The port the leader listens on in the pod (the Service and NetworkPolicy follow it).
+port: 8080
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  className: ""
+  # The leader's file links carry a signed token in the URL path (/v1/files/<token>).
+  # Turn request logging off for this Ingress at your controller, or its access log holds
+  # tokens that work until they expire (30 minutes for a download, 2 hours for an upload,
+  # and an upload only while its job's lease is current). Uploads are up to 512 MiB:
+  # raise your controller's body limit and turn request buffering off. Both are your
+  # controller's own annotations (README, "Deploy the leader").
+  annotations: {}
+  tls:
+    # Required when the Ingress is enabled: the leader is published over TLS only.
+    secretName: ""
+  # The paths sent to the leader. Everything it serves to the outside is under /v1
+  # (/v1/followers, /v1/jobs, /v1/files, /v1/admin). Never "/" and never the probes:
+  # /readyz tells an anonymous caller whether the database is up.
+  paths:
+    - {path: /v1, pathType: Prefix}
+
+# The schema migration: a Job run as a pre-install and pre-upgrade hook, before any leader
+# pod of the new version starts. The old pods keep serving while and after it runs.
+migrate:
+  enabled: true
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+
+# RollingUpdate replaces the pods one at a time with no pod missing (maxUnavailable 0,
+# maxSurge 1). Recreate stops every pod before starting the new ones: an outage on every
+# upgrade, and the only choice for a ReadWriteOnce volume on a cluster of several nodes.
+updateStrategy: RollingUpdate
+
+# A stopping pod waits this long before the leader is told to stop, so that Services and
+# ingress controllers stop sending it new requests first. Then the leader finishes the
+# requests in hand. terminationGracePeriodSeconds must be longer than this.
+preStopSleepSeconds: 5
+terminationGracePeriodSeconds: 60
+
+podDisruptionBudget:
+  # Rendered only when replicaCount is above 1. Unready pods stay evictable
+  # (unhealthyPodEvictionPolicy: AlwaysAllow), so a database outage cannot stall a drain.
+  enabled: true
+  maxUnavailable: 1
+
+networkPolicy:
+  # What a NetworkPolicy cannot do:
+  #  - It needs a network plugin that enforces it (Calico, Cilium, kindnet, ...). Without
+  #    one this object is accepted and does nothing.
+  #  - It cannot match names: it allows by address and port only.
+  #  - On a first install the migration hook runs before this policy exists.
+  # It selects every pod of the release (leader and migration Job).
+  enabled: true
+  ingress:
+    # Required with the policy on: who may reach the leader's port (NetworkPolicyPeer
+    # objects). Your ingress controller, the follower pools in this cluster that use the
+    # Service directly, a console in this cluster, for example
+    #   - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: ingress-nginx}}
+    #   - podSelector: {matchLabels: {app.kubernetes.io/name: swarmscribe-follower}}
+    # Peers are matched on the address a packet arrives with: a follower that comes through
+    # the Ingress arrives as the ingress controller. The kubelet's probes come from the
+    # pod's own node, which most network plugins never cut off; where they are cut off,
+    # add the nodes' range here.
+    from: []
+    # true allows any source instead (the leader authenticates every caller itself).
+    anySource: false
+  egress:
+    dns:
+      # Where the pods resolve names. Add an ipBlock for NodeLocal DNSCache
+      # (169.254.20.10/32), which the link-local block below would otherwise cut off.
+      peers:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+    postgres:
+      port: 5432
+      # Required: where the leader's Postgres is (NetworkPolicyPeer objects), e.g.
+      #   - ipBlock: {cidr: 10.20.30.40/32}
+      # Peers are matched AFTER Service address translation. For a Postgres inside the
+      # cluster use a podSelector (with a namespaceSelector for another namespace) and the
+      # pod's own port: never the Service's ClusterIP. The migration hook runs under the
+      # PREVIOUS release's policy.
+      peers: []
+    https:
+      # The identity providers (Entra ID and Microsoft Graph, Google): rendered only when
+      # sign-in is on. NetworkPolicy cannot name a DNS host, so the default is "anywhere on
+      # these ports except the ranges no identity provider lives in".
+      ports: [443]
+      cidrs: ["0.0.0.0/0", "::/0"]
+      # More ranges to cut out of 0.0.0.0/0 and ::/0, for example the cluster's own pod
+      # and service ranges.
+      extraExcept: []
+    # Extra raw egress rules (NetworkPolicyEgressRule objects), e.g. an HTTPS proxy.
+    extra: []
+
+serviceAccount:
+  create: true
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+# With two or more replicas and no topologySpreadConstraints of your own, the pods are
+# spread across nodes softly (ScheduleAnyway, so one node still schedules them all). Your
+# own topologySpreadConstraints replace this; false turns it off.
+spreadAcrossNodes: true
+topologySpreadConstraints: []

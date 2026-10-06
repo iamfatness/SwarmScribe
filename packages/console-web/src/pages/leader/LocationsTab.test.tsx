@@ -261,7 +261,7 @@ describe("locations tab", () => {
     const dialog = screen.getByRole("alertdialog");
     await userEvent.click(within(dialog).getByRole("button", { name: "Switch it off" }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
-      "The leader is not answering right now.",
+      "eu-1 is not answering right now.",
     );
   });
 

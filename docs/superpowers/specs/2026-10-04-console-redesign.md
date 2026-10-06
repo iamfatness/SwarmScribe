@@ -1,6 +1,6 @@
 # Fleet console redesign: the Ink console
 
-Date: 2026-10-04. Status: approved direction, ready to build.
+Date: 2026-10-04. Status: built (R1 and R2), amended by the final review's fix wave on 2026-10-05.
 Scope: `packages/console-web` only. Presentation, wording and the navigation frame.
 
 Implementation plans:
@@ -25,14 +25,16 @@ in that language and approved them.
 
 1. Every screen matches its approved mockup in layout, colour, type and wording, except
    where section 10 says why not.
-2. The dark Ink console is the designed default. A light theme exists, follows the system
-   setting and the Theme switch, and is designed, not derived.
+2. The dark Ink console is the default for everyone, whatever the system is set to (owner's
+   ruling on O6). A light theme exists, is chosen in the Theme switch (as Light, or as System
+   on a light system), and is designed, not derived.
 3. Every user-visible string is the one in section 6.
 4. Nothing about behaviour changes: section 8.
 5. Accessibility is at least what it was: section 7. Zero axe violations (WCAG 2.1 A and
    AA) on every page and dialog in both themes; every text pair at 4.5:1 or better.
 6. The console's CSP still holds: no inline style, no font or image from another origin,
-   hashed assets only. `npm run build` passes `scripts/check-dist.mjs` unchanged.
+   hashed assets only. `npm run build` passes `scripts/check-dist.mjs`, whose checks are all kept
+   (it gained one: the theme boot script, section 3.1).
 7. Every existing unit and end-to-end test still exists and passes, with selectors and
    expected text updated only where structure or wording changed.
 8. A person has looked at screenshots of every screen in both themes at 1280, 900 and 768
@@ -91,21 +93,23 @@ everything inside it reads the same token names.
 So a sheet is always the opposite of the page it sits on. Buttons, fields, links and error
 panels inside a sheet need no special rules: they read the sheet's set.
 
-Theme selection is unchanged in mechanism (`src/app/theme.ts` sets `data-theme` on
-`<html>`, or leaves it off to follow the system). The stylesheet's base is now the dark
-set, and `prefers-color-scheme: light` gives the light theme unless `data-theme="dark"`.
-In practice a browser always reports light or dark, so with Theme on "System" the console
-is light on a light system and dark on a dark one, as before. See O6.
+Theme selection (`src/app/theme.ts`) sets `data-theme` on `<html>` to `dark`, `light` or
+`system`. **Dark is the default for everyone** (owner's ruling on O6): with nothing stored the
+choice is Dark, whatever `prefers-color-scheme` says. The stylesheet's base is the dark set,
+with no attribute needed, so the page is dark even before any script runs;
+`prefers-color-scheme: light` gives the light theme only under `data-theme="system"`. Light
+and System are a person's explicit choices in the Theme switch; each is stored and wins from
+then on. System is no longer the default and is no longer stored as "nothing".
 
 **Theme boot script.** The chosen theme is set before the first paint, not after the app
-loads, or a person who chose Dark on a light system (or the reverse) would see the system's
-theme flash. `src/theme-boot.ts` calls `applyTheme(readTheme())` from `app/theme.ts`, so the
+loads, or a person who chose Light or System would see the dark default flash. `src/theme-boot.ts` calls `applyTheme(readTheme())` from `app/theme.ts`, so the
 storage key has one source. `vite.config.ts` builds it on its own, as a script with no imports
 left, to `assets/theme-<hash>.js`, and puts it in `<head>` as a plain blocking
 `<script src>` (no `type`, `defer` or `async`), so the CSP's `script-src 'self'` still holds.
 `scripts/check-dist.mjs` fails the build if it is missing, not in `<head>`, not classic, or
 has import or export left in it. `theme.spec.ts` holds the app script back and checks the
-painted background for both mismatches.
+painted background: ink on a light system with nothing chosen (and with the boot script
+blocked altogether), and the chosen theme for each mismatch.
 
 ### 3.2 Colour
 
@@ -324,7 +328,8 @@ three widths, or if Actions is sticky; it is not to be loosened.
 | Danger (`.button-danger`) | Transparent, `--bad` text and edge. Hover: `--bad-wash`. |
 | Switched off (`:disabled`, `aria-disabled="true"`) | Dashed `--edge`, muted text, `not-allowed` cursor. Beside it, in words, the role it needs. |
 
-44px tall; 36px inside a table row. One primary button per view at most: the thing the
+44px tall; 36px inside a table row. One primary button per view at most (a list's rows excepted: each failed job has its own
+primary "Try again"): the thing the
 view is for (Add a leader, Create join token, Add location, Try again on a failed job,
 Copy in the token dialog, the first sign-in provider).
 
@@ -461,9 +466,12 @@ the tab's own section with its `h2`.
 Mockup: `docs/superpowers/design/TokenDialog.dc.html`.
 
 A lifted sheet. Title: "Here is the join token. It is shown once." A muted paragraph that
-names the pool and says nobody can read it again. The token in a 48px read-only mono field
-with a 2px edge, and a primary **Copy** button beside it. A status line beneath ("Not
-copied yet."). Then three facts in a row above a hairline: Pool; Can be used; Expires. At
+names the pool and says nobody can read it again. The token (47 characters) in a read-only
+mono box with a 2px edge that takes the sheet's whole width, so the whole token is on one
+line at 1280, 900 and 768; on a phone it wraps and the box grows with it, and no character is
+ever out of view. Beneath it a primary **Copy** button with the status line beside it ("Not
+copied yet."). (The mockup's short placeholder fitted a field with Copy beside it; a real token
+did not: 44 of its 47 characters showed.) Then three facts in a row above a hairline: Pool; Can be used; Expires. At
 the bottom right, a ghost **I have stored it**.
 
 ### 5.6 Administration (`/admin/leaders`, `/admin/grants`, `/admin/admins`)
@@ -518,7 +526,8 @@ Rules:
 - Never show a protocol word from the left column. Addresses keep them (`?state=queued`).
 - A count under ten that reads as part of a sentence is a word ("after three tries"). A
   figure is a numeral.
-- The leader's own error text is shown as it is sent, as text, never rewritten.
+- A leader's own text about its work (why a job failed, why a scan failed) is shown as it is
+  sent, as text, never rewritten. An error's sentences are the console's own: see "Errors".
 - Loading lines begin with "Loading" (the end-to-end tests wait for them to go).
 - "Revoke", "Create", "Scan", "Pool", "Location", "Consent" and "Join token" are kept:
   they are the product's own nouns and verbs.
@@ -541,7 +550,7 @@ Rules:
 | `{email}` | Same |
 | (none) | "Console administrator" (for one) |
 | (none) | "Admin on 2 leaders" / "Admin on 2, viewer on 1 leader" / "No role on any leader yet" |
-| "Theme", "System", "Light", "Dark" | Same |
+| "Theme", "System", "Light", "Dark" | Same words; the order is Dark, Light, System, and Dark is what a person starts on |
 | "Sign out" | Same |
 | "Skip to main content" | Same |
 | "Updates are paused because you have been inactive. Press any key or click to resume." | "Checks are paused because you have been away. Press a key or click to start them again." |
@@ -652,7 +661,8 @@ Rules:
 | Was | Is |
 | --- | --- |
 | "Fleet" (breadcrumb) | Same |
-| "Your role on {leader}: {role}. Actions that need a higher role are shown disabled." | Viewer: "You are a viewer here. What needs an operator or an admin is shown, but switched off." Operator: "You are an operator here. What needs an admin is shown, but switched off." Admin: "You are an admin here. Nothing here is switched off for you." |
+| "Your role on {leader}: {role}. Actions that need a higher role are shown disabled." | Viewer: "You are a viewer here. What needs an operator or an admin is shown, but switched off." Operator: "You are an operator here. What needs an admin is shown, but switched off." Admin: "You are an admin here." and no more: a leader can let this console act only up to a lower role, which the console learns only when the leader refuses something, so an admin is promised nothing. |
+| (none) | In a tab, when its list cannot be read for the reason the notice above has just given: "Nothing to show until {leader} answers." (with "Try again in {n} seconds." and a "Try again" button); "Nothing to show while {leader} is switched off. A console administrator can switch it on under Administration."; "Nothing to show until the console's credential for {leader} is replaced." One quiet line, not a second error. |
 | "The console cannot reach {leader}; reads and actions will fail until it answers. The last successful poll was at {time}." | "{leader} is not answering, so nothing here can be read or changed until it does. It last answered at {time}." |
 | "{leader} revoked the console's credential. A console administrator must replace it. The last successful poll was at {time}." | "{leader} revoked the console's credential. A console administrator must replace it. It last answered at {time}." |
 | "{leader} is disabled in the console; reads and actions are refused. The last successful poll was at {time}." | "{leader} is switched off in the console, so nothing is asked of it. It last answered at {time}." |
@@ -841,21 +851,22 @@ Rules:
 | (none) | Callout: "Adding a leader takes two steps" / "On the leader, an admin runs `swarmscribe-admin console create` and copies the credential it prints." / "Here, choose **Add a leader** and paste the address and that credential. The credential is never shown again." |
 | **Who can do what** | |
 | (none) | Heading "Who can do what" |
-| "A person's role on a leader is the highest grant whose scope matches it. Adding or removing a grant applies at once. A person's group membership is read at sign-in, so a change to it applies at their next sign-in." | "A person's role on a leader is the highest one given to them that covers it. Giving or removing a role takes effect at once. Group membership is read when a person signs in, so a change to a group shows the next time they do." |
+| "A person's role on a leader is the highest grant whose scope matches it. Adding or removing a grant applies at once. A person's group membership is read at sign-in, so a change to it applies at their next sign-in." | Before the table, one line: "A person's role on a leader is the highest one given to them that covers it." The rest is in the callout below. |
 | "No grants." | "Nobody has been given a role yet." |
-| Region "Grants" | Same |
+| Region "Grants" | "Roles given" |
 | Columns "Principal", "Role", "Scope", "Added", "Actions" | "Who", "Role", "On which leaders", "Given", "Actions" |
-| "{kind}:{principal}"; "{time} by {who}"; "viewer", "operator", "admin" | Same |
-| "Remove"; named "Remove grant: {role} on {scope} for {kind}:{principal}" | "Remove"; named "Remove {role} on {scope} from {kind}:{principal}" |
-| (none) | Under that paragraph, in plain words: "A viewer can look. An operator can also try jobs again, cancel them, scan a location and wind followers down. An admin can also add and switch locations, revoke followers and make join tokens." and "A role covers leaders in one of three ways: `all` for every leader, `leader:eu-1` for one leader by name, or `label:region=eu` for every leader with that label. It is given to an Entra ID group, a Google group, one person by email, or everyone at a domain." (the three forms in `<code>`) |
+| "{kind}:{principal}" | {who}, in words: "Entra ID group {id}", "Google group {address}", the email address on its own, "Everyone at {domain}" ("everyone at {domain}" inside a sentence or a button's name). The name itself is in mono, whole. The stored kind code (`entra_group:`) is not shown: nobody types it here. |
+| "{time} by {who}"; "viewer", "operator", "admin" | Same |
+| "Remove"; named "Remove grant: {role} on {scope} for {kind}:{principal}" | "Remove"; named "Remove {role} on {scope} from {who}" |
+| (none) | A paper callout beside the form (beneath it on a narrow page), "How roles work": a list, "A viewer can look." / "An operator can also try jobs again, cancel them, scan a location and wind followers down." / "An admin can also add and switch locations, revoke followers and make join tokens."; then "A role covers leaders in one of three ways: `all` for every leader, `leader:eu-1` for one leader by name, or `label:region=eu` for every leader with that label." (the three forms in `<code>`); then "Giving or removing a role takes effect at once. Group membership is read when a person signs in, so a change to a group shows the next time they do." |
 | Form "Add a grant" | "Give a role" |
 | "Role" | Same |
 | "Scope" | "On which leaders" |
 | "all, leader:&lt;name&gt; or label:&lt;key&gt;=&lt;value&gt;" | "Write all, leader:&lt;name&gt; or label:&lt;key&gt;=&lt;value&gt;." |
 | "Add grant" | "Give the role" |
-| "Grant added: {role} on {scope} for {kind}:{principal}." | "{kind}:{principal} is now {role} on {scope}." |
+| "Grant added: {role} on {scope} for {kind}:{principal}." | "{Who} is now {role} on {scope}." |
 | "Remove this grant?" | "Remove this role?" |
-| "{kind}:{principal} loses {role} on {scope} at once. Group membership is read at sign-in." | "{kind}:{principal} stops being {role} on {scope} at once." |
+| "{kind}:{principal} loses {role} on {scope} at once. Group membership is read at sign-in." | "{Who} stops being {role} on {scope} at once." |
 | "Remove grant" (confirm) | "Remove the role" |
 | "Grant removed." | "The role is removed." |
 | **Console administrators** | |
@@ -864,11 +875,11 @@ Rules:
 | Region "Console administrators" | Same |
 | Column "Principal" | "Who" |
 | Columns "Added", "Actions" | Same |
-| "Remove"; named "Remove console administrator {kind}:{principal}" | Same |
+| "Remove"; named "Remove console administrator {kind}:{principal}" | "Remove"; named "Remove console administrator {who}" |
 | Form "Add a console administrator"; "Add administrator" | Same |
-| "{kind}:{principal} is a console administrator." | "{kind}:{principal} is now a console administrator." |
+| "{kind}:{principal} is a console administrator." | "{Who} is now a console administrator." |
 | "Remove this console administrator?"; "Remove administrator" | Same |
-| "{kind}:{principal} can no longer manage leaders and grants. The last administrator cannot be removed." | "{kind}:{principal} can no longer add leaders or give roles. The last administrator cannot be removed." |
+| "{kind}:{principal} can no longer manage leaders and grants. The last administrator cannot be removed." | "{Who} can no longer add leaders or give roles. The last administrator cannot be removed." |
 | "Console administrator removed." | "The console administrator is removed." |
 | **Naming someone** (`PrincipalFields.tsx`) | |
 | "Principal kind" | "Who" |
@@ -882,10 +893,40 @@ Rules:
 | "a Google account's address" | "The address of a Google account." |
 | "a Google Workspace domain, such as example.org" | "A Google Workspace domain, such as example.org." |
 
-#### Error titles (`api/errors.ts`)
+#### Errors (`api/errors.ts`, `components/ErrorPanel.tsx`)
 
-The title is ours; the server's own text follows it unchanged. Each title keeps its
-meaning. "Try again in {n} seconds." is unchanged, but it is said once: when the server's own text already ends "; try again" and a retry time is known, that tail gives way to "Try again in {n} seconds."
+Every sentence of an error is the console's own. For a code in the table below the server's
+message is never shown: those messages are written for a log ("this leader is disabled in the
+console", "that principal already has a grant on that scope") and speak the protocol's words.
+An error has a title and, where it helps, a line beneath saying what to do or how long to
+wait. Each title keeps its meaning.
+
+- On a leader's page the title names the leader: "{leader} is not answering right now.",
+  "{leader} is switched off in the console.", "{leader} revoked the console's credential.",
+  "{leader} does not accept the console's credential.", "The console cannot open the credential
+  it holds for {leader}." Elsewhere it says "The leader" or "This leader", as in the table.
+- Lines beneath: `leader_unreachable`, only "Try again in {n} seconds." when the wait is known;
+  `leader_disabled`, "A console administrator can switch it on under Administration." (and no
+  "Try again" button: it cannot work); `leader_credential_revoked` and
+  `leader_credential_unreadable`, "A console administrator must replace it.";
+  `leader_credential_rejected`, "A console administrator can replace it under Administration.";
+  `leader_not_found`, "It is no longer in the console, or you no longer have a role on it."
+  with a link, "Go back to the fleet"; `bad_gateway`, "If you were changing something, check
+  whether it happened before you try again."; `last_admin`, "Add another one first.";
+  `invalid_request`, "Check what you entered, then try again."; `invalid_scope`,
+  `invalid_labels`, `invalid_credential`, `invalid_name` and `invalid_url`, the rule for that
+  field in a sentence.
+- A fact a person needs is read out of the server's fixed sentence and said in ours.
+  `forbidden`: "This needs {a viewer, an operator, an admin}." or "This needs a console
+  administrator." When a leader lets this console act only up to a lower role than the person
+  has: "{leader} lets this console act only as {an operator}." (or "only up to a lower role."
+  when the leader does not say which) / "This needs an admin. Whoever runs the leader can
+  change that." `overlaps`: "It overlaps {location}."
+- "Try again in {n} seconds." is said once: "Try again shortly." in a title gives way to it.
+- A code this table does not have keeps a title of ours by its status, and its text beneath
+  as "The answer said: {text}", shown as text. It is never the headline.
+- What the web app refuses itself before sending (a name that is not a name, an address
+  without https://) has the same titles, with its own sentence beneath.
 
 | Code | Was | Is |
 | --- | --- | --- |
@@ -905,10 +946,10 @@ meaning. "Try again in {n} seconds." is unchanged, but it is said once: when the
 | network failure | "The console could not be reached. Check your connection." | Same |
 | `leader_not_found` | "This leader is not visible to you." | "You cannot see this leader." |
 | `leader_unreachable` | "The leader cannot be reached right now." | "The leader is not answering right now." |
-| `leader_credential_revoked` | "The leader revoked the console's credential. A console administrator must replace it." | Same |
-| `leader_credential_unreadable` | "The console cannot open its stored credential for this leader. A console administrator must replace it." | "The console cannot open the credential it holds for this leader. A console administrator must replace it." |
+| `leader_credential_revoked` | "The leader revoked the console's credential. A console administrator must replace it." | Same words: the first sentence is the title, the second the line beneath |
+| `leader_credential_unreadable` | "The console cannot open its stored credential for this leader. A console administrator must replace it." | "The console cannot open the credential it holds for this leader." / "A console administrator must replace it." |
 | `leader_credential_rejected` | "The leader does not accept the console's credential." | Same |
-| `bad_gateway` | "The leader's answer could not be used. If this was an action, check whether it happened before repeating it." | "The leader's answer could not be used. If you were changing something, check whether it happened before you try again." |
+| `bad_gateway` | "The leader's answer could not be used. If this was an action, check whether it happened before repeating it." | "The leader's answer could not be used." / "If you were changing something, check whether it happened before you try again." |
 | `leader_disabled` | "This leader is disabled in the console." | "This leader is switched off in the console." |
 | `exists` | "That already exists." | Same |
 | `last_admin` | "The last console administrator cannot be removed." | Same |
@@ -989,8 +1030,9 @@ Everything C3 established stays, and is tested where it was tested.
     The page does not scroll sideways at 1280, 768 or 390 pixels because of one. A group's
     object ID wraps inside its cell (`.ident`), never preferring a hyphen. The test measures
     overflow after fonts are ready and two frames have passed.
-18. **The chosen theme wins.** Dark chosen on a light system, or Light on a dark one, is
-    what is painted, and it survives a reload. The rail is ink either way.
+18. **Dark until chosen, then the chosen theme wins.** With no choice the console is dark on
+    a light system too, the sign-in page included. Light on a dark system, or System, is what
+    is painted once chosen, and it survives a reload. The rail is ink either way.
 
 ## 8. What does not change
 
@@ -1001,11 +1043,13 @@ Everything C3 established stays, and is tested where it was tested.
 - Roles and what each may do; the allow-list in `api/roles.ts`.
 - Security: no inline style, no HTML injection, nothing in storage but the theme, a join
   token or credential never in a URL, in storage or in state that outlives its dialog.
-  `eslint.config.js` and `scripts/check-dist.mjs` are not touched.
+  `eslint.config.js` is not touched; `scripts/check-dist.mjs` keeps every check and gained the
+  theme boot script's (section 3.1).
 - Polling: intervals, the idle pause, the hidden-tab pause, the 401 latch.
 - Form validation rules and what each form sends.
 - The dialog component's behaviour, the double-submit guard, the one-time token rules.
-- The theme switch's three choices and where the choice is stored.
+- The theme switch's three choices and where the choice is stored. (Changed afterwards by the
+  owner's ruling on O6: the default is Dark, not System, and System is stored like the others.)
 - Dependencies: none added, none removed.
 - The backend. Nothing outside `packages/console-web` changes.
 
@@ -1082,7 +1126,7 @@ could not be replaced. The hexagon is a `clip-path`; the logo is inline SVG.
 | O3 | **The sign-in note's exact times.** To say "8 hours" and "an hour" truthfully the console's API would have to send its session settings with the list of providers. That is a backend change. | The general sentence. |
 | O4 | **"Wind down" for drain** (M15), and **"Who can do what" vocabulary** (M16). | As written in section 6. |
 | O5 | **Follower names.** The drawing shows "gpu-02". Followers have no name in the API. | The id's first eight characters. |
-| O6 | **Should the console be dark for everyone until they choose otherwise?** C3 says the app "already honours the system preference", so a person on a light system gets the light theme first. Browsers always report light or dark, so "dark by default" only shows on a dark system. Making Ink the first thing everyone sees means changing what "System" does, or defaulting the switch to Dark. | Follows the system. Dark only where the system is dark or Dark is chosen. |
+| O6 | **Should the console be dark for everyone until they choose otherwise?** C3 says the app "already honours the system preference", so a person on a light system gets the light theme first. Browsers always report light or dark, so "dark by default" only shows on a dark system. Making Ink the first thing everyone sees means changing what "System" does, or defaulting the switch to Dark. | **Ruled by the owner, 2026-10-05: dark for everyone.** With no stored choice the console is dark whatever the system says, from the first paint. Light and System are explicit choices in the Theme switch and are remembered. (Before the ruling it followed the system.) |
 | O7 | **Health in Administration.** It needs either a console-administrator view of the fleet in the API, or accepting an often-empty column. | Not shown. |
 
 ## 12. Delivery

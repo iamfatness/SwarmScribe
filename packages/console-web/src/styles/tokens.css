@@ -5,9 +5,12 @@
    ink); "paper" is its light counterpart. A surface picks a set and everything inside it
    reads the same token names:
 
-     dark theme (the designed default)   page = ink,   .sheet = paper
+     dark theme (the default for all)    page = ink,   .sheet = paper
      light theme                         page = paper, .sheet = ink
      .on-ink (the rail, the sign-in brand panel)        always ink
+
+   Dark needs no attribute and no script: it is what :root is. The system's setting is
+   followed only when a person chose System (data-theme="system").
 
    Each set is written twice (once for the plain selector, once inside the
    prefers-color-scheme block); src/styles/tokens.test.ts fails when the copies differ and
@@ -115,7 +118,7 @@
 
 @media (prefers-color-scheme: light) {
   /* token-set: paper */
-  :root:not([data-theme="dark"]) {
+  :root[data-theme="system"] {
     color-scheme: light;
     --ground: #f3ead9;
     --panel: #fffaf0;
@@ -138,8 +141,8 @@
   }
 
   /* token-set: ink */
-  :root:not([data-theme="dark"]) .on-ink,
-  :root:not([data-theme="dark"]) .sheet {
+  :root[data-theme="system"] .on-ink,
+  :root[data-theme="system"] .sheet {
     color-scheme: dark;
     --ground: #14110d;
     --panel: #1c1813;

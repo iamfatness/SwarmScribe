@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Page } from "@playwright/test";
-import { expect, setLeaderMode, signIn, test } from "../tests/support";
+import { chooseTheme, expect, setLeaderMode, signIn, test } from "../tests/support";
 
 // Not a test of behaviour: it photographs every screen in both themes at desktop and tablet
 // width, into packages/console-web/screens/, for a person to LOOK at. jsdom and axe pass
@@ -12,6 +12,10 @@ import { expect, setLeaderMode, signIn, test } from "../tests/support";
 const OUT = join(process.cwd(), "screens");
 const WIDTHS = [1280, 900, 768] as const;
 const THEMES = ["dark", "light"] as const;
+/** The console's origin (playwright.config.ts's baseURL), for the requests made as the page. */
+const ORIGIN = "http://localhost:8900";
+/** The console tests' credential shape (console_testkit.CREDENTIAL): 43 URL-safe characters. */
+const CREDENTIAL = "c".repeat(20) + "_-" + "D".repeat(21);
 
 const PAGES: [name: string, path: string][] = [
   ["fleet", "/"],
@@ -61,7 +65,9 @@ for (const theme of THEMES) {
           fullPage,
         });
       };
+      // Dark is the default whatever the system says; the light shots choose Light.
       await page.emulateMedia({ colorScheme: theme });
+      await chooseTheme(page, theme);
       await page.setViewportSize({ width, height: 900 });
 
       await page.goto("/sign-in?signed_out=1");
@@ -158,8 +164,11 @@ for (const theme of THEMES) {
           .getByText("Not answering", { exact: true }),
       ).toBeVisible({ timeout: 30_000 });
       await shot("fleet-one-down");
+      // The fleet has said us-1 is not answering, so its tabs say it once more only, quietly.
+      const nothing = page.getByText(/^Nothing to show until us-1 answers/);
       await page.goto("/leaders/us-1/jobs");
-      await expect(page.getByRole("alert").first()).toBeVisible();
+      await expect(nothing).toBeVisible();
+      await expect(page.getByRole("main").getByRole("alert")).toHaveCount(0);
       await shot("leader-down");
       const down: [name: string, path: string][] = [
         ["leader-down-pools", "/leaders/us-1/pools"],
@@ -168,7 +177,7 @@ for (const theme of THEMES) {
       ];
       for (const [name, path] of down) {
         await page.goto(path);
-        await expect(page.getByRole("alert").first()).toBeVisible();
+        await expect(nothing).toBeVisible();
         await shot(name);
       }
 
@@ -192,26 +201,6 @@ for (const theme of THEMES) {
       await page.goto("/");
       await expect(page.getByText(/You have no role/)).toBeVisible();
       await shot("fleet-empty");
-
-      await fleetAs((leaders) => [
-        ...leaders,
-        { ...leaders[0], name: "rev-1", health: "credential_revoked" } as Leader,
-        { ...leaders[0], name: "off-1", health: "disabled", enabled: false } as Leader,
-        { ...leaders[0], name: "new-1", health: "pending", consecutive_failures: 2, summary: null, snapshot: null } as Leader,
-        { ...leaders[0], name: "lost-1", health: "unreachable", consecutive_failures: 5, last_error: "connect_error", last_success_at: null, summary: null, snapshot: null } as Leader,
-      ]);
-      await page.goto("/");
-      await settled(page);
-      await shot("fleet-every-state");
-
-      // A leader's own page in each state it can be in (its tab's read fails: the header is
-      // what is photographed).
-      for (const state of ["rev-1", "off-1", "new-1", "lost-1"]) {
-        await page.goto(`/leaders/${state}/pools`);
-        await expect(page.getByRole("heading", { level: 1, name: state })).toBeVisible();
-        await expect(page.getByRole("main").locator(".notice").first()).toBeVisible();
-        await shot(`leader-state-${state}`);
-      }
 
       await fleetAs((leaders) => copies(leaders, 6, { health: "credential_revoked" }));
       await page.goto("/");
@@ -257,6 +246,72 @@ for (const theme of THEMES) {
         timeout: 30_000,
       });
       await shot("fleet-failed-refresh");
+
+      // The states a leader can be in, each produced the way the console produces it, so the
+      // page under the header is the real one (a leader invented in the fleet answer alone is
+      // unknown to the rest of the console, and its page showed "You cannot see this leader"
+      // under every state). us-1 is switched off under Administration; then it is switched on
+      // again and revokes the console's credential; off-1 is added switched off; lost-1 and
+      // new-1 are added at addresses nothing answers. Last in the test: nothing is put back.
+      await page.unroute("**/api/fleet");
+      await page.context().clearCookies();
+      await signIn(page, "admin");
+      const session = (await (await page.request.get("/api/session")).json()) as { csrf_token: string };
+      const administer = async (method: "post" | "patch", path: string, data: unknown) => {
+        const answer = await page.request[method](path, {
+          data,
+          headers: { "X-CSRF-Token": session.csrf_token, Origin: ORIGIN },
+        });
+        expect(answer.ok(), `${method} ${path} answered ${answer.status()}`).toBe(true);
+      };
+      const pill = (text: string | RegExp) =>
+        page.getByRole("main").locator(".status-pill").filter({ hasText: text });
+      const card = (name: string, text: string) =>
+        page.getByRole("article", { name }).getByText(text, { exact: true });
+
+      await administer("patch", "/api/admin/leaders/us-1", { enabled: false });
+      for (const tab of ["pools", "jobs"]) {
+        await page.goto(`/leaders/us-1/${tab}`);
+        await expect(pill("Switched off")).toBeVisible({ timeout: 30_000 });
+        await expect(page.getByText(/^Nothing to show while us-1 is switched off/)).toBeVisible();
+        await settled(page);
+        await shot(tab === "pools" ? "leader-state-off" : "leader-state-off-jobs");
+      }
+
+      await administer("patch", "/api/admin/leaders/us-1", { enabled: true });
+      await setLeaderMode(request, "us-1", "revoked");
+      for (const [name, enabled] of [["off-1", false], ["lost-1", true], ["new-1", true]] as const) {
+        await administer("post", "/api/admin/leaders", {
+          name,
+          base_url: `https://${name}.leaders.example`,
+          labels: { region: "eu" },
+          credential: CREDENTIAL,
+          enabled,
+        });
+      }
+      // A leader waits for its first answer for a few seconds only, too briefly to photograph:
+      // new-1 is a real leader, and its health alone is held at "not answered yet" on the way.
+      await fleetAs((leaders) =>
+        leaders.map((l) => (l.name === "new-1" ? { ...l, health: "pending", consecutive_failures: 2 } : l)),
+      );
+      await page.goto("/");
+      await expect(card("us-1", "Credential revoked")).toBeVisible({ timeout: 30_000 });
+      await expect(card("lost-1", "Not answering")).toBeVisible({ timeout: 30_000 });
+      await settled(page);
+      await shot("fleet-every-state");
+      const states: [state: string, name: string, health: string | RegExp][] = [
+        ["revoked", "us-1", "Credential revoked"],
+        ["lost", "lost-1", "Not answering"],
+        ["new", "new-1", /^Not answering yet/],
+      ];
+      for (const [state, name, health] of states) {
+        await page.goto(`/leaders/${name}/pools`);
+        await expect(page.getByRole("heading", { level: 1, name })).toBeVisible();
+        await expect(pill(health)).toBeVisible();
+        await expect(page.getByRole("main").locator(".notice").first()).toBeVisible();
+        await settled(page);
+        await shot(`leader-state-${state}`);
+      }
     });
   }
 }

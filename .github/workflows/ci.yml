@@ -203,6 +203,20 @@ jobs:
       - run: uv sync --python 3.12
       - run: uv run pytest packages/follower
 
+  # The real leader image (docker/leader.Dockerfile), built and checked against a throwaway
+  # Postgres. The Compose tests above still use e2e/compose/Dockerfile.
+  leader-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the disk has room
+        run: bash docker/check-free-space.sh 5
+      - name: Build the leader image
+        run: docker build -t swarmscribe-leader:kind -f docker/leader.Dockerfile .
+      - name: Check it (a serving leader stays ready on a newer schema; a starting one refuses it)
+        run: bash docker/check-leader-image.sh swarmscribe-leader:kind
+
   chart:
     runs-on: ubuntu-latest
     steps:

@@ -414,7 +414,10 @@ describe("FleetPage", () => {
   it("shows the error with a retry when the first load fails", async () => {
     mockFetch().on("GET /api/fleet", fail(503, "unavailable", "service temporarily unavailable"));
     renderFleet();
-    expect(await screen.findByRole("alert")).toHaveTextContent("temporarily unavailable");
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("The console is not answering just now. Try again shortly.");
+    // The console's own words for it, never the backend's.
+    expect(alert).not.toHaveTextContent("temporarily unavailable");
     expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
   });
 

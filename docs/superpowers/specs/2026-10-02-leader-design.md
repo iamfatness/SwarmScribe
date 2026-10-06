@@ -348,8 +348,13 @@ is too short, or migrations are not current.
 
 ## 12. Operations
 
-- `/healthz` (process alive), `/readyz` (database reachable, migrations
-  current, OIDC metadata fetched at least once).
+- `/healthz` (process alive), `/readyz` (database reachable, and its schema
+  this leader's or newer).
+  *Amended 2026-10-05 (leader chart spec, section 6):* "migrations current"
+  made every serving replica unready the moment a pre-upgrade migration
+  finished, and "OIDC metadata fetched at least once" took a restarted
+  replica away from the followers during an identity provider's outage.
+  `serve` still refuses to start on a database that is ahead.
 - `/metrics` (Prometheus): jobs by state and pool, queue depth, claim latency,
   lease expiries, attempts, failures by code, follower count by state and
   pool, scan duration and errors per location, audio-seconds completed.

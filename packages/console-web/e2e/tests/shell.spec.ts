@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { expect, expectAccessible, setLeaderMode, signIn, test } from "./support";
+import { chooseTheme, expect, expectAccessible, setLeaderMode, signIn, test } from "./support";
 
 const NARROW = { width: 768, height: 1024 };
 
@@ -254,6 +254,7 @@ test.describe("accessibility of the open menu at phone width", () => {
   for (const theme of ["light", "dark"] as const) {
     test.describe(theme, () => {
       test.use({ colorScheme: theme, viewport: { width: 390, height: 844 } });
+      test.beforeEach(({ page }) => chooseTheme(page, theme));
 
       test(`has no violations, closed and open (${theme})`, async ({ page }) => {
         await signIn(page, "admin");

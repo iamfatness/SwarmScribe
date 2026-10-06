@@ -8,9 +8,10 @@ blocks merge.
 - **JWKS key-size floor.** PyJWT accepts very small RSA keys from a
   provider's key set. Skip keys under 2048 bits in the per-key loop. Keys only
   come from the configured issuer over HTTPS, so this is defence in depth.
-- **Readiness and the follower plane.** `/readyz` waits for identity-provider
-  metadata, so a replica restarted during a provider outage also stops
-  serving followers. Consider a separate admin-readiness signal.
+- **Readiness and the follower plane.** *Done 2026-10-05 (leader chart L1):*
+  `/readyz` no longer waits for identity-provider metadata. Still open: a
+  way to see from outside that sign-in works, without gating traffic (leader
+  chart spec, follow-up F8).
 - **Token audience.** Leaders accept any ID token whose audience is their
   client ID; the README says to use one app registration per deployment.
   Access tokens with an API scope would bind tokens to one leader.

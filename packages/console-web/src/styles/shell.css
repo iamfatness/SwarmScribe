@@ -289,11 +289,23 @@ main {
   align-items: center;
   justify-content: space-between;
   gap: var(--s-3) var(--s-5);
-  margin: var(--s-4) 0 var(--s-1);
+  margin: var(--s-4) 0 var(--s-3);
 }
 
 .filters {
   justify-content: flex-start;
+}
+
+/* "Loaded at" and Refresh keep to the right, on the bar's first line or, when the filters
+   fill it, on a line of their own. A sentence in the bar gives way to them. */
+.section-head > .toolbar,
+.section-head > .refresh {
+  margin-left: auto;
+}
+
+.section-head > p {
+  flex: 1 1 20rem;
+  min-width: 0;
 }
 
 .section-head h2,
@@ -411,5 +423,15 @@ main {
     forced-color-adjust: none;
     background: Highlight;
     color: HighlightText;
+  }
+
+  /* A transparent rule is drawn in forced colours: under every tab but the current one it
+     takes the page's own colour, so the underline still marks where the person is. */
+  .tab-link {
+    border-bottom-color: Canvas;
+  }
+
+  .tab-link[aria-current="page"] {
+    border-bottom-color: Highlight;
   }
 }

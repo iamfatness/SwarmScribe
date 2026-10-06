@@ -67,12 +67,19 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
 # a signal, so a SIGTERM that reaches a leader running as PID 1 before uvicorn has installed
 # its handlers is dropped: that window is as long as `serve` waits for the database before
 # it starts (up to a minute on a database that does not answer), and for all of `migrate`.
-# With tini the signal is forwarded: in that window the leader dies of it at once (143),
-# and once it is serving it finishes the requests it has and then stops by itself.
+# With tini the signal is forwarded: in that window the leader dies of it at once (143).
+# Once it is serving it stops by itself (143 again) in bounded steps: 10 s for the requests
+# in hand (main.py), then 5 + 1 + 1 s for the background step that is running and the
+# database connections (app.py). A database that answers makes that about half a second; one
+# that does not cannot make it more than those 17 s. A stop window shorter than that
+# (`docker stop` gives 10 s unless told `--time 30`) can still end in a kill (137) in that
+# one case, which loses nothing.
 STOPSIGNAL SIGTERM
 # `serve` is the default; `migrate` is run by overriding the arguments, and the admin CLI by
 # overriding the entrypoint:
 #   docker run ... swarmscribe-leader migrate
-#   docker run -it --entrypoint swarmscribe-admin ... swarmscribe-leader --leader https://... login
+#   docker run --rm --entrypoint swarmscribe-admin swarmscribe-leader --help
+# (The CLI keeps a sign-in in a file under the caller's home folder, and this image's user
+# has none: sign in from your own machine, not from the leader's container.)
 ENTRYPOINT ["/usr/bin/tini", "--", "swarmscribe-leader"]
 CMD ["serve", "--host", "0.0.0.0", "--port", "8080"]

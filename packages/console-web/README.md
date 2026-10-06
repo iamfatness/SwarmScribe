@@ -143,6 +143,12 @@ cannot deadlock with them (it used to, about once in 400 tests). The fake leader
 down (`mode: "down"`) or made to revoke the console's credential (`mode: "revoked"`), and
 `us-1` lets the console act only as an operator.
 
+The console uses the machine's own fonts, and they differ in width: DejaVu Sans on GitHub's
+Linux runners is about 15% wider than Segoe UI on Windows (its bold about 25% wider). So the
+table-fit tests run twice, once in the machine's fonts and once with them scaled to a little
+over DejaVu's width (`widenFonts` in `e2e/tests/support.ts`; no font is fetched). A table that
+fits only on Windows fails here, not after a merge.
+
 ## Screenshots to look at
 
 ```

@@ -1,4 +1,5 @@
-"""swarmscribe-follower: run, join, leave, doctor (follower spec 4, 5.2, 5.3).
+"""swarmscribe-follower: run, join, leave, doctor, cuda-paths (follower spec 4, 5.2, 5.3,
+8.3).
 
 Every way this ends is a one-line `error: ...` and an exit code from errors.py; no traceback
 reaches the user. The join token is never an argument (spec 5.3: it would show in process
@@ -18,7 +19,7 @@ from typing import Any, TextIO
 from pydantic import SecretStr, ValidationError
 from swarmscribe_engine import DeviceUnavailableError
 
-from . import FOLLOWER_VERSION, logs
+from . import FOLLOWER_VERSION, cudalibs, logs
 from .agent import Agent
 from .config import Settings
 from .credentials import CredentialFileError, CredentialStore
@@ -107,6 +108,21 @@ def doctor_settings(out: TextIO) -> Settings | int:
             )
         print(f"result: NOT READY (exit {EXIT_CONFIGURATION})", file=out)
         return EXIT_CONFIGURATION
+
+
+def command_cuda_paths(out: TextIO, err: TextIO) -> int:
+    """Print the folders of the GPU libraries the `cuda` extra installed, joined as PATH and
+    LD_LIBRARY_PATH want them. The follower needs neither variable (cudalibs.py); this is for
+    looking, and for another program that uses the same libraries."""
+    found = cudalibs.folders()
+    if not found or not cudalibs.files():
+        print(
+            f"error: the GPU library cuBLAS is not installed here; install {cudalibs.EXTRA}",
+            file=err,
+        )
+        return EXIT_UNFIT
+    print(os.pathsep.join(str(folder) for folder in found), file=out)
+    return EXIT_OK
 
 
 def configure_environment(settings: Settings) -> None:
@@ -397,6 +413,9 @@ def parser() -> argparse.ArgumentParser:
     doctor.add_argument(
         "--no-leader", action="store_true", help="do not ask the leader's /healthz"
     )
+    commands.add_parser(
+        "cuda-paths", help="print the folders of the GPU libraries the cuda extra installed"
+    )
     return top
 
 
@@ -413,6 +432,8 @@ def main(
     imported, for `run` only (entry.py says why)."""
     out, err, stdin = out or sys.stdout, err or sys.stderr, stdin or sys.stdin
     args = parser().parse_args(argv)
+    if args.command == "cuda-paths":
+        return command_cuda_paths(out, err)
     if args.command == "doctor":
         settings = doctor_settings(out)
         if isinstance(settings, int):

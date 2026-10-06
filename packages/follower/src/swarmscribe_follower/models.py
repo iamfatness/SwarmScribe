@@ -13,6 +13,8 @@ from typing import Any
 from swarmscribe_engine import Device, Transcriber, TranscribeSettings
 from swarmscribe_protocol import MODEL_NAME_MAX_LENGTH, MODEL_NAME_PATTERN
 
+from . import cudalibs
+
 logger = logging.getLogger(__name__)
 
 # A model is named, never located: the name comes over the wire and the loader would accept
@@ -44,8 +46,12 @@ class ModelHost:
         factory: EngineFactory = Transcriber,
         allowed: frozenset[str] = frozenset(),
         on_loaded: Callable[[float], None] | None = None,
+        libraries: Callable[[], object] = cudalibs.load,
+        hint: Callable[[str], str] = cudalibs.hint,
     ) -> None:
         self.device = device
+        # On a GPU, called before a model is loaded: puts cuBLAS into the process (cudalibs.py).
+        self._libraries, self._hint = libraries, hint
         self._factory = factory
         self._allowed = allowed
         self._on_loaded = on_loaded  # told how many seconds a load and its warm-up took
@@ -70,6 +76,8 @@ class ModelHost:
         settings = TranscribeSettings(model=model, compute_type=compute_type, device=self.device)
         transcriber = None
         started = time.monotonic()
+        if self.device == "cuda":
+            self._libraries()
         try:
             transcriber = self._factory(settings)
             transcriber.warm_up()
@@ -82,6 +90,7 @@ class ModelHost:
             # operator's first clue, and it holds nothing of a recording.
             raise ModelUnavailable(
                 f"{model} ({compute_type}, {self.device}): {type(exc).__name__}: {str(exc)[:500]}"
+                f"{self._hint(str(exc)) if self.device == 'cuda' else ''}"
             ) from exc
         self._transcriber, self._loaded = transcriber, (model, compute_type)
         if self._on_loaded is not None:

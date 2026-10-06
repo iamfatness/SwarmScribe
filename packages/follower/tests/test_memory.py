@@ -1,4 +1,5 @@
 import io
+import sys
 import wave
 from pathlib import Path
 
@@ -92,23 +93,80 @@ def test_nothing_known_means_no_limit_and_a_nonsense_figure_is_ignored():
     assert find_limit(None, cgroup=lambda: 3, physical=lambda: 16000).megabytes == 16000
 
 
+def cgroups(tmp_path, own: str | None, limits: dict[str, str]):
+    """A cgroup v2 tree under tmp_path: `own` is what /proc/self/cgroup names (None: no v2),
+    `limits` maps a cgroup ("" is the root) to the content of its memory.max."""
+    root, proc = tmp_path / "cgroup", tmp_path / "proc-self-cgroup"
+    for cgroup, content in limits.items():
+        (root / cgroup).mkdir(parents=True, exist_ok=True)
+        (root / cgroup / "memory.max").write_text(content, encoding="ascii")
+    if own is not None:
+        proc.write_text(f"0::{own}\n", encoding="ascii")
+    return {"root": root, "proc": proc, "v1": tmp_path / "v1-absent"}
+
+
 @pytest.mark.parametrize(
     ("content", "megabytes"),
-    [
-        ("max\n", None),  # cgroup v2: unlimited
-        ("4294967296\n", 4096),
-        ("9223372036854771712\n", None),  # cgroup v1: unlimited
-        ("junk\n", None),
-    ],
+    [("max\n", None), ("4294967296\n", 4096), ("junk\n", None), ("", None)],
 )
-def test_the_container_limit_is_read_from_the_cgroup_file(tmp_path, content, megabytes):
-    file = tmp_path / "memory.max"
-    file.write_text(content, encoding="ascii")
-    assert memory.cgroup_limit_mb((tmp_path / "absent", file)) == megabytes
+def test_a_containers_limit_is_its_root_cgroup_file(tmp_path, content, megabytes):
+    # In a container the process sees its own cgroup as the root.
+    assert memory.cgroup_limit_mb(**cgroups(tmp_path, "/", {"": content})) == megabytes
 
 
-def test_no_cgroup_file_is_no_container_limit(tmp_path):
-    assert memory.cgroup_limit_mb((tmp_path / "absent", tmp_path / "also-absent")) is None
+def test_a_systemd_units_memory_max_is_seen(tmp_path):
+    # On a host the root cgroup has no memory.max at all; the unit's own cgroup has.
+    unit = "system.slice/swarmscribe-follower.service"
+    where = cgroups(tmp_path, "/" + unit, {"system.slice": "max\n", unit: "6442450944\n"})
+    assert memory.cgroup_limit_mb(**where) == 6144
+
+
+def test_the_smallest_limit_from_the_unit_up_to_the_root_binds(tmp_path):
+    unit = "machine.slice/small.slice/follower.service"
+    limits = {
+        "machine.slice": "8589934592\n",
+        "machine.slice/small.slice": "2147483648\n",
+        unit: "4294967296\n",
+    }
+    assert memory.cgroup_limit_mb(**cgroups(tmp_path, "/" + unit, limits)) == 2048
+
+
+def test_a_unit_without_a_limit_has_none(tmp_path):
+    unit = "system.slice/swarmscribe-follower.service"
+    where = cgroups(tmp_path, "/" + unit, {"system.slice": "max\n", unit: "max\n"})
+    assert memory.cgroup_limit_mb(**where) is None
+
+
+def test_a_cgroup_outside_the_visible_tree_reads_the_root_only(tmp_path):
+    where = cgroups(tmp_path, "/../../elsewhere", {"": "1073741824\n"})
+    assert memory.cgroup_limit_mb(**where) == 1024
+
+
+@pytest.mark.parametrize(
+    ("content", "megabytes"),
+    [("4294967296\n", 4096), ("9223372036854771712\n", None)],  # the second: v1's "no limit"
+)
+def test_cgroup_v1_is_still_read_where_there_is_no_v2(tmp_path, content, megabytes):
+    where = cgroups(tmp_path, None, {})
+    where["v1"].write_text(content, encoding="ascii")
+    assert memory.cgroup_limit_mb(**where) == megabytes
+    where["proc"].write_text("12:memory:/user.slice\n", encoding="ascii")  # v1 lines only
+    assert memory.cgroup_limit_mb(**where) == megabytes
+
+
+def test_no_cgroup_at_all_is_no_limit(tmp_path):
+    assert memory.cgroup_limit_mb(**cgroups(tmp_path, None, {})) is None
+
+
+def test_this_process_says_what_it_holds_on_linux_and_on_windows():
+    if sys.platform == "darwin":
+        pytest.skip("macOS has no /proc and no working-set call here: the job is counted alone")
+    before = memory.rss_mb()
+    assert before is not None and before >= 10
+    held = bytearray(64 * 1024 * 1024)
+    held[::4096] = b"\x01" * len(held[::4096])  # touch every page, so that it is really held
+    assert memory.rss_mb() >= before + 32
+    del held
 
 
 def test_this_machine_says_how_much_memory_it_has():

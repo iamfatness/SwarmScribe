@@ -1,0 +1,36 @@
+{{- if .Values.ingress.enabled }}
+{{- $host := include "swarmscribe-leader.host" . }}
+{{- $service := include "swarmscribe-leader.fullname" . }}
+# Explicit paths under /v1, never "/" and never the probes (the validation refuses them).
+# File links carry a signed token in their path: see values.yaml on request logging.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $service }}
+  labels:
+    {{- include "swarmscribe-leader.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  tls:
+    - hosts: [{{ $host | quote }}]
+      secretName: {{ .Values.ingress.tls.secretName | quote }}
+  rules:
+    - host: {{ $host | quote }}
+      http:
+        paths:
+          {{- range .Values.ingress.paths }}
+          - path: {{ .path | quote }}
+            pathType: {{ .pathType | quote }}
+            backend:
+              service:
+                name: {{ $service }}
+                port:
+                  name: http
+          {{- end }}
+{{- end }}

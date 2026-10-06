@@ -44,7 +44,7 @@ REPO = CHART.parents[2]
 VALUES = CHART / "ci" / "test-values.yaml"
 LEADER = REPO / "packages" / "leader" / "src" / "swarmscribe_leader"
 README = REPO / "README.md"
-# The kind test's values (plan L3). Until that file exists, KIND_VALUES below stands for it.
+# The kind test's values (plan L3): read below as KIND_VALUES.
 KIND_VALUES_FILE = REPO / "e2e" / "leader-kind" / "leader-values.yaml"
 NAME = "leader-swarmscribe-leader"
 HOST = "leader.example.org"
@@ -357,39 +357,11 @@ NO_SIGN_IN = {
         "admin": {"entraGroups": [], "emails": []},
     },
 }
-# Plan L3's e2e/leader-kind/leader-values.yaml, a whole values file: no sign-in, no Ingress,
-# plain http to the Service, peers by label. It must keep rendering as the chart tightens.
-KIND_VALUES = {
-    "image": {"repository": "swarmscribe-leader", "tag": "kind", "pullPolicy": "Never"},
-    "publicUrl": "http://leader-swarmscribe-leader",
-    "allowHttpPublicUrl": True,
-    "secrets": {"existingSecret": "leader"},
-    "oidc": {"allowNone": True},
-    "settings": {
-        "LEASE_SECONDS": "8",
-        "HEARTBEAT_SECONDS": "2",
-        "REAPER_INTERVAL_SECONDS": "1",
-        "SCANNER_INTERVAL_SECONDS": "1",
-        "CLAIM_RETRY_AFTER": "1",
-        "FOLLOWER_GONE_AFTER_SECONDS": "20",
-    },
-    "storage": {
-        "volumes": [{"name": "data", "mountPath": "/data", "existingClaim": "leader-data"}]
-    },
-    "ingress": {"enabled": False},
-    "networkPolicy": {
-        "ingress": {
-            "from": [
-                {"podSelector": {"matchLabels": {name: value}}}
-                for name, value in (
-                    ("app.kubernetes.io/name", "swarmscribe-follower"),
-                    ("swarmscribe-e2e/role", "prober"),
-                )
-            ]
-        },
-        "egress": {"postgres": {"peers": [{"podSelector": {"matchLabels": {"app": "postgres"}}}]}},
-    },
-}
+# The kind test's values (e2e/leader-kind/leader-values.yaml), a whole values file: no
+# sign-in, no Ingress, plain http to the Service, peers by label. It must keep rendering as
+# the chart tightens, and what it renders is compared whole (core_whole) and counted
+# (core_must_render: 7 objects, two egress rules, no ipBlock).
+KIND_VALUES = yaml.safe_load(KIND_VALUES_FILE.read_text(encoding="utf-8"))
 
 # --- the schema: which objects may take keys it does not name ------------------------------
 
@@ -1160,14 +1132,13 @@ def core_whole(_docs: list[dict]) -> list[str]:
         policy["egress"][1]["to"] = peers["egress"]["postgres"]["peers"]
         objects["NetworkPolicy"]["spec"] = policy
 
-    if not KIND_VALUES_FILE.exists():
-        variant(
-            problems,
-            "the kind test's values, alone",
-            render_with(KIND_VALUES, base=False),
-            kind,
-            without=("Ingress",),
-        )
+    variant(
+        problems,
+        "the kind test's values, alone",
+        render_with(KIND_VALUES, base=False),
+        kind,
+        without=("Ingress",),
+    )
     return problems
 
 
@@ -1255,7 +1226,10 @@ def printed_notes(*extra: str) -> str:
     done = helm_template(*extra, "--show-only", "templates/zz-notes.yaml", chart=notes_chart())
     if done.returncode != 0:
         raise CheckError(f"helm template of the notes failed: {said(done)}")
-    return str(dig(yaml.safe_load(done.stdout), "data", "notes") or "")
+    # A Windows checkout with core.autocrlf gives NOTES.txt CRLF line ends, and Helm prints
+    # them as they are: the text is compared without them.
+    notes = str(dig(yaml.safe_load(done.stdout), "data", "notes") or "")
+    return "\n".join(notes.splitlines())
 
 
 def core_notes(_docs: list[dict]) -> list[str]:
@@ -2218,8 +2192,6 @@ def core_must_render(_docs: list[dict]) -> list[str]:
         keys = ", ".join(sorted(fragment))
         cases.append((f"the README's example {index} ({keys}) over them", [whole, fragment], 8))
     kind = KIND_VALUES
-    if KIND_VALUES_FILE.exists():
-        kind = yaml.safe_load(KIND_VALUES_FILE.read_text(encoding="utf-8"))
     cases.append(("the kind test's values", [kind], 7))
     for what, layers, count in cases:
         files = [arg for layer in layers for arg in ("-f", str(values_file(layer)))]

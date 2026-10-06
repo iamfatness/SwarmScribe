@@ -1,0 +1,46 @@
+# The leader chart's values for the kind test (e2e/leader-kind/run_e2e.py). Test-only: plain
+# http inside the cluster, no sign-in (there is no identity provider here), a lease of eight
+# seconds as in the Compose tests. Everything not set here is the chart's default: two
+# replicas, the NetworkPolicy, the PodDisruptionBudget, the migration hook.
+image:
+  repository: swarmscribe-leader
+  tag: kind
+  pullPolicy: Never
+# The Service's own name: the followers reach the leader there, and the leader builds its
+# file links from it. The release must be named `leader`.
+publicUrl: http://leader-swarmscribe-leader
+allowHttpPublicUrl: true
+secrets:
+  existingSecret: leader
+oidc:
+  allowNone: true
+settings:
+  LEASE_SECONDS: "8"
+  HEARTBEAT_SECONDS: "2"
+  REAPER_INTERVAL_SECONDS: "1"
+  SCANNER_INTERVAL_SECONDS: "1"
+  CLAIM_RETRY_AFTER: "1"
+  FOLLOWER_GONE_AFTER_SECONDS: "20"
+storage:
+  volumes:
+    - name: data
+      mountPath: /data
+      existingClaim: leader-data
+ingress:
+  enabled: false
+networkPolicy:
+  ingress:
+    from:
+      # The follower chart's pods, and the test's prober. Nobody else: the scenario checks.
+      - podSelector:
+          matchLabels:
+            app.kubernetes.io/name: swarmscribe-follower
+      - podSelector:
+          matchLabels:
+            swarmscribe-e2e/role: prober
+  egress:
+    postgres:
+      peers:
+        - podSelector:
+            matchLabels:
+              app: postgres

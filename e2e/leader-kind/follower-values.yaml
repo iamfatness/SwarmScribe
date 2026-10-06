@@ -1,0 +1,34 @@
+# The follower chart's values for the kind test of the LEADER chart
+# (e2e/leader-kind/run_e2e.py). Test-only: a plain-http leader inside the cluster and a small
+# image with tiny.en baked in.
+image:
+  repository: swarmscribe-follower
+  tag: leader-kind
+  pullPolicy: Never
+replicaCount: 2
+leader:
+  # The leader chart's Service (release `leader`), on its port 80.
+  url: http://leader-swarmscribe-leader
+  allowHttp: true
+poolToken:
+  existingSecret: pool-token
+pool: default
+# Room for the twelve-minute recording that is in hand during the upgrade (the driver's
+# LONG_REPEATS; packages/leader/tests/test_leader_kind_driver.py checks the arithmetic).
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: "2"
+    memory: 2500Mi
+scratch:
+  sizeLimit: 1Gi
+terminationGracePeriodSeconds: 60
+minReadySeconds: 5
+networkPolicy:
+  egress:
+    https:
+      # A NetworkPolicy is matched after Service translation: the leader's Service is on 80
+      # (allowed from leader.url) and its pods listen on 8080, which is the port that counts.
+      ports: [443, 8080]

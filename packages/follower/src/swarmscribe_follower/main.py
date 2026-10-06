@@ -38,11 +38,12 @@ from .transfer import Links
 logger = logging.getLogger(__name__)
 Build = Callable[[Settings], Agent]
 
+ENVIRONMENT = "SWARMSCRIBE_* environment"
 EXIT_UNEXPECTED = 1  # a bug; doctor also uses it for "the leader does not answer"
 EXIT_INTERRUPTED = 130  # Ctrl+C outside `run` (which handles its own signals)
 
 
-def load_settings(err: TextIO, **given: Any) -> Settings | None:
+def load_settings(err: TextIO, *, source: str = ENVIRONMENT, **given: Any) -> Settings | None:
     try:
         return Settings(**given)
     except RuntimeError:  # no home directory to put the state folder in
@@ -55,73 +56,122 @@ def load_settings(err: TextIO, **given: Any) -> Settings | None:
     except ValidationError as error:
         # Field names and messages only: the default rendering echoes the values, and one
         # of them is the join token.
-        print("error: invalid configuration (SWARMSCRIBE_* environment):", file=err)
-        for problem in error.errors(include_input=False, include_url=False, include_context=False):
-            field = ".".join(str(part) for part in problem["loc"]) or "settings"
-            print(f"  {field}: {problem['msg']}", file=err)
+        print(f"error: invalid configuration ({source}):", file=err)
+        for line in _problems(error):
+            print(f"  {line}", file=err)
         return None
 
 
-def stored_leader(err: TextIO) -> dict[str, Any] | int:
-    """What to add to the settings when SWARMSCRIBE_LEADER_URL is not set: the leader the
-    stored credential was issued by, so that `run`, `doctor` and `leave` work after
-    `join --leader URL` without the URL being set anywhere. Empty when a leader is set or
-    nothing is stored; an exit code when the other settings or the credential file are wrong
-    (exit 2, never taken for "has not joined")."""
+def _problems(error: ValidationError) -> list[str]:
+    lines = []
+    for problem in error.errors(include_input=False, include_url=False, include_context=False):
+        field = ".".join(str(part) for part in problem["loc"]) or "settings"
+        lines.append(f"{field}: {problem['msg']}")
+    return lines
+
+
+class StoredLeaderProblem(Exception):
+    """The stored leader cannot be looked up, or cannot be used. `lines` say why, in plain
+    words and never with a value from the settings; `invalid` says they are fields of the
+    settings."""
+
+    def __init__(self, lines: list[str], *, invalid: bool = False) -> None:
+        super().__init__("; ".join(lines))
+        self.lines = lines
+        self.invalid = invalid
+
+
+def find_stored_leader(*, plain_http_needs_switch: bool) -> dict[str, Any]:
+    """What to add to the settings when SWARMSCRIBE_LEADER_URL is not set (or blank): the
+    leader the stored credential was issued by, so that `run`, `doctor` and `leave` work
+    after `join --leader URL` without the URL being set anywhere. Empty when a leader is set
+    or nothing is stored. Raises StoredLeaderProblem when the other settings or the
+    credential file are wrong (never taken for "has not joined").
+
+    `plain_http_needs_switch`: a stored http:// leader is used only when
+    SWARMSCRIBE_FOLLOWER_ALLOW_HTTP is set (`run`, `doctor`); `leave` always may, so that it
+    can tell the leader it is going."""
     if os.environ.get("SWARMSCRIBE_LEADER_URL", "").strip():
         return {}
     # A placeholder leader that is never contacted: it lets the other settings (the state
     # folder above all) be validated and reported as usual.
-    base = load_settings(err, leader_url="https://placeholder.invalid")
-    if base is None:
-        return EXIT_CONFIGURATION
+    try:
+        base = Settings(leader_url="https://placeholder.invalid")
+    except RuntimeError:
+        raise StoredLeaderProblem(
+            ["no home directory; set SWARMSCRIBE_FOLLOWER_STATE_DIR"]
+        ) from None
+    except ValidationError as error:
+        raise StoredLeaderProblem(_problems(error), invalid=True) from None
     try:
         stored = CredentialStore(base.credential_file).load()
     except CredentialFileError as error:
-        print(f"error: {error}", file=err)
-        return EXIT_CONFIGURATION
+        raise StoredLeaderProblem([str(error)]) from None
     if stored is None:
         return {}
     given: dict[str, Any] = {"leader_url": stored.leader_url}
     if stored.leader_url.lower().startswith("http://"):
-        given["allow_http"] = True  # it was issued under that switch
+        if plain_http_needs_switch and not base.allow_http:
+            raise StoredLeaderProblem(
+                [
+                    f"the stored leader {stored.leader_url} is plain http; set"
+                    " SWARMSCRIBE_FOLLOWER_ALLOW_HTTP=1 to use it (development only)"
+                ]
+            )
+        given["allow_http"] = True
     return given
 
 
-def leave_settings(out: TextIO, err: TextIO) -> Settings | int:
+def stored_leader(
+    err: TextIO, *, plain_http_needs_switch: bool = True, source: str = ENVIRONMENT
+) -> dict[str, Any] | int:
+    """find_stored_leader, for the commands that refuse to start: a problem is an `error:`
+    on `err` and the configuration exit."""
+    try:
+        return find_stored_leader(plain_http_needs_switch=plain_http_needs_switch)
+    except StoredLeaderProblem as problem:
+        if problem.invalid:
+            print(f"error: invalid configuration ({source}):", file=err)
+            for line in problem.lines:
+                print(f"  {line}", file=err)
+        else:
+            for line in problem.lines:
+                print(f"error: {line}", file=err)
+        return EXIT_CONFIGURATION
+
+
+def leave_settings(out: TextIO, err: TextIO, *, source: str = ENVIRONMENT) -> Settings | int:
     """The settings for `leave`: the environment's, or, when no leader is set, the leader the
     credential was issued by. An exit code when there is nothing to do or nothing can be
     done: only an ABSENT credential file means "has not joined"; an invalid setting or a
     credential file that cannot be read is an error (exit 2), never a success."""
-    given = stored_leader(err)
+    given = stored_leader(err, plain_http_needs_switch=False, source=source)
     if isinstance(given, int):
         return given
     if not given and not os.environ.get("SWARMSCRIBE_LEADER_URL", "").strip():
         print("this follower has not joined a leader", file=out)
         return EXIT_OK
-    return load_settings(err, **given) or EXIT_CONFIGURATION
+    return load_settings(err, source=source, **given) or EXIT_CONFIGURATION
+
+
+def doctor_failed(out: TextIO, lines: list[str]) -> int:
+    print(f"swarmscribe-follower {FOLLOWER_VERSION}", file=out)
+    for line in lines:
+        print(f"settings: FAILED: {line}", file=out)
+    print(f"result: NOT READY (exit {EXIT_CONFIGURATION})", file=out)
+    return EXIT_CONFIGURATION
 
 
 def doctor_settings(out: TextIO, **given: Any) -> Settings | int:
     """`doctor` says what is wrong with the settings as one of its checks, in plain words,
-    instead of refusing to start."""
+    instead of refusing to start. That includes what is wrong while the stored leader is
+    looked up (`given` is not passed then: see main)."""
     try:
         return Settings(**given)
-    except (ValidationError, RuntimeError) as error:
-        print(f"swarmscribe-follower {FOLLOWER_VERSION}", file=out)
-        if isinstance(error, ValidationError):
-            for problem in error.errors(
-                include_input=False, include_url=False, include_context=False
-            ):
-                field = ".".join(str(part) for part in problem["loc"]) or "settings"
-                print(f"settings: FAILED: {field}: {problem['msg']}", file=out)
-        else:
-            print(
-                "settings: FAILED: no home directory; set SWARMSCRIBE_FOLLOWER_STATE_DIR",
-                file=out,
-            )
-        print(f"result: NOT READY (exit {EXIT_CONFIGURATION})", file=out)
-        return EXIT_CONFIGURATION
+    except ValidationError as error:
+        return doctor_failed(out, _problems(error))
+    except RuntimeError:
+        return doctor_failed(out, ["no home directory; set SWARMSCRIBE_FOLLOWER_STATE_DIR"])
 
 
 def command_cuda_paths(out: TextIO, err: TextIO) -> int:
@@ -189,7 +239,15 @@ def build(settings: Settings) -> Agent:
     )
 
 
-def command_run(settings: Settings, build: Build, signals: StopSignals | None = None) -> int:
+def command_run(
+    settings: Settings,
+    build: Build,
+    signals: StopSignals | None = None,
+    *,
+    leader_from_stored: bool = False,
+) -> int:
+    if leader_from_stored:
+        logger.info("leader %s taken from the stored credential", settings.leader_url)
     # The agent takes the state folder's lock itself and releases it when it ends.
     # `signals` are the handlers entry.run installed before anything was imported (without
     # them, run_supervised installs its own): a stop that arrived during the imports ends
@@ -331,6 +389,7 @@ def command_doctor(
     client: Callable[..., LeaderClient] = LeaderClient,
     load_model: bool = True,
     ask_leader: bool = True,
+    leader_from_stored: bool = False,
 ) -> int:
     """What start-up checks, said out loud, one line per check: settings, folders, device,
     the model with a real inference, the leader. Registers nothing and claims nothing, and
@@ -338,7 +397,8 @@ def command_doctor(
     out: a machine or an image can be checked where there is no network."""
     configure_environment(settings)
     print(f"swarmscribe-follower {FOLLOWER_VERSION}", file=out)
-    print(f"settings: ok (leader {settings.leader_url}, pool {settings.pool})", file=out)
+    where = " from the stored credential" if leader_from_stored else ""
+    print(f"settings: ok (leader {settings.leader_url}{where}, pool {settings.pool})", file=out)
     code = EXIT_OK
     folders = (("state folder", settings.state_dir), ("scratch folder", settings.scratch))
     for name, folder in folders:
@@ -399,6 +459,7 @@ def command_doctor(
 def parser() -> argparse.ArgumentParser:
     top = argparse.ArgumentParser(
         prog="swarmscribe-follower",
+        allow_abbrev=False,  # entry.command reads argv before this does and must agree
         description="Take recordings from a SwarmScribe leader and transcribe them. Settings"
         " come from SWARMSCRIBE_* environment variables (SWARMSCRIBE_LEADER_URL is required).",
         epilog="The join token is never a command-line argument, so it stays out of process"
@@ -454,44 +515,55 @@ def main(
     args = parser().parse_args(argv)
     if args.command == "cuda-paths":
         return command_cuda_paths(out, err)
+    source = ENVIRONMENT
     if args.env_file:
         try:
             envfile.load(args.env_file)
         except envfile.EnvFileError as error:
             print(f"error: {error}", file=err)
             return EXIT_CONFIGURATION
+        source = f"{ENVIRONMENT} and the settings file {args.env_file}"
+    from_stored = False
     if args.command == "leave":
-        settings = leave_settings(out, err)
+        settings = leave_settings(out, err, source=source)
         if isinstance(settings, int):
             return settings
     elif args.command == "join" and args.leader:
-        settings = load_settings(err, leader_url=args.leader)
+        settings = load_settings(err, source=source, leader_url=args.leader)
         if settings is None:
             return EXIT_CONFIGURATION
     else:
         # Without SWARMSCRIBE_LEADER_URL, `run` and `doctor` use the leader this follower
         # joined (`join --leader URL` needs nothing set afterwards).
-        given = stored_leader(err) if args.command in ("run", "doctor") else {}
-        if isinstance(given, int):
-            return given
+        given: dict[str, Any] = {}
+        if args.command in ("run", "doctor"):
+            try:
+                given = find_stored_leader(plain_http_needs_switch=True)
+            except StoredLeaderProblem as problem:
+                if args.command == "doctor":  # a failed check, not a refusal to start
+                    return doctor_failed(out, problem.lines)
+                code = stored_leader(err, source=source)
+                return code if isinstance(code, int) else EXIT_CONFIGURATION
+            from_stored = bool(given)
         if args.command == "doctor":
             settings = doctor_settings(out, **given)
             if isinstance(settings, int):
                 return settings
         else:
-            settings = load_settings(err, **given)
+            settings = load_settings(err, source=source, **given)
             if settings is None:
                 return EXIT_CONFIGURATION
     logs.configure_logging(settings.log_format, stream=err)
     try:
         if args.command == "run":
-            return command_run(settings, build, signals)
+            return command_run(settings, build, signals, leader_from_stored=from_stored)
         if args.command == "join":
             return command_join(settings, build, args.token_stdin, out, stdin)
         if args.command == "leave":
             return command_leave(settings, out)
+        options = {"leader_from_stored": True} if from_stored else {}
         return command_doctor(
-            settings, out, load_model=not args.no_model, ask_leader=not args.no_leader
+            settings, out, load_model=not args.no_model, ask_leader=not args.no_leader, **options
         )
     except FollowerExit as stop:
         if stop.code != EXIT_OK:

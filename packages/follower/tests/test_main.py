@@ -521,7 +521,8 @@ def test_after_join_with_a_leader_run_and_doctor_need_no_leader_url(
     assert asked == [BASE]
     out, err = io.StringIO(), io.StringIO()
     assert cli.main(["doctor", "--no-model", "--no-leader"], out=out, err=err) == 0
-    assert f"settings: ok (leader {BASE}, pool default)" in out.getvalue()
+    line = f"settings: ok (leader {BASE} from the stored credential, pool default)"
+    assert line in out.getvalue()
 
 
 def test_without_a_leader_url_and_without_a_credential_run_still_says_what_is_missing(
@@ -534,3 +535,179 @@ def test_without_a_leader_url_and_without_a_credential_run_still_says_what_is_mi
     out, err = io.StringIO(), io.StringIO()
     assert cli.main(["doctor", "--no-model", "--no-leader"], out=out, err=err) == 2
     assert "settings: FAILED" in out.getvalue()
+
+
+# ---- F4a Task 2, fix round 1: the stored leader, said and bounded --------------------------
+
+
+def joined(tmp_path, leader, engine, monkeypatch, url=None):
+    """A follower that has joined BASE, with no leader set anywhere afterwards. `url` rewrites
+    the address in the stored credential (to make an http one)."""
+    assert run_cli(tmp_path, leader, engine, "join")[0] == 0
+    monkeypatch.delenv("SWARMSCRIBE_LEADER_URL")
+    if url:
+        path = tmp_path / "state" / "credential.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["leader_url"] = url
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_doctor_with_no_leader_and_a_bad_setting_is_still_a_diagnostic(monkeypatch):
+    monkeypatch.delenv("SWARMSCRIBE_LEADER_URL")
+    monkeypatch.setenv("SWARMSCRIBE_FOLLOWER_DEVICE", "tpu")
+    out, err = io.StringIO(), io.StringIO()
+    assert cli.main(["doctor", "--no-model", "--no-leader"], out=out, err=err) == 2
+    lines = out.getvalue().splitlines()
+    assert lines[0].startswith("swarmscribe-follower ")
+    assert any(line.startswith("settings: FAILED: ") for line in lines)
+    assert lines[-1] == "result: NOT READY (exit 2)"
+    assert err.getvalue() == ""
+
+
+def test_doctor_with_an_unreadable_credential_reports_it_as_the_settings_check(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("SWARMSCRIBE_LEADER_URL")
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "credential.json").write_text("not json", encoding="utf-8")
+    out, err = io.StringIO(), io.StringIO()
+    assert cli.main(["doctor", "--no-model", "--no-leader"], out=out, err=err) == 2
+    assert "settings: FAILED: " in out.getvalue() and err.getvalue() == ""
+    assert "Traceback" not in out.getvalue()
+
+
+def test_doctor_and_run_say_when_the_leader_is_the_stored_one(
+    tmp_path, leader, engine, monkeypatch
+):
+    joined(tmp_path, leader, engine, monkeypatch)
+    out, err = io.StringIO(), io.StringIO()
+    assert cli.main(["doctor", "--no-model", "--no-leader"], out=out, err=err) == 0
+    assert (
+        f"settings: ok (leader {BASE} from the stored credential, pool default)" in out.getvalue()
+    )
+    leader.state = "draining"
+    code, _out, err, _ = run_cli(tmp_path, leader, engine, "run")
+    assert code == 0
+    assert err.count(f"leader {BASE} taken from the stored credential") == 1
+
+
+def test_a_configured_leader_keeps_the_old_wording_and_logs_nothing_extra(
+    tmp_path, leader, engine, monkeypatch
+):
+    assert run_cli(tmp_path, leader, engine, "join")[0] == 0  # stored: BASE; set: BASE
+    out = io.StringIO()
+    assert cli.main(["doctor", "--no-model", "--no-leader"], out=out, err=io.StringIO()) == 0
+    assert f"settings: ok (leader {BASE}, pool default)" in out.getvalue()
+    leader.state = "draining"
+    code, _o, err, _ = run_cli(tmp_path, leader, engine, "run")
+    assert code == 0 and "stored credential" not in err
+
+
+def doctor_line(argv_extra=()):
+    out = io.StringIO()
+    argv = [*argv_extra, "doctor", "--no-model", "--no-leader"]
+    code = cli.main(argv, out=out, err=io.StringIO())
+    return code, out.getvalue()
+
+
+def test_a_leader_in_the_environment_wins_over_the_stored_one(
+    tmp_path, leader, engine, monkeypatch
+):
+    joined(tmp_path, leader, engine, monkeypatch)
+    monkeypatch.setenv("SWARMSCRIBE_LEADER_URL", "https://env.test")
+    code, text = doctor_line()
+    assert code == 0 and "settings: ok (leader https://env.test, pool default)" in text
+
+
+def test_a_leader_in_the_settings_file_wins_over_the_stored_one(
+    tmp_path, leader, engine, monkeypatch
+):
+    joined(tmp_path, leader, engine, monkeypatch)
+    path = tmp_path / "follower.env"
+    path.write_text("SWARMSCRIBE_LEADER_URL=https://file.test\n", encoding="utf-8")
+    code, text = doctor_line(["--env-file", str(path)])
+    assert code == 0 and "settings: ok (leader https://file.test, pool default)" in text
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+@pytest.mark.parametrize("where", ["environment", "file"])
+def test_a_blank_leader_falls_back_to_the_stored_one_and_says_so(
+    tmp_path, leader, engine, monkeypatch, blank, where
+):
+    joined(tmp_path, leader, engine, monkeypatch)
+    extra = []
+    if where == "environment":
+        monkeypatch.setenv("SWARMSCRIBE_LEADER_URL", blank)
+    else:
+        path = tmp_path / "follower.env"
+        path.write_text(f"SWARMSCRIBE_LEADER_URL={blank}\n", encoding="utf-8")
+        extra = ["--env-file", str(path)]
+    code, text = doctor_line(extra)
+    assert code == 0 and f"leader {BASE} from the stored credential" in text
+
+
+def test_env_file_works_with_a_space_or_an_equals_sign_and_a_crlf_file_and_equals_in_a_value(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("SWARMSCRIBE_LEADER_URL")
+    path = tmp_path / "follower.env"
+    path.write_bytes(
+        b"SWARMSCRIBE_LEADER_URL=https://file.test\r\nSWARMSCRIBE_FOLLOWER_POOL=a=b=c\r\n"
+    )
+    for argv in (["--env-file", str(path)], [f"--env-file={path}"]):
+        code, text = doctor_line(argv)
+        assert code == 0, text
+        assert "settings: ok (leader https://file.test, pool a=b=c)" in text
+
+
+def test_a_stored_http_leader_needs_the_allow_http_setting_for_run_and_doctor(
+    tmp_path, leader, engine, monkeypatch
+):
+    joined(tmp_path, leader, engine, monkeypatch, url="http://leader.local")
+    code, text = doctor_line()
+    assert code == 2 and text.splitlines()[0].startswith("swarmscribe-follower ")
+    assert "settings: FAILED: " in text and "http://leader.local" in text
+    assert "SWARMSCRIBE_FOLLOWER_ALLOW_HTTP" in text
+    out, err = io.StringIO(), io.StringIO()
+    assert cli.main(["run"], out=out, err=err) == 2
+    assert "http://leader.local" in err.getvalue()
+    assert "SWARMSCRIBE_FOLLOWER_ALLOW_HTTP" in err.getvalue()
+    monkeypatch.setenv("SWARMSCRIBE_FOLLOWER_ALLOW_HTTP", "1")
+    code, text = doctor_line()
+    assert code == 0 and "leader http://leader.local from the stored credential" in text
+
+
+def test_a_stored_http_leader_still_lets_leave_say_goodbye(
+    tmp_path, leader, engine, monkeypatch
+):
+    joined(tmp_path, leader, engine, monkeypatch, url="http://leader.local")
+    urls = []
+
+    def client(url, **kw):
+        urls.append(url)
+        return LeaderClient(url, credential=kw.get("credential"), transport=leader.transport)
+
+    monkeypatch.setattr(cli, "LeaderClient", client)
+    code, _out, err, _ = run_cli(tmp_path, leader, engine, "leave")
+    assert code == 0, err
+    assert urls == ["http://leader.local"]
+
+
+def test_a_bad_value_from_the_settings_file_names_the_file(tmp_path, monkeypatch):
+    path = tmp_path / "follower.env"
+    path.write_text("SWARMSCRIBE_FOLLOWER_DEVICE=tpu\n", encoding="utf-8")
+    out, err = io.StringIO(), io.StringIO()
+    assert cli.main(["--env-file", str(path), "run"], out=out, err=err) == 2
+    assert str(path) in err.getvalue() and "tpu" not in err.getvalue()
+    out, err = io.StringIO(), io.StringIO()
+    monkeypatch.setenv("SWARMSCRIBE_FOLLOWER_DEVICE", "tpu")
+    assert cli.main(["run"], out=out, err=err) == 2
+    assert "SWARMSCRIBE_* environment" in err.getvalue()
+
+
+def test_an_abbreviated_env_file_option_is_refused_not_accepted(tmp_path, capsys):
+    with pytest.raises(SystemExit) as stop:
+        cli.main(["--env", str(tmp_path / "follower.env"), "run"])
+    assert stop.value.code == 2
+    assert "--env" in capsys.readouterr().err

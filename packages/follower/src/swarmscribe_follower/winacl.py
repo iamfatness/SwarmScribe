@@ -1,0 +1,250 @@
+"""Windows: who may reach the state folder and the credential file (follower spec 5.3).
+
+POSIX mode bits mean nothing on NTFS, so on Windows the credential's trust check reads the
+access control list instead. The rule is the POSIX one in Windows terms: the folder and the
+file must belong to this account (or to SYSTEM or the Administrators group, which own what an
+installer creates), and nobody but this account, SYSTEM and Administrators may be allowed in,
+for anything. A folder under the user's profile (the default state folder) and one made by
+`swarmscribe-follower service install` pass; a folder made at the root of a drive does not
+(there `Authenticated Users` may write).
+
+Only allow entries are read. A deny entry can only take access away, and the two entry kinds
+Windows never puts on a file (object and callback entries) are ignored.
+
+Every function here raises OSError when Windows refuses a call, and is called on Windows only."""
+
+import ctypes
+import functools
+from pathlib import Path
+
+SYSTEM = "S-1-5-18"
+ADMINISTRATORS = "S-1-5-32-544"
+# CREATOR OWNER and OWNER RIGHTS stand for whoever owns the object: the owner is checked.
+OWNER_PLACEHOLDERS = frozenset({"S-1-3-0", "S-1-3-4"})
+KNOWN = {
+    "S-1-1-0": "Everyone",
+    "S-1-5-11": "Authenticated Users",
+    "S-1-5-32-545": "Users",
+    "S-1-5-4": "Interactive",
+    SYSTEM: "SYSTEM",
+    ADMINISTRATORS: "Administrators",
+}
+_SE_FILE_OBJECT = 1
+_DACL = 0x4
+_OWNER_AND_DACL = 0x1 | _DACL
+_PROTECTED_DACL = 0x80000000
+_ACCESS_ALLOWED_ACE = 0
+_TOKEN_QUERY = 0x8
+_TOKEN_USER = 1
+
+
+@functools.cache
+def _api():
+    from ctypes import wintypes
+
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    pointer = ctypes.POINTER(ctypes.c_void_p)
+    advapi.GetNamedSecurityInfoW.argtypes = [
+        wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD, pointer, pointer, pointer, pointer, pointer,
+    ]
+    advapi.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi.GetSecurityInfo.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, wintypes.DWORD, pointer, pointer, pointer, pointer, pointer,
+    ]
+    advapi.GetSecurityInfo.restype = wintypes.DWORD
+    advapi.GetAclInformation.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.c_int,
+    ]
+    advapi.GetAce.argtypes = [ctypes.c_void_p, wintypes.DWORD, pointer]
+    advapi.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+    advapi.OpenProcessToken.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE),
+    ]
+    advapi.GetTokenInformation.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel.LocalFree.restype = ctypes.c_void_p
+    return advapi, kernel
+
+
+def _sid_text(advapi, kernel, sid: int) -> str:
+    from ctypes import wintypes
+
+    text = wintypes.LPWSTR()
+    if not advapi.ConvertSidToStringSidW(sid, ctypes.byref(text)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return text.value or ""
+    finally:
+        kernel.LocalFree(ctypes.cast(text, ctypes.c_void_p))
+
+
+@functools.cache
+def current_user() -> str:
+    """The SID of the account this process runs as, as text (`S-1-5-21-...`)."""
+    from ctypes import wintypes
+
+    advapi, kernel = _api()
+    token = wintypes.HANDLE()
+    if not advapi.OpenProcessToken(kernel.GetCurrentProcess(), _TOKEN_QUERY, ctypes.byref(token)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        size = wintypes.DWORD()
+        advapi.GetTokenInformation(token, _TOKEN_USER, None, 0, ctypes.byref(size))
+        buffer = ctypes.create_string_buffer(size.value)
+        if not advapi.GetTokenInformation(
+            token, _TOKEN_USER, buffer, size.value, ctypes.byref(size)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        # TOKEN_USER starts with a pointer to the SID.
+        sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
+        return _sid_text(advapi, kernel, sid)
+    finally:
+        kernel.CloseHandle(token)
+
+
+def read_acl(path: Path, descriptor_of: int | None = None) -> tuple[str, list[str] | None]:
+    """(the owner's SID, the SIDs with an allow entry) for a file or folder. The list is None
+    when the object has no access control list at all: then everyone may do anything.
+
+    `descriptor_of`: an open file descriptor of `path`. The file is then read through it and
+    not opened a second time: the answer is about the file that is being read, and another
+    writer's replace of the credential is not held up by a second open."""
+    import msvcrt
+    from ctypes import wintypes
+
+    advapi, kernel = _api()
+    owner, dacl, descriptor = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+    out = (ctypes.byref(owner), None, ctypes.byref(dacl), None, ctypes.byref(descriptor))
+    if descriptor_of is None:
+        error = advapi.GetNamedSecurityInfoW(str(path), _SE_FILE_OBJECT, _OWNER_AND_DACL, *out)
+    else:
+        handle = msvcrt.get_osfhandle(descriptor_of)
+        error = advapi.GetSecurityInfo(handle, _SE_FILE_OBJECT, _OWNER_AND_DACL, *out)
+    if error:
+        raise ctypes.WinError(error)
+    try:
+        owner_sid = _sid_text(advapi, kernel, owner.value)
+        if not dacl.value:
+            return owner_sid, None
+        counts = (wintypes.DWORD * 3)()  # ACL_SIZE_INFORMATION: the entry count comes first
+        if not advapi.GetAclInformation(dacl, counts, ctypes.sizeof(counts), 2):
+            raise ctypes.WinError(ctypes.get_last_error())
+        allowed = []
+        for index in range(counts[0]):
+            entry = ctypes.c_void_p()
+            if not advapi.GetAce(dacl, index, ctypes.byref(entry)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            # ACE_HEADER is a type byte, a flags byte and a 16-bit size; an allow entry
+            # follows it with a 32-bit mask and then the SID.
+            kind = ctypes.cast(entry, ctypes.POINTER(ctypes.c_ubyte))[0]
+            mask = ctypes.cast(entry.value + 4, ctypes.POINTER(wintypes.DWORD))[0]
+            if kind == _ACCESS_ALLOWED_ACE and mask:
+                allowed.append(_sid_text(advapi, kernel, entry.value + 8))
+        return owner_sid, allowed
+    finally:
+        kernel.LocalFree(descriptor)
+
+
+def _name(sid: str) -> str:
+    return f"{KNOWN[sid]} ({sid})" if sid in KNOWN else sid
+
+
+def access_problem(
+    path: Path,
+    *,
+    what: str = "folder",
+    owner_only: bool = False,
+    acl: tuple[str, list[str] | None] | None = None,
+) -> str | None:
+    """None when `path` can be trusted with the credential; else why not, naming who else is
+    allowed in and the command that makes it private. `owner_only`: look at the owner alone
+    (`doctor` on a folder that `run` would make private before it uses it). `acl`: what
+    `read_acl` already said of `path` (the credential file, read while it was open)."""
+    me = current_user()
+    owner, allowed = acl if acl is not None else read_acl(path)
+    trusted = {me, SYSTEM, ADMINISTRATORS}
+    fix = (
+        f'icacls "{path}" /inheritance:r /grant:r "*{me}:(OI)(CI)F" "*{SYSTEM}:(OI)(CI)F"'
+        f' "*{ADMINISTRATORS}:(OI)(CI)F"'
+        if what == "folder"
+        else f'icacls "{path}" /inheritance:r /grant:r "*{me}:F" "*{SYSTEM}:F"'
+        f' "*{ADMINISTRATORS}:F"'
+    )
+    if owner not in trusted:
+        return (
+            f"the {what} {path} is owned by another account ({_name(owner)}) and will not be"
+            " trusted with the credential; use a folder of this account's own (the default is"
+            r" under %LOCALAPPDATA%)"
+        )
+    if owner_only:
+        return None
+    if allowed is None:
+        return (
+            f"the {what} {path} has no access control list (everyone may do anything) and will"
+            f" not be trusted with the credential; run: {fix}"
+        )
+    others = sorted({sid for sid in allowed if sid not in trusted | OWNER_PLACEHOLDERS})
+    if others:
+        removes = " ".join(f'/remove "*{sid}"' for sid in others)
+        return (
+            f"the {what} {path} can be reached by other accounts"
+            f" ({', '.join(_name(sid) for sid in others)}) and will not be trusted with the"
+            f" credential; make it private with: {fix} {removes}"
+        )
+    return None
+
+
+def make_private(path: Path) -> bool:
+    """What `chmod 700` is on POSIX: when the folder `path` is this account's own and others
+    are allowed in, replace its access control list with one that names this account, SYSTEM
+    and Administrators only, inherited by everything inside it, and inheriting nothing from
+    above. True when it was changed. A folder that is someone else's is left alone (the
+    callers that trust a folder refuse it by themselves)."""
+    from ctypes import wintypes
+
+    me = current_user()
+    owner, allowed = read_acl(path)
+    if owner != me:
+        return False
+    if allowed is not None and set(allowed) <= {me, SYSTEM, ADMINISTRATORS} | OWNER_PLACEHOLDERS:
+        return False
+    advapi, kernel = _api()
+    convert = advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW
+    convert.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+    ]
+    advapi.GetSecurityDescriptorDacl.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL), ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    advapi.SetNamedSecurityInfoW.argtypes = [
+        wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.c_void_p, ctypes.c_void_p,
+    ]
+    advapi.SetNamedSecurityInfoW.restype = wintypes.DWORD
+    # D:P = a protected list (nothing inherited); FA = full access; OICI = files and folders
+    # inside inherit it; SY and BA are SYSTEM and Administrators.
+    text = f"D:P(A;OICI;FA;;;{me})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+    descriptor = ctypes.c_void_p()
+    if not convert(text, 1, ctypes.byref(descriptor), None):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        present, defaulted, dacl = wintypes.BOOL(), wintypes.BOOL(), ctypes.c_void_p()
+        if not advapi.GetSecurityDescriptorDacl(
+            descriptor, ctypes.byref(present), ctypes.byref(dacl), ctypes.byref(defaulted)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        error = advapi.SetNamedSecurityInfoW(
+            str(path), _SE_FILE_OBJECT, _DACL | _PROTECTED_DACL, None, None, dacl, None
+        )
+        if error:
+            raise ctypes.WinError(error)
+    finally:
+        kernel.LocalFree(descriptor)
+    return True

@@ -11,7 +11,8 @@ def private_folder(path: Path) -> None:
     A new folder is created 0700 (its parents, if missing, get the default mode). An existing
     folder that belongs to this user and is looser is tightened. One that belongs to someone
     else is left alone: the callers that trust a folder refuse it by themselves. On Windows
-    the folder keeps the ACL it inherits."""
+    the same is done with the folder's access control list (winacl.make_private): this
+    account, SYSTEM and Administrators, and nobody else."""
     path = Path(path)
     try:
         info = os.lstat(path)
@@ -24,7 +25,12 @@ def private_folder(path: Path) -> None:
         else:
             return
         info = os.lstat(path)
-    if os.name == "nt" or not stat.S_ISDIR(info.st_mode):
+    if not stat.S_ISDIR(info.st_mode):
+        return
+    if os.name == "nt":
+        from . import winacl
+
+        winacl.make_private(path)
         return
     if info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) & 0o077:
         os.chmod(path, 0o700)

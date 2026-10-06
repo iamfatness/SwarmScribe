@@ -1,5 +1,5 @@
 import type { Locator, Page } from "@playwright/test";
-import { expect, setLeaderMode, signIn, test } from "./support";
+import { expect, setLeaderMode, signIn, test, widenFonts } from "./support";
 
 /**
  * How far the page is wider than the window: more than 0 means it scrolls sideways. It is read
@@ -284,6 +284,7 @@ const PLAIN_TABLES: [path: string, region: string][] = [
 async function settledOverflow(region: Locator): Promise<number> {
   // Layout can still be moving just after a page opens (fonts, the first list arriving), so
   // the width is read twice, a frame apart, until it stops changing. The limit is not eased.
+  await region.evaluate(() => document.fonts.ready);
   let last = Number.NaN;
   for (let tries = 0; tries < 20; tries += 1) {
     const now = await region.evaluate(
@@ -300,8 +301,7 @@ async function settledOverflow(region: Locator): Promise<number> {
 
 // A pinned Actions column would hide the text beneath it at rest, so a table fits its region
 // at every width, with nothing pinned over its text and Actions in view.
-test("every table fits at 1280, 900 and 768", async ({ page }) => {
-  await signIn(page, "admin");
+async function expectEveryTableFits(page: Page): Promise<void> {
   for (const width of [1280, 900, 768]) {
     await page.setViewportSize({ width, height: 1000 });
     for (const [path, name] of ACTION_TABLES) {
@@ -347,6 +347,19 @@ test("every table fits at 1280, 900 and 768", async ({ page }) => {
       expect(await settledOverflow(region), `${path} ${name} at ${width} needs no sideways scroll`).toBeLessThanOrEqual(1);
     }
   }
+}
+
+test("every table fits at 1280, 900 and 768", async ({ page }) => {
+  await signIn(page, "admin");
+  await expectEveryTableFits(page);
+});
+
+// The same, as a machine with wider system fonts lays the tables out (GitHub's Linux runners
+// do): a table that fits only in this machine's own fonts is caught here, not after a merge.
+test("every table fits at 1280, 900 and 768 in the widest system fonts", async ({ page }) => {
+  await signIn(page, "admin");
+  await widenFonts(page);
+  await expectEveryTableFits(page);
 });
 
 /** Names in a path that wrap across lines although the whole name would fit in its table cell. */

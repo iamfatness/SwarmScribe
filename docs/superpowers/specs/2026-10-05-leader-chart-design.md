@@ -239,8 +239,10 @@ The leader has no `/metrics`. The specs plan one (master spec line 320; leader s
 - no published image, so `image.repository` and `image.tag` are required and the render
   fails without them;
 - the chart never renders a Secret; it names one the operator made;
-- non-secret settings in a ConfigMap with a checksum annotation; a `settings` map and an
-  `extraEnv` list that refuse secrets and names the chart owns, in any letter case;
+- non-secret settings in a ConfigMap with a checksum annotation; a `settings` map that
+  takes the leader's eleven plain settings and no other name, and an `extraEnv` list that
+  refuses every `SWARMSCRIBE_` name, in any letter case (as built, after L2's review; the
+  render check derives the eleven from `config.py`);
 - user 10001, read-only root filesystem, no capabilities, no privilege escalation,
   `RuntimeDefault` seccomp, no service-account token;
 - a NetworkPolicy on by default that fails the render rather than silently cutting off a
@@ -313,8 +315,9 @@ Those marked **(owner)** are in the open-questions file.
   tests). With sign-in on, `roles.admin` must name someone. Both would otherwise deploy a
   leader nobody can administer, and say nothing.
 - **R6. `storage.volumes` is required and the chart creates no volume.** Each entry is a
-  claim the operator made, or a raw volume source (NFS, a CSI volume). An `emptyDir` is
-  refused. The chart does not ask for an access mode and cannot verify one; a
+  claim the operator made, or a raw volume source (NFS, a CSI volume, a claim). Every other
+  kind is refused (as built, after L2's review): an `emptyDir` or `ephemeral` volume is a
+  folder per pod, a `hostPath` a folder per node, and the rest are not storage. The chart does not ask for an access mode and cannot verify one; a
   ReadWriteOnce claim works while every pod is on one node and hangs a rollout otherwise.
   `updateStrategy: Recreate` exists for that case, with its cost stated: every upgrade is an
   outage of the leader.
@@ -393,17 +396,17 @@ The image is not published (O1).
 | `oidc.google.enabled`, `.clientId`, `.hostedDomain` | off | Google sign-in |
 | `oidc.google.serviceAccount` | `false` | read the Google Groups service-account key |
 | `roles.{viewer,operator,admin}.{entraGroups,googleGroups,emails,domains}` | `[]` | the twelve `SWARMSCRIBE_ROLE_*` lists. `roles.admin` must name someone when sign-in is on |
-| `settings` | `{}` | other non-secret settings without the prefix (`LEASE_SECONDS: "120"`); secrets and chart-owned names are refused |
-| `extraEnv` | `[]` | extra environment (`HTTPS_PROXY`); the same refusals |
+| `settings` | `{}` | the leader's eleven plain settings without the prefix (`LEASE_SECONDS: 120`); any other name is refused: a secret, a chart-owned name, a misspelt one |
+| `extraEnv` | `[]` | extra environment that is not a setting of the leader (`HTTPS_PROXY`); every `SWARMSCRIBE_` name is refused. Not passed to the migration Job |
 | `storage.volumes` | `[]` | **required**; `{name, mountPath, existingClaim \| volume, readOnly}` (R6) |
-| `storage.fsGroup` | `10001` | the group the volumes are opened with |
+| `storage.fsGroup` | `10001` | the group the volumes are opened with; `null` leaves the volumes' ownership alone |
 | `storage.supplementalGroups` | `[]` | more groups, to read files another system wrote |
 | `port` | `8080` | the pod's port |
 | `service.type`, `service.port` | `ClusterIP`, `80` | |
 | `ingress.enabled` | `true` | |
 | `ingress.className`, `.annotations` | `""`, `{}` | the operator's controller |
 | `ingress.tls.secretName` | `""` | **required** with the Ingress |
-| `ingress.paths` | `[{/v1, Prefix}]` | never `/`, never a probe (R8) |
+| `ingress.paths` | `[{/v1, Prefix}]` | each `/v1` or under it, `Exact` or `Prefix`: never `/`, never a probe, never a pattern (R8) |
 | `migrate.enabled` | `true` | the hook Job |
 | `migrate.backoffLimit`, `.activeDeadlineSeconds`, `.resources` | `3`, `300`, 50m/128Mi | |
 | `resources` | 100m / 256Mi, limit 512Mi | not measured under load (risk K6) |
@@ -422,14 +425,21 @@ The image is not published (O1).
 | `podAnnotations`, `podLabels`, `nodeSelector`, `tolerations`, `affinity` | empty | |
 | `spreadAcrossNodes`, `topologySpreadConstraints` | `true`, `[]` | a soft spread for two or more replicas |
 
-What the render refuses, each with a message: no image; no public URL, or one that is not
-exactly a host; `http://` without the switch, or with the Ingress; a port with the Ingress;
-no Secret; no sign-in without `allowNone`; sign-in with nobody under `roles.admin`; a role
-list whose provider is off (the leader's own rule, `config.py:189-200`, so the mistake fails
-the render and not every pod at start); a secret or a chart-owned name under `settings` or
-`extraEnv`; no storage volume, an `emptyDir`, a mount at `/` or under `/app`, a name or path
-used twice; an Ingress path of `/` or a probe; an Ingress without TLS; a NetworkPolicy
-without Postgres peers or without ingress peers; a grace period no longer than the sleep.
+What the render refuses, each with a message: **a key the chart does not have, at any
+depth** (the schema is closed at every object it owns, as the follower chart's is); no
+image; no public URL, or one that is not exactly a host; `http://` without the switch, or
+with the Ingress; a port with the Ingress; no Secret; no sign-in without `allowNone`; sign-in
+with nobody under `roles.admin`; a role list whose provider is off (the leader's own rule,
+`config.py:189-200`, so the mistake fails the render and not every pod at start); a role
+email or domain the leader would refuse; a name under `settings` that is not one of the
+eleven, or a value there that is not a number; a `SWARMSCRIBE_` name under `extraEnv`; no
+storage volume, a volume source that is not `nfs`, `csi` or a claim, a mount at `/` or in
+the image's own folders, a name or path used twice; an Ingress path that is not `/v1` or
+under it as `Exact` or `Prefix`; an Ingress without TLS; a NetworkPolicy without Postgres
+peers or without ingress peers, or with any empty list (an empty list of peers or ports
+means "all" there); a grace period no longer than the sleep. (This paragraph is as built
+after L2's review; what changed and why is in `plans/2026-10-05-leader-chart-followups.md`
+and the review's findings I2 to I7.)
 
 ## 6. Readiness, in the leader
 

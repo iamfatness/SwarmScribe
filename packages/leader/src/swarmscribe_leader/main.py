@@ -5,10 +5,11 @@ import sys
 from collections.abc import Sequence
 
 from pydantic import ValidationError
+from sqlalchemy.engine import make_url
 
 from .config import Settings
 from .db.migrate import current_revision, head_revision, is_known_revision, upgrade
-from .db.session import make_engine
+from .db.session import make_engine, to_async_url
 
 LOGGING = {
     "version": 1,
@@ -26,18 +27,44 @@ LOGGING = {
     "root": {"level": "INFO", "handlers": ["stderr"]},
 }
 
+# At a stop, how long the requests in hand have to finish before they are cancelled. With
+# app.py's limits for what follows (7 s) a leader has ended at most about 17 s after it was
+# told to, whatever the database does. Without this uvicorn waits for ever, and a request
+# waiting for a database that does not answer holds the stop until the container is killed.
+REQUEST_DRAIN_SECONDS = 10
 
-async def _schema_problem(settings: Settings) -> str | None:
-    """Why the leader must not serve this database, or None when the schema is current."""
+
+def _without_secrets(message: str, settings: Settings) -> str:
+    """`message` with the database URL and its password taken out. A driver's or a
+    migration's error is shown as it is; none is known to quote them, and none may."""
+    url = settings.database_url.get_secret_value()
+    secrets = {url, to_async_url(url)}
+    try:
+        secrets.add(make_url(to_async_url(url)).password)
+    except Exception:  # not a URL: the settings would already have refused it
+        pass
+    for secret in sorted(filter(None, secrets), key=len, reverse=True):
+        message = message.replace(secret, "***")
+    return message
+
+
+async def _schema_problem(settings: Settings, *, migrating: bool = False) -> str | None:
+    """Why the leader must not serve this database, or None when the schema is current.
+    With `migrating`, only why the database cannot be reached: its schema is about to
+    change."""
     engine = make_engine(settings.database_url.get_secret_value())
     try:
         revision = await current_revision(engine)
     except Exception as exc:  # refused, unreachable, bad credentials, timeout
-        return f"cannot connect to the database: {type(exc).__name__}: {exc}"
+        return _without_secrets(
+            f"cannot connect to the database: {type(exc).__name__}: {exc}", settings
+        )
     finally:
         await engine.dispose()
     expected = head_revision()
     if revision == expected:
+        return None
+    if migrating:
         return None
     if revision is not None and not is_known_revision(revision):
         return (
@@ -76,7 +103,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     if args.command == "migrate":
-        upgrade(settings.database_url.get_secret_value())
+        # Exit 2: nothing was tried (settings, or a database that cannot be reached, as for
+        # `serve`). Exit 1: a migration was started and failed. One error either way, not a
+        # traceback: this is what the log of a failed migration Job shows.
+        problem = asyncio.run(_schema_problem(settings, migrating=True))
+        if problem is not None:
+            print(f"error: {problem}", file=sys.stderr)
+            return 2
+        try:
+            upgrade(settings.database_url.get_secret_value())
+        except Exception as exc:  # the driver's or the migration's own error says which
+            failure = f"the migration failed: {type(exc).__name__}: {exc}"
+            print(f"error: {_without_secrets(failure, settings)}", file=sys.stderr)
+            return 1
         print(f"database is at revision {head_revision()}")
         return 0
 
@@ -99,6 +138,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         proxy_headers=True,
         access_log=False,
         log_config=None,
+        timeout_graceful_shutdown=REQUEST_DRAIN_SECONDS,
     )
     return 0
 

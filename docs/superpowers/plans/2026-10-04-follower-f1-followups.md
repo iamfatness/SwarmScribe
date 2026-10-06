@@ -70,7 +70,7 @@ Still open:
 
 - A GPU pool has never run on Kubernetes: the chart's GPU values are rendered and validated only. The first cluster with GPU nodes should run `doctor` in a pod and one recording, and record it in the F3 outcomes.
 - The `kind` scenario is run by hand. As a CI job it would take about five minutes (the second, timed run, which passed after an earlier one: `up` 1 min 51 s, `run` 1 min 52 s, `no-gpu` 1 min 26 s; ruling 2 of the F3b plan: it is not a CI job).
-- `leader.ca` (a private CA), `models.volume: persistentVolumeClaim`, `metrics.scrapeAnnotations` and the PodDisruptionBudget are rendered and schema-checked, not run in a cluster. The leader's chart (roadmap item 6) will bring a TLS leader to test the first against.
+- `leader.ca` (a private CA), `models.volume: persistentVolumeClaim`, `metrics.scrapeAnnotations` and the PodDisruptionBudget are rendered and schema-checked, not run in a cluster. The leader's chart is built, but its `kind` test runs plain http, so `leader.ca` is still unrun (leader chart follow-up F7).
 - A pod is Ready before it has registered (no readiness probe, by the spec). A readiness signal would need a second path on the listener.
 - The listener's cap bounds threads but cannot keep a place for the kubelet: a peer the NetworkPolicy lets in, reconnecting without pause, could make the liveness probe fail (eight slow connections every five seconds would do it): name only trusted peers. The default policy lets nobody in.
 - No `PodMonitor` (it needs the Prometheus operator's CRD); pod annotations are offered instead.

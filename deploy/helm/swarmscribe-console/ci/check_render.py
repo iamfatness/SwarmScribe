@@ -1,6 +1,6 @@
 """What the rendered swarmscribe-console chart must hold, whatever else changes.
 
-Run from the repository root (CI job `chart` does), with Helm on the PATH:
+Run from the repository root (CI job `chart` does), with Helm 4 on the PATH or named in $HELM:
 
     uv run python deploy/helm/swarmscribe-console/ci/check_render.py
 
@@ -10,14 +10,17 @@ renders it with values that must be refused. `--only core,migrate` runs some sec
 
 import argparse
 import ipaddress
+import itertools
 import json
 import re
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import helm_tool  # noqa: E402  (deploy/helm/helm_tool.py)
 
 CHART = Path(__file__).resolve().parents[1]
 VALUES = CHART / "ci" / "test-values.yaml"
@@ -70,8 +73,14 @@ MUST_BE_ALLOWED = (
 )
 
 
+# Set by main(): the Helm binary every render runs, and this run's one scratch folder.
+HELM = "helm"
+SCRATCH = Path()
+_numbers = itertools.count(1)
+
+
 def helm_template(*extra: str, release: str = "console") -> subprocess.CompletedProcess:
-    command = ["helm", "template", release, str(CHART), "--namespace", "fleet"]
+    command = [HELM, "template", release, str(CHART), "--namespace", "fleet"]
     return subprocess.run([*command, "-f", str(VALUES), *extra], capture_output=True, text=True)
 
 
@@ -89,7 +98,7 @@ def refused(problems: list[str], what: str, *values: str, strings: bool = False)
 
 
 def values_file(values: dict) -> Path:
-    path = Path(tempfile.mkdtemp()) / "values.yaml"
+    path = SCRATCH / f"values-{next(_numbers)}.yaml"
     path.write_text(yaml.safe_dump(values), encoding="utf-8")
     return path
 
@@ -507,17 +516,14 @@ def check_ingress(docs: list[dict]) -> list[str]:
         problems.append("sign-in Ingress: its TLS differs from the console's")
     # The drift check must be able to fail: drop /admin from the list and it has to notice.
     shortened = {"ingress": {"paths": [{"path": "/", "pathType": "Exact"}]}}
-    with tempfile.TemporaryDirectory() as folder:
-        values = Path(folder) / "paths.yaml"
-        values.write_text(yaml.safe_dump(shortened), encoding="utf-8")
-        thin = one(render("-f", str(values)), "Ingress")
+    thin = one(render("-f", str(values_file(shortened))), "Ingress")
     if not check_paths(thin["spec"]["rules"][0]["http"]["paths"]):
         problems.append("the route drift check passes when ingress.paths lacks the web routes")
     # And it must follow the list the app dispatches on: a new prefix in routePrefixes.json
     # that ingress.paths lacks has to fail it.
     global ROUTE_PREFIXES
     real = ROUTE_PREFIXES
-    grown = Path(tempfile.mkdtemp()) / "routePrefixes.json"
+    grown = SCRATCH / "routePrefixes.json"
     grown.write_text(
         json.dumps([*json.loads(real.read_text(encoding="utf-8")), "/reports"]), encoding="utf-8"
     )
@@ -647,6 +653,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--only", default=",".join(SECTIONS), help="sections, comma-separated")
     chosen = parser.parse_args().only.split(",")
+    global HELM, SCRATCH
+    HELM = helm_tool.find_helm()
+    SCRATCH = helm_tool.scratch_folder("console")
     docs = render()
     problems = [problem for section in chosen for problem in SECTIONS[section](docs)]
     for problem in problems:

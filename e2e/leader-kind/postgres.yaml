@@ -1,0 +1,60 @@
+# What the kind test of the leader chart brings itself (e2e/leader-kind/run_e2e.py), because
+# the chart never does: a Postgres, the volume claim the recordings live on, and the Secret
+# the chart reads. Every value here is test-only. This is NOT how a leader's database or
+# storage is run: Postgres keeps its data in the pod, and the claim is on one node's disk.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: leader
+stringData:
+  database-url: postgresql://postgres:postgres@postgres:5432/swarmscribe
+  link-key: leader-kind-link-key-0123456789abcdef
+---
+# kind's default StorageClass (local-path): ReadWriteOnce, a folder on the node. Both leader
+# pods can mount it because the cluster has one node; on several nodes it would have to be
+# ReadWriteMany (the chart's values.yaml says why).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: leader-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: postgres}
+  template:
+    metadata:
+      labels: {app: postgres}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: POSTGRES_PASSWORD, value: postgres}
+            - {name: POSTGRES_DB, value: swarmscribe}
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "swarmscribe"]
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  selector: {app: postgres}
+  ports:
+    - port: 5432
+      targetPort: 5432

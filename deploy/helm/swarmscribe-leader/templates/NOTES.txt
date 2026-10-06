@@ -1,0 +1,46 @@
+The SwarmScribe leader is at {{ .Values.publicUrl }}
+{{- if include "swarmscribe-leader.signIn" . }}
+
+1. Sign in from your own machine, as someone roles.admin names (nothing is created for
+   you, and no credential is printed here):
+
+   swarmscribe-admin --leader {{ .Values.publicUrl }} login
+
+2. Add a location inside a mounted volume ({{ range $i, $v := .Values.storage.volumes }}{{ if $i }}, {{ end }}{{ $v.mountPath }}{{ end }}), with a
+   consent.txt at its root:
+
+   swarmscribe-admin locations add NAME --root <a folder under a mount path>
+
+3. For each follower pool, create a pool token and put it in a Secret for the follower
+   chart (it is shown once):
+
+   swarmscribe-admin pool-tokens create --name cpu-pods --pool default
+
+4. For a fleet console: swarmscribe-admin console create --name fleet --max-role operator
+{{- else }}
+
+This leader has NO sign-in (oidc.allowNone): its admin API refuses everyone. Test use only.
+{{- end }}
+{{- if gt (int .Values.replicaCount) 1 }}
+
+ALL {{ .Values.replicaCount }} LEADER PODS MUST SEE THE SAME FILES: each storage volume must be one volume
+shared by every replica (ReadWriteMany when the pods are on more than one node). The chart
+cannot check this, and the leader does not check it yet.
+{{- end }}
+{{- if .Values.ingress.enabled }}
+
+File links carry a signed token in the URL path. Turn request logging off for this Ingress
+at your ingress controller, and raise its body limit to 512 MiB (README, "Deploy the leader").
+{{- end }}
+{{- if .Values.networkPolicy.enabled }}
+
+A NetworkPolicy limits who reaches the leader and what it reaches. It needs a network plugin
+that enforces NetworkPolicy; check that yours does.
+{{- end }}
+{{- if include "swarmscribe-leader.signIn" . }}
+
+The pods are Ready whether or not they can reach the identity provider. If `login` is
+answered 503 "sign-in cannot be checked right now" after about 3 seconds, the leader cannot
+fetch the provider's keys: look in its log for "sign-in keys could not be fetched", and at
+the HTTPS egress (networkPolicy.egress.https, or the proxy your cluster needs).
+{{- end }}

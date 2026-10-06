@@ -300,3 +300,54 @@ async def test_one_providers_key_never_validates_the_others_tokens(verifier, idp
     await verifier.verify(idp.google())
     with pytest.raises(Unauthorized, match="unknown key"):
         await verifier.verify(make_token(idp))
+
+
+async def test_callers_waiting_for_a_silent_provider_share_one_attempt(
+    idp, sign_in_settings, clock
+):
+    """A provider that does not answer (an egress rule that drops, say): the callers queued
+    behind the one fetch are told "unavailable" when it gives up; they do not each wait for
+    a fetch of their own, one after another."""
+    import asyncio
+
+    attempts = []
+
+    async def silent(url):
+        attempts.append(url)
+        await asyncio.sleep(0.05)
+        clock.now += 10  # as long as the fetch took to give up; longer than the retry gap
+        raise OSError("timed out")
+
+    verifier = TokenVerifier(providers_from(sign_in_settings()), fetch=silent, clock=clock)
+    answers = await asyncio.gather(
+        *(verifier.verify(idp.entra()) for _ in range(3)), return_exceptions=True
+    )
+    assert [type(answer) for answer in answers] == [MetadataUnavailable] * 3
+    assert len(attempts) == 1
+    # ... and the next attempt is due one retry gap after that one ended.
+    clock.now += READY_RETRY_SECONDS + 1
+    with pytest.raises(MetadataUnavailable):
+        await verifier.verify(idp.entra())
+    assert len(attempts) == 2
+
+
+async def test_the_fetch_gives_up_on_a_connection_after_three_seconds(monkeypatch):
+    from swarmscribe_leader.auth import oidc
+
+    timeouts = []
+
+    class Recorded:
+        def __init__(self, *, timeout):
+            timeouts.append(timeout)
+
+        async def __aenter__(self):
+            raise OSError("stop here")
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(oidc.httpx, "AsyncClient", Recorded)
+    with pytest.raises(OSError):
+        await oidc.http_fetch("https://provider.invalid/keys")
+    (timeout,) = timeouts
+    assert (timeout.connect, timeout.read) == (3.0, 10.0)

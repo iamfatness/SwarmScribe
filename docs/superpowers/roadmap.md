@@ -12,7 +12,10 @@ review of a commercial call-recording product's feature list.
 3. SIPREC recorder S1–S3 (`2026-10-03-siprec-recorder-design.md`).
 4. Follower agent and container images.
 5. Plan B — Azure/GCS storage, vocabulary versions and report, metrics.
-6. Helm chart and autoscaling.
+6. Helm chart and autoscaling. *The leader's chart is built
+   (`2026-10-05-leader-chart-design.md`); with the console's and the
+   follower's, every part now has one. Autoscaling of follower pools is
+   open: it needs the queue-depth metric of item 5.*
 
 ## Added 2026-10-03
 

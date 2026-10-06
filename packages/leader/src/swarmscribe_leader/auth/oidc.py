@@ -117,8 +117,13 @@ def login_providers(settings: Settings) -> list[dict[str, str | None]]:
     return found
 
 
+# A provider that cannot be connected to (an egress rule that drops, a proxy that is not
+# set) is given up on after 3 s, not 10: a sign-in is waiting for the answer.
+HTTP_TIMEOUT = httpx.Timeout(10.0, connect=3.0)
+
+
 async def http_fetch(url: str) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         response = await client.get(url)
         response.raise_for_status()
         return response.json()
@@ -170,6 +175,10 @@ class _ProviderKeys:
             logger.warning(
                 "%s sign-in keys could not be fetched: %s", self.provider.name, type(exc).__name__
             )
+            # The retry gap counts from the END of a failed attempt: an attempt that took
+            # longer than the gap to give up would otherwise be repeated by every caller
+            # that waited behind it for the lock, one after another.
+            self.attempted_at = self.clock()
             return
         self.keys = keys
         self.fetched_at = now

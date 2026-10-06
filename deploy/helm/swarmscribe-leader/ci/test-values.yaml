@@ -1,0 +1,65 @@
+# Values the chart is linted and rendered with, locally and in CI. Nothing here is a real secret.
+publicUrl: https://leader.example.org
+secrets:
+  existingSecret: swarmscribe-leader
+image:
+  repository: swarmscribe-leader
+  tag: local
+oidc:
+  entra:
+    enabled: true
+    tenantId: 0f0e0d0c-0b0a-4908-8706-050403020100
+    clientId: 6d3a6b52-1c2e-4a8f-9d61-2f6a4c0b7e11
+    clientSecret: true
+  google:
+    enabled: true
+    clientId: leader.apps.googleusercontent.com
+    hostedDomain: example.org
+    serviceAccount: true
+roles:
+  viewer:
+    domains: [example.org]
+  operator:
+    googleGroups: [operators@example.org]
+  admin:
+    entraGroups: [3f2b0c5e-8f6d-4a51-9c0e-6f1d2a7b9c11, 9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d]
+    emails: [owner@example.org]
+settings:
+  LEASE_SECONDS: "120"
+storage:
+  volumes:
+    - name: recordings
+      mountPath: /data/recordings
+      existingClaim: recordings
+    - name: archive
+      mountPath: /data/archive
+      readOnly: true
+      volume:
+        nfs:
+          server: nas.internal
+          path: /exports/archive
+  supplementalGroups: [2000]
+ingress:
+  className: traefik
+  tls:
+    secretName: leader-tls
+networkPolicy:
+  ingress:
+    from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: traefik
+      # Pods of another namespace: the two selectors in ONE entry.
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: transcribe
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: swarmscribe-follower
+  egress:
+    postgres:
+      peers:
+        - ipBlock:
+            cidr: 10.20.30.40/32
+    https:
+      extraExcept: ["10.96.0.0/12", "fd00:10:96::/112"]

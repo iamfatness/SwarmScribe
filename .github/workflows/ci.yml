@@ -222,10 +222,15 @@ jobs:
           # the same two variables and refuse any other Helm (deploy/helm/helm_tool.py).
           echo "HELM=$RUNNER_TEMP/bin/helm" >> "$GITHUB_ENV"
           echo "HELM_VERSION=v4.3.0" >> "$GITHUB_ENV"
+          # The leader check validates the guide's example values with it.
+          echo "KUBECONFORM=$RUNNER_TEMP/bin/kubeconform" >> "$GITHUB_ENV"
       - name: Show every helm on the PATH and check the one the job runs
         run: |
           echo "PATH=$PATH"
           for found in $(type -ap helm); do echo "$found: $("$found" version --short 2>&1)"; done
+          # What a `uv run` child finds first was not what this shell finds first: on the
+          # runner it was /usr/local/bin/helm, the image's Helm 3. Show both.
+          uv run --no-project python -c "import os, shutil, sys; print('under uv run: python', sys.executable, '| helm', shutil.which('helm')); print('under uv run: PATH=' + os.environ['PATH'])"
           echo "HELM=$HELM: $("$HELM" version --short)"
           test "$("$HELM" version --short | cut -d+ -f1)" = "$HELM_VERSION"
       - name: Lint the console chart

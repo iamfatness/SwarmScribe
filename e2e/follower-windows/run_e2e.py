@@ -4,7 +4,7 @@ rights (follower spec 8.3; plan F4b).
 What it proves: `uv tool install` of the follower with its `cuda` extra, from wheels built
 from this repository, on a Python that uv manages, in a folder of its own; that the GPU
 libraries are found with nothing copied and no PATH; and the service's own code, started
-exactly as the service control manager will start it (the real interpreter with
+exactly as the service control manager will start it (the real interpreter, isolated, with
 `service_boot.py`), in a console (`--foreground`): it registers, transcribes, hands a
 recording back when it is stopped mid-job, comes back as the same follower, and says the
 right thing to Windows when it is revoked and when the machine cannot do the work.
@@ -67,14 +67,23 @@ LEADER_ENV = {
     "SWARMSCRIBE_CLAIM_RETRY_AFTER": "1",
     "SWARMSCRIBE_FOLLOWER_GONE_AFTER_SECONDS": "20",
 }
-# Everything uv makes stays under work/: its Python, the tool's environment, the command.
+# Everything uv makes stays under work/: its Python, the tool's environment, the command. The
+# last two are the README's: files are copied, not hard-linked from uv's cache (a hard link
+# keeps the list of the installing user's profile, which a service's account cannot read), and
+# compiled at install time (the service's account cannot write beside them).
 UV_ENV = {
     "UV_PYTHON_INSTALL_DIR": str(WORK / "python"),
     "UV_TOOL_DIR": str(WORK / "tools"),
     "UV_TOOL_BIN_DIR": str(WORK / "bin"),
+    "UV_LINK_MODE": "copy",
+    "UV_COMPILE_BYTECODE": "1",
 }
 FOLLOWER = WORK / "bin" / "swarmscribe-follower.exe"
 TOOL_PYTHON = WORK / "tools" / "swarmscribe-follower" / "Scripts" / "python.exe"
+TOOL_PACKAGE = (
+    WORK / "tools" / "swarmscribe-follower" / "Lib" / "site-packages" / "swarmscribe_follower"
+)
+SOURCE_PACKAGE = ROOT / "packages" / "follower" / "src" / "swarmscribe_follower"
 ENV_FILE = WORK / "follower.env"
 TOKEN_FILE = WORK / "join-token"
 OUTPUT = WORK / "service-output.txt"
@@ -251,11 +260,14 @@ def up() -> None:
     # not be there. --no-bin and --no-registry: nothing outside work/ is touched.
     run(*UV, "python", "install", "3.12", "--no-bin", "--no-registry", env=uv_env())
     python = next((WORK / "python").glob("cpython-3.12.*-windows-*/python.exe"))
+    # --reinstall: without it uv answers "already installed" to a work/ that has the tool, and
+    # the scenario would run the code of an earlier `up`, not the wheels just built.
     run(
-        *UV, "tool", "install", "--python", str(python), "--find-links", str(DIST),
+        *UV, "tool", "install", "--reinstall", "--python", str(python), "--find-links", str(DIST),
         "--constraints", str(ROOT / "deploy" / "follower-constraints.txt"),
         "swarmscribe-follower[cuda]", env=uv_env(),
     )
+    installed_is_this_repository()
     docker("network", "create", NETWORK)
     docker(
         "run", "-d", "--name", POSTGRES, "--network", NETWORK,
@@ -280,6 +292,23 @@ def up() -> None:
         60,
     )
     print(f"up: a leader at {LEADER_URL}; {run(str(FOLLOWER), '--version').strip()} in {WORK}")
+
+
+def unix(data: bytes) -> bytes:
+    return data.replace(b"\r\n", b"\n")
+
+
+def installed_is_this_repository() -> None:
+    """What `up` installed is the code in this checkout, and each file is a copy of its own
+    (one link), not a hard link into uv's cache."""
+    for source in sorted(SOURCE_PACKAGE.glob("*.py")):
+        installed = TOOL_PACKAGE / source.name
+        expect(
+            installed.is_file() and unix(installed.read_bytes()) == unix(source.read_bytes()),
+            f"the installed {source.name} is not this repository's: the tool was not reinstalled",
+        )
+        links = installed.stat().st_nlink
+        expect(links == 1, f"{installed} has {links} links: it was not installed as a copy")
 
 
 def leftover_follower() -> None:
@@ -337,6 +366,7 @@ def run_scenario(cpu: bool) -> None:
     #    beside CTranslate2, and PATH does not name them.
     image = service_image()
     expect("WindowsApps" not in image[0], f"the service's Python is the Store's: {image[0]}")
+    expect(image[1:-1] == ["-I"], f"the service's command is not an isolated start: {image}")
     if not cpu:
         paths = run(str(FOLLOWER), "cuda-paths", env=follower_env()).strip()
         expect("cublas" in paths and "cublas" not in os.environ["PATH"].lower(), paths)

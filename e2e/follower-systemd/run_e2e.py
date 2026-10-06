@@ -233,8 +233,8 @@ def install(token: str) -> None:
         " --constraints /dist/follower-constraints.txt swarmscribe-follower"
     )
     machine(
-        "useradd --system --home-dir /var/lib/swarmscribe-follower --shell /usr/sbin/nologin"
-        " swarmscribe-follower\n"
+        "useradd --system --user-group --home-dir /var/lib/swarmscribe-follower"
+        " --shell /usr/sbin/nologin swarmscribe-follower\n"
         "install -d -o root -g swarmscribe-follower -m 0750 /etc/swarmscribe-follower"
     )
     docker("cp", str(ENV_EXAMPLE), f"{MACHINE}:/tmp/follower.env")

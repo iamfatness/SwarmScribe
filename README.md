@@ -341,6 +341,49 @@ docker compose -f e2e/compose/docker-compose.yml down -v
 Tests use a real Postgres: set `SWARMSCRIBE_TEST_DATABASE_URL`, or leave it
 unset and an embedded one starts automatically in `.pgdata/`.
 
+### Leader image
+
+`docker/leader.Dockerfile` builds `swarmscribe-leader`: the leader and `swarmscribe-admin`,
+without the engine, any model library, the console or the follower (340 MB). It is not
+published; build it from the repository root:
+
+```
+docker build -t swarmscribe-leader -f docker/leader.Dockerfile .
+bash docker/check-leader-image.sh swarmscribe-leader
+```
+
+It runs as user 10001 and writes nothing outside the folders you mount into it, so the root
+filesystem can be read-only and there is no `/tmp` to provide. The storage folder must be
+writable by uid or gid 10001:
+
+```
+docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+  -e SWARMSCRIBE_DATABASE_URL -e SWARMSCRIBE_PUBLIC_URL -e SWARMSCRIBE_LINK_KEY \
+  swarmscribe-leader migrate
+docker run -d --read-only --cap-drop ALL --security-opt no-new-privileges -p 8080:8080 \
+  -e SWARMSCRIBE_DATABASE_URL -e SWARMSCRIBE_PUBLIC_URL -e SWARMSCRIBE_LINK_KEY \
+  -v /srv/recordings:/data/recordings swarmscribe-leader
+```
+
+`serve` is the default command. `swarmscribe-admin` is in the image too
+(`--entrypoint swarmscribe-admin`), but it keeps your sign-in in a file under your home
+folder: run it on your own machine, not in the leader's container.
+
+An init (tini) is PID 1, so a stop is never lost: a leader that is still waiting for its
+database ends at once, and one that is serving finishes the requests it has and then ends by
+itself, in about a second. Both end with status 143 (stopped by the signal), never 137
+(killed when the stop window closed). The image's health check asks `/healthz`, which never
+touches the database: a database outage does not make an orchestrator restart every leader.
+
+What `check-leader-image.sh` proves, with a throwaway Postgres: what the image holds and
+does not; that `migrate` and `serve` run read-only with every capability dropped; that a
+leader refuses to start on a database it has not migrated; that a *serving* leader stays
+ready when a newer leader has migrated the database, and a *starting* one refuses to start
+on it; that `/readyz` says 503 within its limit when the database stops answering; and that
+its log holds neither the link key nor the database password. CI runs it (job
+`leader-image`). The Compose tests still use the older test image
+(`e2e/compose/Dockerfile`), which is not for deployment.
+
 ## Run a follower (development)
 
 A follower takes recordings from a leader, transcribes them and uploads the

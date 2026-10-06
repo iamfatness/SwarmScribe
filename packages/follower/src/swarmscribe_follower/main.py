@@ -1,5 +1,5 @@
-"""swarmscribe-follower: run, join, leave, doctor, cuda-paths (follower spec 4, 5.2, 5.3,
-8.3).
+"""swarmscribe-follower: run, join, leave, doctor, cuda-paths, service (follower spec 4, 5.2,
+5.3, 8.3).
 
 Every way this ends is a one-line `error: ...` and an exit code from errors.py; no traceback
 reaches the user. The join token is never an argument (spec 5.3: it would show in process
@@ -187,6 +187,24 @@ def command_cuda_paths(out: TextIO, err: TextIO) -> int:
         return EXIT_UNFIT
     print(os.pathsep.join(str(folder) for folder in found), file=out)
     return EXIT_OK
+
+
+def command_service(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    if os.name != "nt":
+        print(
+            "error: `service` is the Windows service; on Linux install the systemd unit"
+            " deploy/systemd/swarmscribe-follower.service (see the README)",
+            file=err,
+        )
+        return EXIT_CONFIGURATION
+    from . import windows
+
+    if args.action == "install":
+        return windows.install(out, err, print_only=args.print)
+    if args.action == "uninstall":
+        return windows.uninstall(out, err, print_only=args.print)
+    named = ["--env-file", args.env_file] if args.env_file else []
+    return windows.service_process(["--foreground", *named])
 
 
 def configure_environment(settings: Settings) -> None:
@@ -497,6 +515,16 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "cuda-paths", help="print the folders of the GPU libraries the cuda extra installed"
     )
+    service = commands.add_parser("service", help="the Windows service")
+    service.add_argument(
+        "action",
+        choices=("install", "uninstall", "foreground"),
+        help="install or uninstall the service (as an administrator), or run the service's"
+        " code in this console (Ctrl+C is the stop control)",
+    )
+    service.add_argument(
+        "--print", action="store_true", help="install, uninstall: only print the commands"
+    )
     return top
 
 
@@ -515,6 +543,8 @@ def main(
     args = parser().parse_args(argv)
     if args.command == "cuda-paths":
         return command_cuda_paths(out, err)
+    if args.command == "service":
+        return command_service(args, out, err)  # it reads its settings file itself
     source = ENVIRONMENT
     if args.env_file:
         try:

@@ -16,7 +16,8 @@ Design: [`docs/superpowers/specs/2026-10-02-swarmscribe-architecture-design.md`]
 | `swarmscribe-leader` — catalogue, consent, jobs, admin API and `swarmscribe-admin` | Built (local storage); cloud storage and vocabulary next |
 | `swarmscribe-follower` — the agent, its two images and its Helm chart (`deploy/helm/swarmscribe-follower`, one release per pool) | Built; the service install for outside machines is next |
 | `swarmscribe-console` — fleet console: backend, web app, image and Helm chart (`deploy/helm/swarmscribe-console`) | Built |
-| Helm chart for the leader, and autoscaling | Not started |
+| `swarmscribe-leader` image and Helm chart (`deploy/helm/swarmscribe-leader`) | Built; rendered and validated in CI; see "Deploy the leader" for what has been run |
+| Autoscaling of follower pools | Not started (it needs a queue-depth metric the leader does not expose yet) |
 
 ## Transcribe one file
 
@@ -1101,6 +1102,285 @@ through `SSL_CERT_FILE` (it replaces the public roots there, which is what the t
 only the stand-in is reached). The leaders serve TLS from the same CA, and the console
 trusts it for them through `SWARMSCRIBE_CONSOLE_LEADER_CA_FILE`.
 
+## Deploy the leader
+
+One release of the chart `deploy/helm/swarmscribe-leader` is one leader deployment. It needs:
+
+- **Its own Postgres** (the tests and CI run on 16; no older version has been tried). Never
+  the console's database. Allow 15 connections per leader replica and one for the migration.
+- **A volume every leader replica can see**, holding the recordings and receiving the
+  transcripts. The leader's only storage backend today is a folder on a filesystem; cloud
+  object storage (Azure Blob Storage, Google Cloud Storage) is planned and not built, and
+  S3 is not planned. The chart mounts a volume you provide and creates none ("Storage").
+- **The image, built and loaded** where the cluster can pull it ("The image").
+- **A Secret, created beforehand,** holding the database URL and the link key. The chart
+  never creates one, and the migration hook reads it before anything else exists.
+- **An identity provider**: an Entra ID app registration or a Google OAuth client, as in
+  "Administrators: sign-in and roles" above. A leader without sign-in refuses every admin
+  call, and the chart refuses to render one.
+- **One address for everybody.** `publicUrl` is where followers, administrators and consoles
+  reach the leader, and the leader builds every file link from it. Followers inside the
+  cluster and machines outside it must both be able to reach that one address, over TLS.
+
+### The image
+
+`docker/leader.Dockerfile` ("Leader image" above) builds `swarmscribe-leader`. No image is
+published, so the chart has no working default for `image.repository` and `image.tag`: both
+are required, and the render fails saying so.
+
+```
+docker build -t swarmscribe-leader:0.1.0 -f docker/leader.Dockerfile .
+# a local cluster:        kind load docker-image swarmscribe-leader:0.1.0
+# a registry of your own: docker tag swarmscribe-leader:0.1.0 registry.example.org/swarmscribe-leader:0.1.0
+#                         docker push registry.example.org/swarmscribe-leader:0.1.0
+```
+
+If `kind load docker-image` stops with "content digest ... not found", load it from an
+archive as "Deploy the fleet console", "The image" shows. Use `image.pullPolicy: Never` (or
+`IfNotPresent`) for a loaded image.
+
+### Kubernetes, with the Helm chart
+
+1. Create the namespace and the Secret. The values below are placeholders.
+
+   ```
+   kubectl create namespace swarmscribe
+   kubectl -n swarmscribe create secret generic swarmscribe-leader \
+     --from-literal=database-url='postgresql://leader:...@db.internal:5432/swarmscribe' \
+     --from-literal=link-key="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+   ```
+
+   With Google sign-in add `--from-literal=google-client-secret=...`; for Google Groups,
+   `--from-file=google-service-account=key.json` and `oidc.google.serviceAccount: true`; for
+   Entra ID people in too many groups for the token, `--from-literal=entra-client-secret=...`
+   and `oidc.entra.clientSecret: true`. The link key signs every file link: keep it, and
+   know that changing it makes the links already handed out worthless (followers ask for
+   new ones).
+
+2. Write your values. This is a whole file for Entra ID sign-in, an NFS-backed claim and
+   Traefik:
+
+   ```yaml
+   image:
+     repository: registry.example.org/swarmscribe-leader
+     tag: 0.1.0
+   publicUrl: https://leader.example.org
+   secrets:
+     existingSecret: swarmscribe-leader
+   oidc:
+     entra:
+       enabled: true
+       tenantId: 0f0e0d0c-0b0a-4908-8706-050403020100
+       clientId: 6d3a6b52-1c2e-4a8f-9d61-2f6a4c0b7e11
+   roles:
+     admin:
+       entraGroups: [3f2b0c5e-8f6d-4a51-9c0e-6f1d2a7b9c11]
+   storage:
+     volumes:
+       - name: recordings
+         mountPath: /data/recordings
+         existingClaim: recordings
+   ingress:
+     className: traefik
+     tls:
+       secretName: leader-tls
+   networkPolicy:
+     ingress:
+       from:
+         - namespaceSelector:
+             matchLabels:
+               kubernetes.io/metadata.name: traefik
+     egress:
+       postgres:
+         peers:
+           - ipBlock:
+               cidr: 10.20.30.40/32
+   ```
+
+3. Install. Helm runs the migration first, then starts the pods.
+
+   ```
+   helm -n swarmscribe install leader deploy/helm/swarmscribe-leader -f values.yaml
+   kubectl -n swarmscribe rollout status deploy/leader-swarmscribe-leader
+   ```
+
+   If the migration fails, the install fails and the Job is kept:
+   `kubectl -n swarmscribe logs job/leader-swarmscribe-leader-migrate` says why.
+
+4. Sign in and set the leader up, from your own machine ("The first administrator, pool
+   tokens and consoles").
+
+What the chart installs:
+
+| Object | What it is |
+|---|---|
+| Deployment | `replicaCount` leader pods (default 2) running `serve`: non-root (10001), read-only root filesystem, no capabilities, no service-account token; your volumes mounted; startup and liveness probes on `/healthz`, readiness on `/readyz`; a `preStop` pause before a pod is stopped; requests 100m CPU and 256Mi (not measured under load) |
+| Job (hook) | `swarmscribe-leader migrate`, before install and before every upgrade |
+| Service | port 80 to the pods' 8080 |
+| Ingress | the host of `publicUrl`, with TLS from `ingress.tls.secretName` (required), publishing `/v1` only |
+| ConfigMap | the settings that are not secret, the role mappings among them |
+| PodDisruptionBudget | `maxUnavailable: 1`, when there is more than one replica |
+| NetworkPolicy | who may reach the pods and what they may reach: "The network" |
+| ServiceAccount | one with no token mounted; the leader never calls the Kubernetes API |
+
+It installs no Secret, no volume, no database, and nothing for metrics (the leader has no
+`/metrics` yet).
+
+Values (`deploy/helm/swarmscribe-leader/values.yaml` documents every one):
+
+| Value | Setting or meaning |
+|---|---|
+| `publicUrl` | `SWARMSCRIBE_PUBLIC_URL`, and the Ingress host. Required. `https://<host>`; a `:port` only with the Ingress off; `http://` only with `allowHttpPublicUrl: true`, on a test cluster |
+| `image.repository`, `image.tag` | the image. Both required (`image.digest` wins over the tag) |
+| `secrets.existingSecret` | the Secret's name. Required. `secrets.keys.*` name its keys: `database-url`, `link-key`, `entra-client-secret`, `google-client-secret`, `google-service-account` |
+| `oidc.entra.*`, `oidc.google.*` | sign-in. One is required; `oidc.allowNone: true` renders a leader without sign-in, for tests |
+| `roles.<role>.<list>` | `SWARMSCRIBE_ROLE_<ROLE>_<LIST>`: `entraGroups`, `googleGroups`, `emails`, `domains` for `viewer`, `operator`, `admin`. `roles.admin` must name someone |
+| `settings` | any other non-secret setting without the `SWARMSCRIBE_` prefix, e.g. `LEASE_SECONDS: "120"`. A secret, or a name the chart sets itself, is refused |
+| `storage.volumes` | the volumes to mount. Required: "Storage" |
+| `replicaCount` | leader pods, default 2 |
+| `updateStrategy` | `RollingUpdate` (default) or `Recreate`: "Storage" |
+| `ingress.*` | the Ingress; `ingress.enabled: false` if you publish the Service another way |
+| `networkPolicy.*` | "The network" |
+| `migrate.*`, `resources`, `preStopSleepSeconds`, `terminationGracePeriodSeconds`, `podDisruptionBudget.*` | as named |
+
+The render fails, with a message, on values that would deploy a leader that cannot start,
+cannot be reached or cannot be administered: no image; a `publicUrl` that is not exactly a
+host, or is `http://`; no Secret; no sign-in; sign-in with nobody under `roles.admin`; a
+role list whose provider is off; a secret under `settings` or `extraEnv`; no storage volume,
+or an `emptyDir`, or a mount at `/` or under `/app`; an Ingress path of `/` or a probe; an
+Ingress without TLS; a NetworkPolicy without Postgres peers or without ingress peers.
+
+### Storage
+
+A location's root is a folder inside the leader's own filesystem
+(`swarmscribe-admin locations add NAME --root /data/recordings/archive`), so the recordings
+must be on a volume mounted into the leader. Followers never see that volume: they download
+each recording and upload each transcript through the leader, by signed links.
+
+```yaml
+storage:
+  volumes:
+    - name: recordings
+      mountPath: /data/recordings
+      existingClaim: recordings          # a PersistentVolumeClaim you created
+    - name: archive
+      mountPath: /data/archive
+      readOnly: true                     # transcripts cannot be written here: give such a
+      volume:                            # location an output folder on another volume
+        nfs: {server: nas.internal, path: /exports/archive}
+```
+
+**Every leader replica must see the same files.** The chart cannot check it:
+
+| Your volume | Use | Upgrades |
+|---|---|---|
+| ReadWriteMany (NFS, CephFS, Azure Files, Filestore) | two or more replicas, `RollingUpdate` | no pod is missing |
+| ReadWriteOnce on a one-node cluster | two or more replicas, `RollingUpdate` | no pod is missing; the node is a single point of failure |
+| ReadWriteOnce on several nodes | `replicaCount: 1` and `updateStrategy: Recreate` | the leader is away for the length of every upgrade; followers wait and retry |
+
+With a ReadWriteOnce claim on several nodes and the default strategy, the rollout's new pod
+may land on another node and wait for ever on "Multi-Attach error"; delete that pod, or use
+the last row. Replicas that saw *different* files would each scan their own and report the
+other's recordings missing: never give two replicas two volumes.
+
+The volumes are opened with group 10001 (`storage.fsGroup`), and the leader writes as user
+10001. A volume that ignores `fsGroup` (NFS) must be writable by uid or gid 10001 on the
+server; `storage.supplementalGroups` adds groups so the leader can read recordings another
+system wrote. The leader writes each upload to a temporary file beside its target and then
+moves it into place, so it needs to create files in the output folders and nowhere else.
+
+### The first administrator, pool tokens and consoles
+
+Nothing creates an administrator. The first one is whoever `roles.admin` names (a group, an
+email or a domain), signing in with their own account from their own machine:
+
+```
+uv run swarmscribe-admin --leader https://leader.example.org login --provider entra
+uv run swarmscribe-admin whoami
+uv run swarmscribe-admin locations add archive --root /data/recordings/archive
+```
+
+To change who administers the leader, change `roles` and run `helm upgrade`.
+
+A follower pool needs a pool token, and a fleet console needs a console credential. Both are
+created by a signed-in administrator, shown once on their terminal, and stored by the leader
+only as a hash. The chart has no part in either, and neither is ever in Helm's values, its
+notes or a ConfigMap:
+
+```
+uv run swarmscribe-admin pool-tokens create --name cpu-pods --pool default
+kubectl -n transcribe create secret generic pool-token --from-literal=pool-token='<the token>'
+
+uv run swarmscribe-admin console create --name fleet --max-role operator
+```
+
+The first goes into the Secret the follower chart reads ("Deploy a follower pool"); the
+second is entered once in the console ("Leaders in the console").
+
+### Probes and upgrades
+
+Startup and liveness ask `/healthz`, which never touches the database, so a database outage
+restarts nothing. Readiness asks `/readyz` every 5 seconds with a 5 second timeout (the
+leader's own check gives up at 3): during a database outage the pods go unready and come
+back by themselves. A pod that *starts* while the database is unreachable exits and is
+restarted until it answers.
+
+`helm upgrade` runs the migration, then replaces the pods one at a time
+(`maxUnavailable: 0`). The migration is a pre-upgrade hook, so it runs while the old pods
+are serving: they keep serving on the migrated schema until they are replaced, and stay
+Ready (`/readyz` is ready when the schema is the leader's own or newer). A pod that is being
+stopped first waits `preStopSleepSeconds` while still answering, so that the Service stops
+sending it requests, and then finishes the requests it has.
+
+What follows from that:
+
+- **Every migration must stay compatible with the previous release** (add a column now, drop
+  the old one in a later release). A migration that breaks the previous version breaks the
+  serving pods for the length of the upgrade.
+- **There is no rolling back the image after a migration.** A leader never starts on a
+  database that is ahead of it, and there is no downgrade command: roll forward.
+- An old pod that restarts in the middle of an upgrade does not come back, for the same
+  reason; the others carry on.
+- A changed setting restarts the pods (the Deployment carries a checksum of the ConfigMap).
+  A changed Secret does not: `kubectl rollout restart` after changing one.
+
+### The network
+
+The pods speak plain HTTP on 8080; TLS ends at your Ingress. Three things about the Ingress
+are yours to do, with your controller's own annotations (`ingress.annotations`):
+
+- **Turn request logging off for this Ingress.** A file link carries its signed token in the
+  URL path (`/v1/files/<token>`). The leader never logs a request line; an ingress
+  controller's access log would hold tokens that work until they expire (30 minutes for a
+  download; 2 hours for an upload, and an upload only while its job's lease is current).
+- **Allow bodies of 512 MiB** and turn request buffering off: transcripts are small, but
+  the limit on an upload is the leader's, not your controller's default.
+- Publish `/v1` and nothing else (the default). `/healthz` and `/readyz` are never
+  published, and the chart refuses a path that would: `/readyz` tells an anonymous caller
+  whether the database is up.
+
+The NetworkPolicy (on by default) selects every pod of the release:
+
+| Direction | What is allowed |
+|---|---|
+| in | the leader's port, from `networkPolicy.ingress.from` only. Required: your ingress controller, and any pool or console in this cluster that uses the Service directly. `anySource: true` allows anyone (the leader authenticates every caller itself) |
+| out | DNS; Postgres, at `networkPolicy.egress.postgres.peers` (required); and, with sign-in, TCP 443 to anywhere except loopback, link-local and cloud-metadata addresses, multicast and reserved ranges (the identity providers) |
+
+A follower that reaches the leader through the Ingress arrives as the ingress controller, so
+that one peer covers every follower and console that uses `publicUrl`. Peers are matched
+after Service address translation: name pods by selector, or by their own addresses, never a
+Service's ClusterIP. A NetworkPolicy needs a network plugin that enforces it; without one it
+is accepted and does nothing. The storage volumes need no rule: the node mounts them.
+
+### What has been run, and what has not
+
+CI lints the chart, validates what it renders against the Kubernetes 1.33 schemas, and runs
+`deploy/helm/swarmscribe-leader/ci/check_render.py`, which runs Helm about 160 times and
+checks what must be rendered and more than a hundred sets of values that must be refused. **The chart has not been installed on a
+cluster yet**: that is the next piece of work (`e2e/leader-kind`), and this section will say
+what it showed. Until then every statement above about what a running cluster does comes
+from the leader's own tests and from the other two charts' installs, not from this one.
+
 ## Deploy the fleet console
 
 One console serves one organisation and any number of leaders. It needs:
@@ -1497,7 +1777,7 @@ clusters). It needs:
 
 - **A leader the pods can reach**, by the address in `leader.url`. The leader's own file
   links are built from its `SWARMSCRIBE_PUBLIC_URL`, so that address must be reachable from
-  the pods too. The leader has no chart yet; the follower chart needs only its URL.
+  the pods too ("Deploy the leader"). The follower chart needs only the leader's URL.
 - **An image with its model baked in**, where the cluster can pull it ("The pool's image").
 - **A pool token in a Secret, created beforehand.** The chart never creates a Secret.
 - **For a GPU pool:** nodes with an NVIDIA GPU, the NVIDIA device plugin (it advertises

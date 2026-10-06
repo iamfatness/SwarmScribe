@@ -301,3 +301,91 @@ def test_an_elevated_administrators_own_folder_is_made_private_too(tmp_path, mon
     assert winacl.make_private(folder) is True
     monkeypatch.undo()
     assert winacl.access_problem(folder) is None
+
+
+def reset_to_own(path):
+    """Give back to this account what a protected list took (the creator stays the owner and
+    may always rewrite the list): so pytest can remove the folder afterwards. Only ever called
+    on a folder in pytest's temp tree."""
+    from swarmscribe_follower import winacl
+
+    apply_sddl(path, f"D:P(A;OICI;FA;;;{winacl.current_user()})")
+
+
+def test_a_root_created_protected_holds_exactly_system_and_administrators(tmp_path):
+    """The production descriptor, read back. Its creator (not elevated) is locked out of the
+    folder except as its owner, who may read and rewrite the list: that is what this test
+    uses, and then hands the folder back so it can be removed."""
+    from swarmscribe_follower import winacl
+
+    root = tmp_path / "root"
+    assert winacl.PROTECTED_ROOT_SDDL == "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+    try:
+        assert winacl.create_protected_directory(root) is True
+        owner, allowed = winacl.read_acl(root)
+        assert sorted(allowed) == sorted([winacl.SYSTEM, winacl.ADMINISTRATORS])
+        assert winacl.create_protected_directory(root) is False  # there already: not a failure
+    finally:
+        reset_to_own(root)
+
+
+def test_a_child_made_in_a_protected_root_inherits_only_the_protected_list(tmp_path):
+    """The same call with the test's own account added to the descriptor (a creator that is
+    not an administrator could otherwise not make the child); the production constant is
+    asserted above."""
+    from swarmscribe_follower import winacl
+
+    root = tmp_path / "root"
+    me = winacl.current_user()
+    sddl = f"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{me})"
+    assert winacl.create_protected_directory(root, sddl) is True
+    (root / "state").mkdir()
+    (root / "state" / "credential.json").write_text("x", encoding="utf-8")
+    for path in (root, root / "state", root / "state" / "credential.json"):
+        allowed = winacl.read_acl(path)[1]
+        assert set(allowed) == {winacl.SYSTEM, winacl.ADMINISTRATORS, me}, path
+    assert "S-1-5-32-545" not in winacl.read_acl(root / "state")[1]
+
+
+def sddl_of(*sids):
+    return "D:P" + "".join(f"(A;OICI;FA;;;{sid})" for sid in sids)
+
+
+def test_one_definition_of_who_is_trusted_for_the_check_and_for_making_private(
+    tmp_path, monkeypatch
+):
+    from swarmscribe_follower import winacl
+
+    me = winacl.current_user()
+    service = winacl.service_sid("SwarmScribeFollower")
+    folder = tmp_path / "state"
+    folder.mkdir()
+    apply_sddl(folder, sddl_of(me, winacl.SYSTEM, winacl.ADMINISTRATORS, service))
+    before = sorted(winacl.read_acl(folder)[1])
+    # an elevated administrator: the service's folder is left exactly as it is
+    monkeypatch.setattr(winacl, "is_administrator", lambda: True)
+    assert winacl.make_private(folder) is False
+    assert sorted(winacl.read_acl(folder)[1]) == before
+    assert winacl.access_problem(folder) is None
+    # one that is not: the service account is a stranger, as it always was
+    monkeypatch.setattr(winacl, "is_administrator", lambda: False)
+    assert "can be reached by other accounts" in winacl.access_problem(folder)
+    assert winacl.make_private(folder) is True
+    assert service not in winacl.read_acl(folder)[1]
+
+
+def test_a_list_that_also_holds_users_is_still_tightened_for_an_elevated_administrator(
+    tmp_path, monkeypatch
+):
+    from swarmscribe_follower import winacl
+
+    me = winacl.current_user()
+    service = winacl.service_sid("SwarmScribeFollower")
+    folder = tmp_path / "state"
+    folder.mkdir()
+    apply_sddl(folder, sddl_of(me, winacl.SYSTEM, winacl.ADMINISTRATORS, service, "S-1-5-32-545"))
+    monkeypatch.setattr(winacl, "is_administrator", lambda: True)
+    assert "Users (S-1-5-32-545)" in winacl.access_problem(folder)
+    assert winacl.make_private(folder) is True
+    assert "S-1-5-32-545" not in winacl.read_acl(folder)[1]
+    assert winacl.access_problem(folder) is None

@@ -32,7 +32,8 @@ import os
 import struct
 from pathlib import Path
 
-SERVICE_NAME = "SwarmScribeFollower"  # what windows.py installs; not imported: it is stdlib-only
+from .windows import SERVICE_NAME  # the one definition; windows.py imports only the stdlib
+
 SYSTEM = "S-1-5-18"
 ADMINISTRATORS = "S-1-5-32-544"
 # CREATOR OWNER and OWNER RIGHTS stand for whoever owns the object: the owner is checked.
@@ -109,7 +110,7 @@ def _sid_text(advapi, kernel, sid: int) -> str:
 
 
 def service_sid(name: str) -> str:
-    """The SID Windows gives the service `name` (its virtual account `NT SERVICE\name`):
+    r"""The SID Windows gives the service `name` (its virtual account `NT SERVICE\name`):
     S-1-5-80 and the five 32-bit words of the SHA-1 of the upper-cased name in UTF-16LE.
     Pure: it needs no Windows call."""
     digest = hashlib.sha1(name.upper().encode("utf-16-le")).digest()
@@ -123,6 +124,18 @@ def is_administrator() -> bool:
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except (AttributeError, OSError):
         return False
+
+
+def trusted() -> set[str]:
+    """The principals this process lets into a folder that holds the credential, for the
+    check (`access_problem`) and for making private (`make_private`) alike: this account,
+    SYSTEM, Administrators, and, for an elevated administrator only, the follower's own
+    service account (so `leave` and `doctor` can read the service's folder, and nothing
+    rewrites its list)."""
+    found = {current_user(), SYSTEM, ADMINISTRATORS}
+    if is_administrator():
+        found.add(service_sid(SERVICE_NAME))
+    return found
 
 
 def _own_owners() -> set[str]:
@@ -223,9 +236,7 @@ def access_problem(
             " the credential; point the setting at the real folder"
         )
     owner, allowed = acl if acl is not None else read_acl(path)
-    trusted = {me, SYSTEM, ADMINISTRATORS}
-    if is_administrator():
-        trusted.add(service_sid(SERVICE_NAME))  # so `leave` and `doctor` can read its folder
+    allowed_in = trusted()
     fix = (
         f'icacls "{path}" /inheritance:r /grant:r "*{me}:(OI)(CI)F" "*{SYSTEM}:(OI)(CI)F"'
         f' "*{ADMINISTRATORS}:(OI)(CI)F"'
@@ -233,7 +244,7 @@ def access_problem(
         else f'icacls "{path}" /inheritance:r /grant:r "*{me}:F" "*{SYSTEM}:F"'
         f' "*{ADMINISTRATORS}:F"'
     )
-    if owner not in trusted:
+    if owner not in allowed_in:
         return (
             f"the {what} {path} is owned by another account ({_name(owner)}) and will not be"
             " trusted with the credential; use a folder of this account's own (the default is"
@@ -253,7 +264,7 @@ def access_problem(
             f" not understand (type {', '.join(entry[1:] for entry in unknown)}) and will not"
             f" be trusted with the credential; make it private with: {fix}"
         )
-    others = sorted({sid for sid in allowed if sid not in trusted | OWNER_PLACEHOLDERS})
+    others = sorted({sid for sid in allowed if sid not in allowed_in | OWNER_PLACEHOLDERS})
     if others:
         removes = " ".join(f'/remove "*{sid}"' for sid in others)
         return (
@@ -278,7 +289,7 @@ def make_private(path: Path) -> bool:
     owner, allowed = read_acl(path)
     if owner not in _own_owners():
         return False
-    if allowed is not None and set(allowed) <= {me, SYSTEM, ADMINISTRATORS} | OWNER_PLACEHOLDERS:
+    if allowed is not None and set(allowed) <= trusted() | OWNER_PLACEHOLDERS:
         return False
     advapi, kernel = _api()
     convert = advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW
@@ -314,3 +325,47 @@ def make_private(path: Path) -> bool:
     finally:
         kernel.LocalFree(descriptor)
     return True
+
+
+# Protected (nothing inherited), full control for SYSTEM and Administrators, inherited by
+# everything made inside: the data folder of the service, from the instant it exists.
+PROTECTED_ROOT_SDDL = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+_ERROR_ALREADY_EXISTS = 183
+
+
+def create_protected_directory(path: Path, sddl: str = PROTECTED_ROOT_SDDL) -> bool:
+    """Make the folder `path` (its parent must exist) with the list `sddl` set by the
+    creating call itself, so there is no moment at which it carries the parent's inherited
+    list. True when it was made; False when it was already there (the caller decides what to
+    do about a folder it did not make). Raises OSError when Windows refuses."""
+    from ctypes import wintypes
+
+    class SecurityAttributes(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.DWORD),
+            ("descriptor", ctypes.c_void_p),
+            ("inherit", wintypes.BOOL),
+        ]
+
+    advapi, kernel = _api()
+    convert = advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW
+    convert.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+    ]
+    convert.restype = wintypes.BOOL
+    kernel.CreateDirectoryW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(SecurityAttributes)]
+    kernel.CreateDirectoryW.restype = wintypes.BOOL
+    descriptor = ctypes.c_void_p()
+    if not convert(sddl, 1, ctypes.byref(descriptor), None):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), descriptor, False)
+        made = kernel.CreateDirectoryW(str(path), ctypes.byref(attributes))
+        error = ctypes.get_last_error()
+    finally:
+        kernel.LocalFree(descriptor)
+    if made:
+        return True
+    if error == _ERROR_ALREADY_EXISTS:
+        return False
+    raise ctypes.WinError(error)

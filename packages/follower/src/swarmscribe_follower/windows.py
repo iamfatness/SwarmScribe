@@ -156,6 +156,9 @@ class ServiceHost:
             # The class only: an exception's text can hold a path or a secret.
             self.log(f"error: unexpected {type(error).__name__}")
             code = EXIT_UNEXPECTED
+        except BaseException as error:  # SystemExit and the like: not turned into a code here
+            self.log(f"error: unexpected {type(error).__name__}")
+            raise
         if code in FINAL_EXITS or self.stops.count:
             self._tell(STOPPED, specific=code)
         return code
@@ -223,26 +226,49 @@ def image_problem(command: list[str]) -> str | None:
     return None
 
 
+REPARSE_POINT = 0x400
+DIRECTORY = 0x10
+
+
+def is_reparse_point(path: Path) -> bool:
+    """A junction or a symbolic link, asked without following it."""
+    try:
+        return bool(os.lstat(path).st_file_attributes & REPARSE_POINT)
+    except OSError:
+        return False
+
+
 def root_problem(root: Path) -> str | None:
     """Why the data folder cannot be used as it is, or None. Anyone may create a folder under
-    %ProgramData%: one that an account other than Administrators, SYSTEM or the installing
-    administrator made could hold a settings file of that account's choosing, could be read
-    by its owner when the token is put in it, and its owner could change its permissions back
-    at any time. Looked at: the folder, its three folders and the two files the service
-    reads, whichever exist."""
+    %ProgramData%, and a user may put anything in a folder made there. So everything under
+    `root`, at any depth, is looked at without following links: none may be a junction or a
+    symbolic link (a grant given to one would land on its target), and each must be owned by
+    Administrators or SYSTEM (or the service's own account, which owns what it wrote before
+    an uninstall). The installing user's own SID is not accepted: an elevated administrator's
+    files belong to Administrators. An owner may change permissions back at any time, and could
+    read a token put into a file it made."""
     from . import winacl
 
-    allowed = {winacl.ADMINISTRATORS, winacl.SYSTEM, winacl.current_user()}
-    names = ("state", "models", "logs", "follower.env", "join-token")
-    for path in (root, *(root / name for name in names)):
-        if not path.exists():
-            continue
+    allowed = {winacl.ADMINISTRATORS, winacl.SYSTEM, winacl.service_sid(SERVICE_NAME)}
+    advice = f"remove or rename the folder {root} and run `service install` again"
+    pending = [root] if os.path.lexists(root) else []
+    while pending:
+        path = pending.pop()
+        try:
+            attributes = os.lstat(path).st_file_attributes
+        except OSError as error:
+            return f"{path} cannot be examined ({error.strerror}); {advice}"
+        if attributes & REPARSE_POINT:
+            return f"{path} is a junction or a symbolic link; {advice}"
         owner, _ = winacl.read_acl(path)
         if owner not in allowed:
             return (
                 f"{path} exists and was not made by an administrator (its owner is {owner});"
-                " look at what is in it, remove it, and run `service install` again"
+                f" {advice}"
             )
+        if attributes & DIRECTORY:
+            with os.scandir(path) as entries:
+                pending.extend(Path(entry.path) for entry in entries)
     return None
 
 
@@ -257,8 +283,10 @@ def image_line(command: list[str]) -> str:
 
 class Step(NamedTuple):
     """One thing `service install` does. `kind`: "check" (look at who owns what is in the
-    data folder), "mkdir", "settings" (write the settings file if it is not there) or "run"
-    (a command, `value` its argument list)."""
+    data folder), "root" (make the data folder, already protected, if it is not there),
+    "lock" (a command run only for a data folder that was already there), "mkdir",
+    "settings" (write the settings file if it is not there) or "run" (a command, `value` its
+    argument list)."""
 
     kind: str
     value: object
@@ -272,11 +300,15 @@ def install_plan(command: list[str], root: Path) -> list[Step]:
     because its name resolves only once the service exists. The owners are looked at before
     anything is made and again at the end. `sc.exe` wants each `name=` and its value as two
     arguments."""
+    from . import winacl
+
     private = "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"  # Administrators, SYSTEM
+    grantee = "*" + winacl.service_sid(SERVICE_NAME)  # by SID: the name is not looked up
     steps = [
         Step("check", root),
-        Step("mkdir", root),
-        Step("run", ["icacls.exe", str(root), "/inheritance:r", "/grant:r", *private]),
+        Step("root", root),  # made already protected, when it is not there
+        # a folder that was there is locked by command: nothing is made before this
+        Step("lock", ["icacls.exe", str(root), "/inheritance:r", "/grant:r", *private]),
         *(Step("mkdir", root / name) for name in FOLDERS),
         Step("settings", root / "follower.env"),
         Step("run", [
@@ -290,10 +322,10 @@ def install_plan(command: list[str], root: Path) -> list[Step]:
         ]),
         Step("run", ["sc.exe", "failureflag", SERVICE_NAME, "0"]),
         # The settings and the token: administrators write them, the service reads them.
-        Step("run", ["icacls.exe", str(root), "/grant:r", f"{ACCOUNT}:(OI)(CI)RX"]),
+        Step("run", ["icacls.exe", str(root), "/grant:r", f"{grantee}:(OI)(CI)RX"]),
         # What the service writes: its credential and scratch, its models, its log.
         *(
-            Step("run", ["icacls.exe", str(root / name), "/grant:r", f"{ACCOUNT}:(OI)(CI)M"])
+            Step("run", ["icacls.exe", str(root / name), "/grant:r", f"{grantee}:(OI)(CI)M"])
             for name in FOLDERS
         ),
         Step("check", root),
@@ -322,7 +354,7 @@ def install(out, err, *, print_only: bool) -> int:
         print(f"folders: {root} with {', '.join(FOLDERS)} inside", file=out)
         print(f"settings file: {root / 'follower.env'} (written if it is not there)", file=out)
         for step in steps:
-            if step.kind == "run":
+            if step.kind in ("run", "lock"):
                 print(command_line(step.value), file=out)
         return EXIT_OK
     if problem:
@@ -336,32 +368,59 @@ def install(out, err, *, print_only: bool) -> int:
         )
         return EXIT_CONFIGURATION
     registered = False
+    created = False
+    after_create = (
+        f"the service {SERVICE_NAME} was registered: run `swarmscribe-follower service uninstall`"
+        " before trying again"
+    )
+
+    def refuse(message: str, code: int) -> int:
+        print(f"error: {message}", file=err)
+        if registered:
+            print(after_create, file=err)
+        return code
+
     for step in steps:
         if step.kind == "check":
             problem = root_problem(root)
             if problem:
-                print(f"error: {problem}", file=err)
-                return EXIT_CONFIGURATION
+                return refuse(problem, EXIT_CONFIGURATION)
+        elif step.kind == "root":
+            from . import winacl
+
+            try:
+                root.parent.mkdir(parents=True, exist_ok=True)
+                created = winacl.create_protected_directory(root)
+            except OSError as error:
+                return refuse(
+                    f"could not create {root}: {error.strerror or error}", EXIT_UNEXPECTED
+                )
         elif step.kind == "mkdir":
+            if is_reparse_point(step.value):
+                return refuse(
+                    f"{step.value} is a junction or a symbolic link; remove or rename the"
+                    f" folder {root} and run `service install` again",
+                    EXIT_CONFIGURATION,
+                )
             step.value.mkdir(parents=True, exist_ok=True)
         elif step.kind == "settings":
             if not step.value.exists():
                 step.value.write_text(env_template(root), encoding="utf-8")
+        elif step.kind == "lock" and created:
+            continue
         else:
+            if step.value[0] == "icacls.exe" and is_reparse_point(Path(step.value[1])):
+                return refuse(
+                    f"{step.value[1]} is a junction or a symbolic link and gets no grant",
+                    EXIT_CONFIGURATION,
+                )
             done = subprocess.run(step.value, capture_output=True, text=True)
             if done.returncode != 0:
                 said = (done.stdout + done.stderr).strip().splitlines()
-                print(
-                    f"error: `{command_line(step.value)}` failed: {said[-1] if said else ''}",
-                    file=err,
+                return refuse(
+                    f"`{command_line(step.value)}` failed: {said[-1] if said else ''}",
+                    EXIT_UNEXPECTED,
                 )
-                if registered:
-                    print(
-                        f"the service {SERVICE_NAME} was registered: run `swarmscribe-follower"
-                        " service uninstall` before trying again",
-                        file=err,
-                    )
-                return EXIT_UNEXPECTED
             registered = registered or step.value[:2] == ["sc.exe", "create"]
     settings = root / "follower.env"
     print(f"installed the service {SERVICE_NAME} (not started)", file=out)

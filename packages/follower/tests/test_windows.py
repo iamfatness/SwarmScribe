@@ -91,6 +91,22 @@ def test_a_bug_in_the_follower_is_exit_1_and_left_to_the_recovery_actions():
     assert not service.reported_stopped
 
 
+def test_an_exit_from_the_follower_is_logged_by_class_and_still_ends_the_process():
+    """`SystemExit` (or any other BaseException) from `run` is not turned into an exit code
+    here: it goes on, as it did, and the process ends. Only a line is added."""
+    lines = []
+
+    def run(stops):
+        raise SystemExit(3)
+
+    service, reports = host(run, log=lines.append)
+    with pytest.raises(SystemExit) as ended:
+        service.main()
+    assert ended.value.code == 3
+    assert lines == ["error: unexpected SystemExit"]
+    assert not service.reported_stopped
+
+
 def test_a_failure_to_start_leaves_one_line_in_the_log_and_never_its_message():
     """The service has no console: an exception from the follower's own start-up (a broken
     environment, a library that will not load) would otherwise leave nothing at all. Its class
@@ -249,14 +265,19 @@ def steps_of(plan):
 
 
 def test_the_install_plan_is_in_this_order():
-    """The data folder is locked the moment it exists, before anything is put in it, and the
-    service account is granted its access only once the service (and so the account) exists."""
+    """The data folder is made already protected (and locked by command when it was there
+    before), before anything is put in it; the service is registered after that; the service
+    account is granted its access last, by SID, because the account's name resolves only once
+    the service exists."""
+    from swarmscribe_follower import winacl
+
     plan = windows.install_plan([PYTHON, BOOT], ROOT)
     lock = ["icacls.exe", str(ROOT), "/inheritance:r", "/grant:r",
             "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"]
     account = r"NT SERVICE\SwarmScribeFollower"
+    grantee = "*" + winacl.service_sid("SwarmScribeFollower")
     kinds = steps_of(plan)
-    assert kinds[:3] == [("check", ROOT), ("mkdir", ROOT), ("run", lock)]
+    assert kinds[:3] == [("check", ROOT), ("root", ROOT), ("lock", lock)]
     assert kinds[3:7] == [
         ("mkdir", ROOT / "state"), ("mkdir", ROOT / "models"), ("mkdir", ROOT / "logs"),
         ("settings", ROOT / "follower.env"),
@@ -275,9 +296,9 @@ def test_the_install_plan_is_in_this_order():
     ])
     assert kinds[10] == ("run", ["sc.exe", "failureflag", "SwarmScribeFollower", "0"])
     assert kinds[11:] == [
-        ("run", ["icacls.exe", str(ROOT), "/grant:r", f"{account}:(OI)(CI)RX"]),
+        ("run", ["icacls.exe", str(ROOT), "/grant:r", f"{grantee}:(OI)(CI)RX"]),
         *(
-            ("run", ["icacls.exe", str(ROOT / name), "/grant:r", f"{account}:(OI)(CI)M"])
+            ("run", ["icacls.exe", str(ROOT / name), "/grant:r", f"{grantee}:(OI)(CI)M"])
             for name in ("state", "models", "logs")
         ),
         ("check", ROOT),
@@ -286,32 +307,62 @@ def test_the_install_plan_is_in_this_order():
     assert "token" not in text and "password" not in text
 
 
-def installing(tmp_path, monkeypatch, run):
+def installing(tmp_path, monkeypatch, run, *, existed=False):
+    """`install` with the control manager, the elevation test and the owner check replaced.
+    `events` records, in order, what was done and what existed at that moment."""
+    from swarmscribe_follower import winacl
+
     root = tmp_path / "swarmscribe-follower"
+    if existed:
+        root.mkdir()
+    events = []
+
+    def create(path):
+        events.append(("create", sorted(p.name for p in path.parent.iterdir())))
+        if path.exists():
+            return False
+        path.mkdir()
+        return True
+
+    def recording(argv, **kwargs):
+        events.append((tuple(argv[:2]), sorted(p.name for p in root.rglob("*"))))
+        return run(argv, **kwargs)
+
     monkeypatch.setattr(windows, "data_root", lambda: root)
     monkeypatch.setattr(windows, "is_administrator", lambda: True)
     monkeypatch.setattr(windows, "image_problem", lambda command: None)
     monkeypatch.setattr(windows, "root_problem", lambda path: None)
-    monkeypatch.setattr(windows.subprocess, "run", run)
-    return root
+    monkeypatch.setattr(winacl, "create_protected_directory", create)
+    monkeypatch.setattr(windows.subprocess, "run", recording)
+    return root, events
 
 
-def test_install_runs_its_steps_in_that_order_and_nothing_is_made_before_the_lock(
+def ok(argv, **kwargs):
+    return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+def test_a_new_data_folder_is_created_protected_and_nothing_is_made_before_that(
     tmp_path, monkeypatch
 ):
-    seen = []
-
-    def run(argv, **kwargs):
-        seen.append((argv[:2], sorted(p.name for p in root.rglob("*"))))
-        return subprocess.CompletedProcess(argv, 0, "", "")
-
-    root = installing(tmp_path, monkeypatch, run)
+    root, events = installing(tmp_path, monkeypatch, ok)
     out, err = io.StringIO(), io.StringIO()
     assert windows.install(out, err, print_only=False) == 0, err.getvalue()
-    assert seen[0] == (["icacls.exe", str(root)], [])  # the lock: the root and nothing in it
-    assert [argv[0] for argv, _ in seen[1:5]] == ["sc.exe"] * 4
-    assert seen[1][1] == ["follower.env", "logs", "models", "state"]
-    assert [argv[0] for argv, _ in seen[5:]] == ["icacls.exe"] * 4
+    assert events[0] == ("create", [])  # the root was made by the protected call, nothing run
+    sc = [event for event in events if event[0][0] == "sc.exe"]
+    assert len(sc) == 4 and sc[0][1] == ["follower.env", "logs", "models", "state"]
+    assert not any(event[0][:2] == ("icacls.exe", str(root)) and "/inheritance:r" in event
+                   for event in events)
+    assert [event[0][0] for event in events if event[0][0] == "icacls.exe"] == ["icacls.exe"] * 4
+
+
+def test_a_data_folder_that_was_there_is_locked_before_anything_is_made_in_it(
+    tmp_path, monkeypatch
+):
+    root, events = installing(tmp_path, monkeypatch, ok, existed=True)
+    out, err = io.StringIO(), io.StringIO()
+    assert windows.install(out, err, print_only=False) == 0, err.getvalue()
+    assert events[0][0] == "create" and events[1] == (("icacls.exe", str(root)), [])
+    assert events[2][0] == ("sc.exe", "create")
 
 
 def test_a_failure_after_the_service_was_registered_says_to_uninstall_before_trying_again(
@@ -327,11 +378,20 @@ def test_a_failure_after_the_service_was_registered_says_to_uninstall_before_try
     assert "run `swarmscribe-follower service uninstall` before trying again" in err.getvalue()
 
 
+def test_a_final_owner_check_that_refuses_says_so_too(tmp_path, monkeypatch):
+    installing(tmp_path, monkeypatch, ok)
+    answers = iter([None, r"C:\x\join-token exists and was not made by an administrator"])
+    monkeypatch.setattr(windows, "root_problem", lambda path: next(answers))
+    out, err = io.StringIO(), io.StringIO()
+    assert windows.install(out, err, print_only=False) == 2
+    assert "run `swarmscribe-follower service uninstall` before trying again" in err.getvalue()
+
+
 def test_a_failure_before_the_service_exists_does_not_say_to_uninstall(tmp_path, monkeypatch):
     def run(argv, **kwargs):
         return subprocess.CompletedProcess(argv, 1, "", "boom")
 
-    installing(tmp_path, monkeypatch, run)
+    installing(tmp_path, monkeypatch, run, existed=True)
     out, err = io.StringIO(), io.StringIO()
     assert windows.install(out, err, print_only=False) == 1
     assert "uninstall" not in err.getvalue()
@@ -436,36 +496,111 @@ def make_tree(root):
     root.mkdir()
     for name in ("state", "models", "logs"):
         (root / name).mkdir()
+    (root / "state" / "scratch").mkdir()
+    (root / "state" / "scratch" / "nested.txt").write_text("x", encoding="utf-8")
     for name in ("follower.env", "join-token"):
         (root / name).write_text("x", encoding="utf-8")
 
 
-@windows_only
-def test_a_data_folder_or_anything_in_it_owned_by_someone_else_is_refused(tmp_path, monkeypatch):
-    """Anyone may create a folder under %ProgramData% before the install does. Only what
-    Administrators, SYSTEM or the installing administrator own is used: the owner may change
-    its permissions back at any time, and could read the token put into a file it made. The
-    owner is crafted here (it cannot be given away without privilege), so this holds whether
-    the account running the tests is elevated (files then belong to Administrators) or not."""
+def owned_by(monkeypatch, owner_of):
+    """Everything is owned by Administrators except what `owner_of` names: ownership cannot
+    be given away without privilege, so it is crafted (and the test holds whether the account
+    running it is elevated, when its files belong to Administrators, or not)."""
     from swarmscribe_follower import winacl
 
+    def read(path, descriptor_of=None):
+        return (owner_of(Path(path)) or winacl.ADMINISTRATORS), []
+
+    monkeypatch.setattr(winacl, "read_acl", read)
+
+
+@windows_only
+def test_a_clean_tree_passes_and_an_absent_one_too(tmp_path, monkeypatch):
+    owned_by(monkeypatch, lambda path: None)
     assert windows.root_problem(tmp_path / "absent") is None
-    root = tmp_path / "swarmscribe-follower"
+    make_tree(tmp_path / "root")
+    assert windows.root_problem(tmp_path / "root") is None
+
+
+@windows_only
+def test_anything_at_any_depth_owned_by_someone_else_is_refused_by_name(tmp_path, monkeypatch):
+    """Anyone may create a folder under %ProgramData% before the install does. Only what
+    Administrators or SYSTEM (or the service's own account, after an uninstall) own is used:
+    the owner may change its permissions back at any time, and could read a token put into
+    a file it made. Not even the installing user's own SID is accepted: an elevated
+    administrator's files belong to Administrators."""
+    from swarmscribe_follower import winacl
+
+    root = tmp_path / "root"
     make_tree(root)
-    assert windows.root_problem(root) is None  # all owned by whoever installs
-    real = winacl.read_acl
-    for name in ("", "state", "models", "logs", "follower.env", "join-token"):
-        foreign = root / name if name else root
+    deep = root / "state" / "scratch" / "nested.txt"
+    for foreign in (root, root / "models", root / "join-token", deep):
+        owned_by(monkeypatch, lambda path, foreign=foreign: "S-1-5-32-545" if path == foreign
+                 else None)
+        problem = windows.root_problem(root) or ""
+        assert f"{foreign} exists and was not made by an administrator" in problem
+        assert "remove or rename" in problem
+    for accepted in (winacl.SYSTEM, winacl.service_sid(windows.SERVICE_NAME)):
+        owned_by(monkeypatch, lambda path, accepted=accepted: accepted if path == deep else None)
+        assert windows.root_problem(root) is None
+    owned_by(monkeypatch, lambda path: winacl.current_user() if path == deep else None)
+    if winacl.current_user() != winacl.ADMINISTRATORS:
+        assert windows.root_problem(root) is not None
 
-        def read(path, descriptor_of=None, foreign=foreign):
-            owner, allowed = real(path, descriptor_of)
-            return ("S-1-5-32-545", allowed) if Path(path) == foreign else (owner, allowed)
 
-        monkeypatch.setattr(winacl, "read_acl", read)
-        assert f"{foreign} exists and was not made by an administrator" in (
-            windows.root_problem(root) or ""
-        )
-        monkeypatch.setattr(winacl, "read_acl", real)
+def junction(link, target):
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)], check=True, capture_output=True
+    )
+
+
+@windows_only
+def test_a_junction_anywhere_in_the_tree_is_refused_and_no_grant_follows(tmp_path, monkeypatch):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    root = tmp_path / "root"
+    make_tree(root)
+    (root / "models").rmdir()
+    junction(root / "models", elsewhere)
+    owned_by(monkeypatch, lambda path: None)
+    problem = windows.root_problem(root)
+    assert str(root / "models") in problem and "junction or a symbolic link" in problem
+    assert "remove or rename" in problem
+    # and install stops there: nothing is run, so no grant is ever issued on the target
+    ran = []
+    monkeypatch.setattr(windows, "data_root", lambda: root)
+    monkeypatch.setattr(windows, "is_administrator", lambda: True)
+    monkeypatch.setattr(windows, "image_problem", lambda command: None)
+    monkeypatch.setattr(windows.subprocess, "run", lambda argv, **kw: ran.append(argv))
+    out, err = io.StringIO(), io.StringIO()
+    assert windows.install(out, err, print_only=False) == 2
+    assert ran == [] and "junction or a symbolic link" in err.getvalue()
+
+
+@windows_only
+def test_a_grant_is_never_issued_on_a_reparse_point_even_if_the_check_missed_it(
+    tmp_path, monkeypatch
+):
+    from swarmscribe_follower import winacl
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    root = tmp_path / "root"
+    root.mkdir()
+    junction(root / "models", elsewhere)
+    ran = []
+    monkeypatch.setattr(windows, "data_root", lambda: root)
+    monkeypatch.setattr(windows, "is_administrator", lambda: True)
+    monkeypatch.setattr(windows, "image_problem", lambda command: None)
+    monkeypatch.setattr(windows, "root_problem", lambda path: None)  # the check "missed" it
+    monkeypatch.setattr(winacl, "create_protected_directory", lambda path: False)
+    monkeypatch.setattr(
+        windows.subprocess, "run", lambda argv, **kw: ran.append(argv) or ok(argv)
+    )
+    out, err = io.StringIO(), io.StringIO()
+    assert windows.install(out, err, print_only=False) == 2
+    assert "junction or a symbolic link" in err.getvalue()
+    assert not any(str(root / "models") in " ".join(argv) for argv in ran)
 
 
 def test_a_service_sid_is_the_sha1_of_the_upper_cased_name():
@@ -479,6 +614,12 @@ def test_a_service_sid_is_the_sha1_of_the_upper_cased_name():
     assert winacl.service_sid(windows.SERVICE_NAME).startswith("S-1-5-80-")
 
 
+def test_the_service_name_is_defined_once():
+    from swarmscribe_follower import winacl
+
+    assert winacl.SERVICE_NAME is windows.SERVICE_NAME
+
+
 @windows_only
 def test_outside_the_control_manager_the_dispatcher_says_so_at_once():
     began = time.monotonic()
@@ -490,10 +631,13 @@ def test_outside_the_control_manager_the_dispatcher_says_so_at_once():
 
 
 @windows_only
-def test_the_services_own_command_starts_the_follower_from_the_real_interpreter(tmp_path):
-    """The command `service install` registers (the real interpreter with service_boot.py,
-    which finds the follower's environment by itself), run in a console: it gets as far as
-    reading its settings file, and reports exit 2 without SERVICE_STOPPED."""
+def test_the_services_command_runs_the_follower_in_the_real_interpreter_given_its_path(
+    tmp_path,
+):
+    """The command `service install` registers (the real interpreter with service_boot.py),
+    run in a console: it gets as far as reading its settings file, and reports exit 2 without
+    SERVICE_STOPPED. The venv's import path is GIVEN here (PYTHONPATH): what shows the boot
+    script finds the environment by itself is the test below."""
     settings = tmp_path / "follower.env"
     settings.write_text("this line is not a setting\n", encoding="utf-8")
     environment = {
@@ -551,3 +695,52 @@ def test_options_that_mean_nothing_to_a_service_command_are_refused():
         out, err = io.StringIO(), io.StringIO()
         assert cli.main(argv, out=out, err=err) == 2
         assert word in err.getvalue() and out.getvalue() == ""
+
+
+@windows_only
+def test_the_boot_script_finds_the_environment_by_itself_and_hides_its_own_folder(tmp_path):
+    """What `service_boot.bootstrap()` is for, shown with the real interpreter, a clean
+    environment and a stand-in install: a site-packages-like folder holding the package (with
+    the real service_boot.py beside a stub `windows`, and a stub `logs` module like the real
+    package's) and one other library. The boot script is run as the control manager runs it:
+    the library is importable only because it added the folder, and the package's own
+    modules only by their package name, not bare."""
+    site = tmp_path / "site-packages"
+    package = site / "swarmscribe_follower"
+    package.mkdir(parents=True)
+    (site / "stub_library.py").write_text("MARK = 'found'\n", encoding="utf-8")
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "logs.py").write_text("", encoding="utf-8")
+    (package / "windows.py").write_text(
+        "def service_process(argv):\n"
+        "    import stub_library\n"
+        "    try:\n"
+        "        import logs\n"
+        "        bare = 'importable'\n"
+        "    except ImportError:\n"
+        "        bare = 'hidden'\n"
+        "    print(stub_library.MARK, bare, argv)\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    boot = package / "service_boot.py"
+    boot.write_text(windows.boot_script().read_text(encoding="utf-8"), encoding="utf-8")
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name.upper() not in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP")
+        and not name.startswith("SWARMSCRIBE_")
+    }
+    python = windows.image()[0]
+    # without the boot script's bootstrap the library is not on the path
+    bare = subprocess.run(
+        [python, "-c", "import stub_library"], capture_output=True, text=True, env=environment,
+        timeout=60, cwd=tmp_path,
+    )
+    assert bare.returncode != 0
+    done = subprocess.run(
+        [python, str(boot), "--x"], capture_output=True, text=True, timeout=60, env=environment,
+        cwd=tmp_path,
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "found hidden ['--x']"

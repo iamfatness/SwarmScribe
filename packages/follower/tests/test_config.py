@@ -59,6 +59,51 @@ def test_a_token_file_wins_over_the_variable_and_is_read_late(monkeypatch, tmp_p
     assert settings.token() == "from-the-file"
 
 
+def with_token_file(monkeypatch, path, content: bytes) -> Settings:
+    path.write_bytes(content)
+    monkeypatch.setenv("SWARMSCRIBE_LEADER_URL", "https://leader.example.org")
+    monkeypatch.setenv("SWARMSCRIBE_JOIN_TOKEN_FILE", str(path))
+    return Settings()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"the-token\n",  # plain
+        b"\xef\xbb\xbfthe-token\r\n",  # PowerShell 5.1: Set-Content -Encoding UTF8
+        b"\xff\xfe" + "the-token\r\n".encode("utf-16-le"),  # PowerShell 5.1: > and Out-File
+        b"\xfe\xff" + "the-token\r\n".encode("utf-16-be"),
+    ],
+    ids=["plain", "utf-8 with a mark", "utf-16 little-endian", "utf-16 big-endian"],
+)
+def test_a_token_file_is_read_whatever_a_windows_tool_wrote_it_as(monkeypatch, tmp_path, content):
+    """A byte-order mark must never become part of the token: the leader would refuse it,
+    which is exit 4, final."""
+    settings = with_token_file(monkeypatch, tmp_path / "token", content)
+    assert settings.token() == "the-token"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"\x80\x81 s3cret-bytes \xfe",  # not text at all
+        b"\xff\xfes3cret-odd-",  # says UTF-16 and ends in half a character
+        "s3cret-token".encode("utf-16-le"),  # UTF-16 without a mark: NUL after every letter
+    ],
+    ids=["garbage", "broken utf-16", "utf-16 without a mark"],
+)
+def test_a_token_file_that_is_not_text_is_a_settings_error_naming_the_file(
+    monkeypatch, tmp_path, content
+):
+    path = tmp_path / "token"
+    settings = with_token_file(monkeypatch, path, content)
+    with pytest.raises(ValueError) as refused:
+        settings.token()
+    message = str(refused.value)
+    assert str(path) in message and "plain text (UTF-8 or ASCII)" in message
+    assert "s3cret" not in message and "codec" not in message
+
+
 @pytest.mark.parametrize("name", ENV[1:])
 def test_an_optional_setting_passed_as_an_empty_string_is_unset(monkeypatch, name):
     monkeypatch.setenv("SWARMSCRIBE_LEADER_URL", "https://leader.example.org")

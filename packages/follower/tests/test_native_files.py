@@ -66,6 +66,8 @@ def test_the_settings_example_names_a_token_file_and_holds_no_token():
     example = settings(EXAMPLE)
     assert example["SWARMSCRIBE_JOIN_TOKEN_FILE"] == ["/etc/swarmscribe-follower/join-token"]
     assert "SWARMSCRIBE_JOIN_TOKEN" not in example
+    # the follower reads the token again when it must register again (README: keep the file)
+    assert "keep that file" in EXAMPLE and "emptied" not in EXAMPLE and "read once" not in EXAMPLE
     state = example["SWARMSCRIBE_FOLLOWER_STATE_DIR"][0]
     assert state.startswith("/var/lib/swarmscribe-follower/")  # inside the unit's StateDirectory
 

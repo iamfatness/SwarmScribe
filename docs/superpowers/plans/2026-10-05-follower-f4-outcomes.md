@@ -47,10 +47,12 @@ The GPU, separately: in a plain container from the same image with `--gpus all` 
 (float16) loaded and ran`. The engine alone in that environment, without the follower's
 loading of the library, failed with `Library libcublas.so.12 is not found or cannot be loaded`.
 
-## The runs of Task 7 (plan F4a)
+## The run of Task 7 (plan F4a)
 
-Both on 2026-10-06, on the same Windows 11 machine (Docker 29.8.1, uv 0.12.22), against the
-leader image `swarmscribe-leader:f4-e2e` built from the branch `follower-f4`. In the machine:
+Two runs, on the same Windows 11 machine (Docker 29.8.1, uv 0.12.22), the first run's commit
+dated 2026-10-06 09:00 -0400 and the second's 2026-10-06 09:23 -0400, on the branch
+`follower-f4`, against the leader image tag `swarmscribe-leader:f4-e2e` (built by
+`docker build -t swarmscribe-leader:f4-e2e -f e2e/compose/Dockerfile .` in the worktree). In the machine:
 systemd 252 (252.39-1~deb12u2), Debian GNU/Linux 12 (bookworm), uv 0.12.22
 (x86_64-unknown-linux-gnu); `cmd /c ver`: `Microsoft Windows [Version 10.0.26200.9457]`.
 
@@ -61,8 +63,9 @@ systemd 252 (252.39-1~deb12u2), Debian GNU/Linux 12 (bookworm), uv 0.12.22
   overwrote `UV` with the path of `uv.exe`, which the driver split on its backslashes.
 - `up` `real 0m16.554s`; `run` `real 4m32.316s`; `down` `real 0m1.877s`. The last line of `run`:
   `passed (tiny.en on cpu, systemd 252): installed with uv tool install and registered in 22 s; a stop with 900 s of grace finished the recording (50 s) and one with 1 s released it (3.0 s, no attempt counted); a killed follower was restarted and its recording redone; MemoryMax= refused an hour; drain exited 0 and stayed stopped; revoke exited 4 and was not restarted; exit 3 was restarted 5 times, then left failed`
-- **Its "nothing is listening" result is not evidence.** The machine's image had no `ss`, so
-  that check of the harness could not fail. The harness was fixed on review (`369e26a`), and
+- **Its "nothing is listening" result is not evidence.** The Dockerfile at `735dc75` does not
+  install iproute2, which provides `ss` (`git show 735dc75:e2e/follower-systemd/Dockerfile |
+  grep -c iproute2` printed `0`), so that check of the harness could not have worked as a check. The harness was fixed on review (`369e26a`), and
   the second run is the one that counts for it. The same review made step 9 wait for a new
   follower id and reset the unit's start counter, and step 10 read only the journal written
   after it began; the first run's results for those steps were obtained without those fixes.
@@ -81,7 +84,8 @@ systemd 252 (252.39-1~deb12u2), Debian GNU/Linux 12 (bookworm), uv 0.12.22
   ```
 
   The driver's listening check (`ss -Hltnp`, matching the follower's pid) is part of that
-  pass: it ran with `ss` present and found no listening socket of the follower.
+  pass: it ran with `ss` present and found no listening socket of the follower. It is a check of TCP listeners (`ss -Hltnp`)
+  matched on the unit's main process id; UDP is not covered.
 - The machine looked at by hand before `down`:
 
   ```

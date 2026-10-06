@@ -36,7 +36,11 @@ def test_this_account_has_a_sid_and_a_folder_it_made_private_is_trusted(tmp_path
     assert winacl.current_user().startswith("S-1-5-")
     private_folder(tmp_path / "state")
     owner, allowed = winacl.read_acl(tmp_path / "state")
-    assert owner == winacl.current_user()
+    # An elevated administrator's files belong to the Administrators group, not to the user.
+    mine = {winacl.current_user()}
+    if winacl.is_administrator():
+        mine.add(winacl.ADMINISTRATORS)
+    assert owner in mine
     # Python 3.12.4 and later make a folder of mode 0700 with an access list of the owner,
     # SYSTEM and Administrators; an older one inherits its parent's list. private_folder makes
     # the list private either way (test_a_new_folder_is_made_private_where_python_inherits).
@@ -253,3 +257,47 @@ def test_an_owner_who_is_another_principal_is_refused(tmp_path):
             tmp_path / "x", what=what, acl=(users, [winacl.current_user()])
         )
         assert f"is owned by another account (Users ({users}))" in problem
+
+
+def test_the_service_account_is_trusted_only_by_an_elevated_administrator(monkeypatch, tmp_path):
+    from swarmscribe_follower import winacl
+
+    service = winacl.service_sid("SwarmScribeFollower")
+    other = "S-1-5-80-1-2-3-4-5"  # another service's account is never trusted
+    cases = (
+        (service, [winacl.ADMINISTRATORS, winacl.SYSTEM]),  # it owns it
+        (winacl.ADMINISTRATORS, [service]),  # it is let in
+    )
+    path = tmp_path / "x"
+    for administrator in (True, False):
+        monkeypatch.setattr(
+            winacl, "is_administrator", lambda administrator=administrator: administrator
+        )
+        for acl in cases:
+            problem = winacl.access_problem(path, what="file", acl=acl)
+            assert (problem is None) is administrator, (administrator, acl, problem)
+        # nothing else is widened
+        assert "owned by another account" in winacl.access_problem(
+            path, what="file", acl=(other, [])
+        )
+        assert "can be reached by other accounts" in winacl.access_problem(
+            path, what="file", acl=(winacl.SYSTEM, [other])
+        )
+
+
+def test_an_elevated_administrators_own_folder_is_made_private_too(tmp_path, monkeypatch):
+    """Under elevation Windows makes the Administrators group the owner of what the account
+    creates, not the user; make_private must still treat that folder as the account's own."""
+    from swarmscribe_follower import winacl
+
+    folder = tmp_path / "state"
+    folder.mkdir()
+    let_everyone_in(folder)
+    real = winacl.read_acl
+    monkeypatch.setattr(winacl, "is_administrator", lambda: True)
+    monkeypatch.setattr(
+        winacl, "read_acl", lambda path, descriptor_of=None: (winacl.ADMINISTRATORS, real(path)[1])
+    )
+    assert winacl.make_private(folder) is True
+    monkeypatch.undo()
+    assert winacl.access_problem(folder) is None

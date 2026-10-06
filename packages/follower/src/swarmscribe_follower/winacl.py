@@ -17,13 +17,22 @@ A state folder that is itself a junction or a symbolic link is refused: its list
 path, which would follow the link, as a separate step from the later opens. A link higher up
 in the path is not checked.
 
+One principal is added, and only for an elevated administrator: the follower's own service
+account (the virtual account "NT SERVICE" slash "SwarmScribeFollower"). The service's
+folder and credential belong to it, and `leave` or `doctor` run from an elevated prompt must
+be able to read them. Nobody else is widened: a process that is not an elevated
+administrator refuses what that account owns or can reach, as it refuses any other account's.
+
 Every function here raises OSError when Windows refuses a call, and is called on Windows only."""
 
 import ctypes
 import functools
+import hashlib
 import os
+import struct
 from pathlib import Path
 
+SERVICE_NAME = "SwarmScribeFollower"  # what windows.py installs; not imported: it is stdlib-only
 SYSTEM = "S-1-5-18"
 ADMINISTRATORS = "S-1-5-32-544"
 # CREATOR OWNER and OWNER RIGHTS stand for whoever owns the object: the owner is checked.
@@ -97,6 +106,29 @@ def _sid_text(advapi, kernel, sid: int) -> str:
         return text.value or ""
     finally:
         kernel.LocalFree(ctypes.cast(text, ctypes.c_void_p))
+
+
+def service_sid(name: str) -> str:
+    """The SID Windows gives the service `name` (its virtual account `NT SERVICE\name`):
+    S-1-5-80 and the five 32-bit words of the SHA-1 of the upper-cased name in UTF-16LE.
+    Pure: it needs no Windows call."""
+    digest = hashlib.sha1(name.upper().encode("utf-16-le")).digest()
+    return "S-1-5-80-" + "-".join(str(word) for word in struct.unpack("<5I", digest))
+
+
+def is_administrator() -> bool:
+    """True when this process is an administrator with an elevated token (`IsUserAnAdmin`
+    is false for an administrator whose token is filtered by User Account Control)."""
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (AttributeError, OSError):
+        return False
+
+
+def _own_owners() -> set[str]:
+    """Who may own what this account made. An elevated administrator's files belong to the
+    Administrators group, not to the user."""
+    return {current_user()} | ({ADMINISTRATORS} if is_administrator() else set())
 
 
 @functools.cache
@@ -192,6 +224,8 @@ def access_problem(
         )
     owner, allowed = acl if acl is not None else read_acl(path)
     trusted = {me, SYSTEM, ADMINISTRATORS}
+    if is_administrator():
+        trusted.add(service_sid(SERVICE_NAME))  # so `leave` and `doctor` can read its folder
     fix = (
         f'icacls "{path}" /inheritance:r /grant:r "*{me}:(OI)(CI)F" "*{SYSTEM}:(OI)(CI)F"'
         f' "*{ADMINISTRATORS}:(OI)(CI)F"'
@@ -242,7 +276,7 @@ def make_private(path: Path) -> bool:
     if os.lstat(path).st_file_attributes & _REPARSE_POINT:
         return False  # a link: not followed, and refused by the check
     owner, allowed = read_acl(path)
-    if owner != me:
+    if owner not in _own_owners():
         return False
     if allowed is not None and set(allowed) <= {me, SYSTEM, ADMINISTRATORS} | OWNER_PLACEHOLDERS:
         return False

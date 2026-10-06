@@ -6,6 +6,7 @@ prove what only the control manager can show (see the F4 outcomes document)."""
 import io
 import os
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -33,9 +34,11 @@ from swarmscribe_follower.windows import (
 windows_only = pytest.mark.skipif(os.name != "nt", reason="calls Windows itself")
 
 
-def host(run, *, grace=8.0):
+def host(run, *, grace=8.0, log=None):
     reports = []
-    made = ServiceHost(run, lambda *status: reports.append(status), grace_seconds=lambda: grace)
+    made = ServiceHost(
+        run, lambda *status: reports.append(status), grace_seconds=lambda: grace, log=log
+    )
     return made, reports
 
 
@@ -88,6 +91,22 @@ def test_a_bug_in_the_follower_is_exit_1_and_left_to_the_recovery_actions():
     assert not service.reported_stopped
 
 
+def test_a_failure_to_start_leaves_one_line_in_the_log_and_never_its_message():
+    """The service has no console: an exception from the follower's own start-up (a broken
+    environment, a library that will not load) would otherwise leave nothing at all. Its class
+    is logged; its message may hold a path or a secret and is not."""
+    lines = []
+
+    def run(stops):
+        raise ImportError(r"DLL load failed C:\Users\someone\secret-token-123")
+
+    service, reports = host(run, log=lines.append)
+    assert service.main() == 1
+    assert lines == ["error: unexpected ImportError"]
+    assert not service.reported_stopped
+    assert [status[0] for status in reports] == [START_PENDING, RUNNING]
+
+
 # --- the controls -------------------------------------------------------------------------
 
 
@@ -95,7 +114,8 @@ def test_the_stop_control_counts_one_stop_and_asks_for_the_grace_period_and_30_s
     service, reports = host(lambda stops: 0, grace=900.0)
     assert service.control(CONTROL_STOP) == NO_ERROR
     assert service.stops.count == 1
-    assert reports == [(STOP_PENDING, 0, 0, 930_000, 1)]
+    # a system shutdown that follows an operator's stop must still be heard
+    assert reports == [(STOP_PENDING, ACCEPT_PRESHUTDOWN, 0, 930_000, 1)]
 
 
 @pytest.mark.parametrize("control", [CONTROL_PRESHUTDOWN, CONTROL_SHUTDOWN])
@@ -104,6 +124,25 @@ def test_a_shutdown_counts_two_stops_so_the_job_is_handed_back_at_once(control):
     assert service.control(control) == NO_ERROR
     assert service.stops.count == 2  # run_supervised: stop(now=True)
     assert reports == [(STOP_PENDING, 0, 0, 30_000, 1)]
+
+
+def test_a_shutdown_after_an_operators_stop_hands_the_job_back_at_once():
+    service, reports = host(lambda stops: 0, grace=900.0)
+    service.control(CONTROL_STOP)
+    assert service.stops.count == 1
+    assert service.control(CONTROL_PRESHUTDOWN) == NO_ERROR
+    assert service.stops.count == 2  # the second stop: run_supervised releases the job now
+    assert reports[-1] == (STOP_PENDING, 0, 0, 30_000, 2)
+
+
+def test_once_stopped_has_been_reported_every_control_is_ignored_and_nothing_is_reported():
+    service, reports = host(lambda stops: 0)
+    assert service.main() == 0 and service.reported_stopped
+    told = list(reports)
+    for control in (CONTROL_STOP, CONTROL_SHUTDOWN, CONTROL_PRESHUTDOWN, CONTROL_INTERROGATE):
+        assert service.control(control) == NO_ERROR
+    assert service.control(0x7F) == ERROR_CALL_NOT_IMPLEMENTED
+    assert service.stops.count == 0 and reports == told
 
 
 def test_interrogate_is_answered_and_any_other_control_is_refused():
@@ -129,9 +168,16 @@ def test_the_stop_control_mid_job_releases_the_recording_and_the_supervisor_keep
 
     def stop_in_the_middle(fraction):
         if not answers:
+            # Make the health check able to fail: the supervisor's last tick is put 100 s
+            # back (past the 30 s /healthz allows), so a follower that is not ticked under the
+            # service reads unhealthy no matter how short this test is.
+            agent._ticked = time.monotonic() - 100
+            assert agent.health()[0] is False
             answers.append(service.control(CONTROL_STOP))
             deadline = time.monotonic() + 10
-            while not agent._stopping.is_set() and time.monotonic() < deadline:
+            while time.monotonic() < deadline and not (
+                agent._stopping.is_set() and agent.health()[0]
+            ):
                 time.sleep(0.01)
             health.append(agent.health())
 
@@ -198,27 +244,111 @@ BOOT = (
 ROOT = Path(r"C:\ProgramData\swarmscribe-follower")
 
 
-def test_the_install_commands_are_exactly_these():
-    steps = windows.install_commands([PYTHON, BOOT], ROOT)
-    assert steps[0] == [
-        "sc.exe", "create", "SwarmScribeFollower", "binPath=", f'"{PYTHON}" "{BOOT}"',
-        "start=", "delayed-auto", "obj=", r"NT SERVICE\SwarmScribeFollower",
-        "DisplayName=", "SwarmScribe Follower",
+def steps_of(plan):
+    return [(step.kind, step.value) for step in plan]
+
+
+def test_the_install_plan_is_in_this_order():
+    """The data folder is locked the moment it exists, before anything is put in it, and the
+    service account is granted its access only once the service (and so the account) exists."""
+    plan = windows.install_plan([PYTHON, BOOT], ROOT)
+    lock = ["icacls.exe", str(ROOT), "/inheritance:r", "/grant:r",
+            "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"]
+    account = r"NT SERVICE\SwarmScribeFollower"
+    kinds = steps_of(plan)
+    assert kinds[:3] == [("check", ROOT), ("mkdir", ROOT), ("run", lock)]
+    assert kinds[3:7] == [
+        ("mkdir", ROOT / "state"), ("mkdir", ROOT / "models"), ("mkdir", ROOT / "logs"),
+        ("settings", ROOT / "follower.env"),
     ]
-    assert steps[2] == [
+    create = [
+        value for kind, value in kinds if kind == "run" and value[:2] == ["sc.exe", "create"]
+    ]
+    assert create == [[
+        "sc.exe", "create", "SwarmScribeFollower", "binPath=", f'"{PYTHON}" "{BOOT}"',
+        "start=", "delayed-auto", "obj=", account, "DisplayName=", "SwarmScribe Follower",
+    ]]
+    assert kinds[7] == ("run", create[0])
+    assert kinds[9] == ("run", [
         "sc.exe", "failure", "SwarmScribeFollower", "reset=", "86400", "actions=",
         "restart/60000/restart/60000//60000",
+    ])
+    assert kinds[10] == ("run", ["sc.exe", "failureflag", "SwarmScribeFollower", "0"])
+    assert kinds[11:] == [
+        ("run", ["icacls.exe", str(ROOT), "/grant:r", f"{account}:(OI)(CI)RX"]),
+        *(
+            ("run", ["icacls.exe", str(ROOT / name), "/grant:r", f"{account}:(OI)(CI)M"])
+            for name in ("state", "models", "logs")
+        ),
+        ("check", ROOT),
     ]
-    assert steps[3] == ["sc.exe", "failureflag", "SwarmScribeFollower", "0"]
-    acl = [step for step in steps if step[0] == "icacls.exe"]
-    assert acl[0][1:4] == [str(ROOT), "/inheritance:r", "/grant:r"]
-    assert acl[0][-1] == r"NT SERVICE\SwarmScribeFollower:(OI)(CI)RX"
-    assert [step[1] for step in acl[1:]] == [
-        str(ROOT / name) for name in ("state", "models", "logs")
-    ]
-    assert all(step[-1] == r"NT SERVICE\SwarmScribeFollower:(OI)(CI)M" for step in acl[1:])
-    text = " ".join(part for step in steps for part in step).lower()
+    text = " ".join(part for kind, value in kinds if kind == "run" for part in value).lower()
     assert "token" not in text and "password" not in text
+
+
+def installing(tmp_path, monkeypatch, run):
+    root = tmp_path / "swarmscribe-follower"
+    monkeypatch.setattr(windows, "data_root", lambda: root)
+    monkeypatch.setattr(windows, "is_administrator", lambda: True)
+    monkeypatch.setattr(windows, "image_problem", lambda command: None)
+    monkeypatch.setattr(windows, "root_problem", lambda path: None)
+    monkeypatch.setattr(windows.subprocess, "run", run)
+    return root
+
+
+def test_install_runs_its_steps_in_that_order_and_nothing_is_made_before_the_lock(
+    tmp_path, monkeypatch
+):
+    seen = []
+
+    def run(argv, **kwargs):
+        seen.append((argv[:2], sorted(p.name for p in root.rglob("*"))))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    root = installing(tmp_path, monkeypatch, run)
+    out, err = io.StringIO(), io.StringIO()
+    assert windows.install(out, err, print_only=False) == 0, err.getvalue()
+    assert seen[0] == (["icacls.exe", str(root)], [])  # the lock: the root and nothing in it
+    assert [argv[0] for argv, _ in seen[1:5]] == ["sc.exe"] * 4
+    assert seen[1][1] == ["follower.env", "logs", "models", "state"]
+    assert [argv[0] for argv, _ in seen[5:]] == ["icacls.exe"] * 4
+
+
+def test_a_failure_after_the_service_was_registered_says_to_uninstall_before_trying_again(
+    tmp_path, monkeypatch
+):
+    def run(argv, **kwargs):
+        failed = argv[0] == "sc.exe" and argv[1] == "failure"
+        return subprocess.CompletedProcess(argv, 1 if failed else 0, "", "boom")
+
+    installing(tmp_path, monkeypatch, run)
+    out, err = io.StringIO(), io.StringIO()
+    assert windows.install(out, err, print_only=False) == 1
+    assert "run `swarmscribe-follower service uninstall` before trying again" in err.getvalue()
+
+
+def test_a_failure_before_the_service_exists_does_not_say_to_uninstall(tmp_path, monkeypatch):
+    def run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", "boom")
+
+    installing(tmp_path, monkeypatch, run)
+    out, err = io.StringIO(), io.StringIO()
+    assert windows.install(out, err, print_only=False) == 1
+    assert "uninstall" not in err.getvalue()
+
+
+def test_uninstall_says_the_name_may_be_busy_and_how_to_leave_first(tmp_path, monkeypatch):
+    monkeypatch.setattr(windows, "data_root", lambda: tmp_path)
+    monkeypatch.setattr(windows, "is_administrator", lambda: True)
+    monkeypatch.setattr(
+        windows.subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", "")
+    )
+    out, err = io.StringIO(), io.StringIO()
+    assert windows.uninstall(out, err, print_only=False) == 0
+    text = out.getvalue()
+    assert "may take up to the grace period" in text
+    assert "swarmscribe-follower --env-file" in text and "leave" in text
+    assert "elevated" in text and str(tmp_path / "follower.env") in text
 
 
 def test_no_secret_is_in_the_settings_template_and_the_token_is_a_file_of_its_own():
@@ -276,9 +406,12 @@ def test_install_print_shows_the_commands_and_changes_nothing():
     out, err = io.StringIO(), io.StringIO()
     assert cli.main(["service", "install", "--print"], out=out, err=err) == 0
     lines = out.getvalue().splitlines()
-    assert lines[2].startswith("sc.exe create SwarmScribeFollower binPath= ")
-    assert "service_boot.py" in lines[2]
-    assert sum(line.startswith("icacls.exe ") for line in lines) == 4
+    create = [line for line in lines if line.startswith("sc.exe create ")]
+    assert len(create) == 1 and "service_boot.py" in create[0]
+    assert sum(line.startswith("icacls.exe ") for line in lines) == 5
+    assert lines.index(create[0]) > max(
+        n for n, line in enumerate(lines) if "/inheritance:r" in line
+    )  # the lock comes first
     out, err = io.StringIO(), io.StringIO()
     assert cli.main(["service", "uninstall", "--print"], out=out, err=err) == 0
     assert out.getvalue().splitlines() == [
@@ -299,14 +432,51 @@ def test_without_administrator_rights_install_and_uninstall_refuse_and_say_so(mo
     assert ran == []
 
 
+def make_tree(root):
+    root.mkdir()
+    for name in ("state", "models", "logs"):
+        (root / name).mkdir()
+    for name in ("follower.env", "join-token"):
+        (root / name).write_text("x", encoding="utf-8")
+
+
 @windows_only
-def test_a_data_folder_made_by_someone_else_is_refused(tmp_path):
-    """Anyone may create a folder under %ProgramData% before the install does: only one that
-    Administrators or SYSTEM own is used. This test's folder is this account's own."""
+def test_a_data_folder_or_anything_in_it_owned_by_someone_else_is_refused(tmp_path, monkeypatch):
+    """Anyone may create a folder under %ProgramData% before the install does. Only what
+    Administrators, SYSTEM or the installing administrator own is used: the owner may change
+    its permissions back at any time, and could read the token put into a file it made. The
+    owner is crafted here (it cannot be given away without privilege), so this holds whether
+    the account running the tests is elevated (files then belong to Administrators) or not."""
+    from swarmscribe_follower import winacl
+
     assert windows.root_problem(tmp_path / "absent") is None
     root = tmp_path / "swarmscribe-follower"
-    root.mkdir()
-    assert "was not made by an administrator" in windows.root_problem(root)
+    make_tree(root)
+    assert windows.root_problem(root) is None  # all owned by whoever installs
+    real = winacl.read_acl
+    for name in ("", "state", "models", "logs", "follower.env", "join-token"):
+        foreign = root / name if name else root
+
+        def read(path, descriptor_of=None, foreign=foreign):
+            owner, allowed = real(path, descriptor_of)
+            return ("S-1-5-32-545", allowed) if Path(path) == foreign else (owner, allowed)
+
+        monkeypatch.setattr(winacl, "read_acl", read)
+        assert f"{foreign} exists and was not made by an administrator" in (
+            windows.root_problem(root) or ""
+        )
+        monkeypatch.setattr(winacl, "read_acl", real)
+
+
+def test_a_service_sid_is_the_sha1_of_the_upper_cased_name():
+    from swarmscribe_follower import winacl
+
+    # the documented SID of NT SERVICE\TrustedInstaller
+    assert winacl.service_sid("TrustedInstaller") == (
+        "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+    )
+    assert winacl.service_sid("trustedinstaller") == winacl.service_sid("TrustedInstaller")
+    assert winacl.service_sid(windows.SERVICE_NAME).startswith("S-1-5-80-")
 
 
 @windows_only
@@ -329,6 +499,9 @@ def test_the_services_own_command_starts_the_follower_from_the_real_interpreter(
     environment = {
         name: value for name, value in os.environ.items() if not name.startswith("SWARMSCRIBE_")
     }
+    # The real interpreter knows nothing of this checkout's environment (an installed
+    # follower has its dependencies beside it; a development checkout has them in the venv).
+    environment["PYTHONPATH"] = os.pathsep.join(entry for entry in sys.path if entry)
     done = subprocess.run(
         [*windows.image(), "--foreground", "--env-file", str(settings)],
         capture_output=True, text=True, timeout=120, env=environment,
@@ -339,3 +512,42 @@ def test_the_services_own_command_starts_the_follower_from_the_real_interpreter(
         "service status: RUNNING accepts=0x101 exit=0 wait_hint_ms=0 checkpoint=0",
         f"error: {settings}, line 1: expected NAME=value",
     ]
+
+
+# --- one settings path, and the options that mean nothing -----------------------------------
+
+
+def test_the_service_hands_its_settings_file_to_the_same_main_that_run_uses(
+    tmp_path, monkeypatch
+):
+    log = io.StringIO()
+    given = []
+    monkeypatch.setattr(cli, "main", lambda argv, **kw: given.append(argv) or 0)
+    present = tmp_path / "follower.env"
+    present.write_text("SWARMSCRIBE_LEADER_URL=https://x.example.org\n", encoding="utf-8")
+    assert windows.follower(present, False, lambda: log)(windows.StopSignals()) == 0
+    named = tmp_path / "named.env"
+    assert windows.follower(named, True, lambda: log)(windows.StopSignals()) == 0
+    assert given == [["--env-file", str(present), "run"], ["--env-file", str(named), "run"]]
+    assert log.getvalue() == ""
+
+
+def test_an_absent_default_settings_file_is_said_in_the_log(tmp_path, monkeypatch):
+    log = io.StringIO()
+    given = []
+    monkeypatch.setattr(cli, "main", lambda argv, **kw: given.append(argv) or 0)
+    absent = tmp_path / "follower.env"
+    assert windows.follower(absent, False, lambda: log)(windows.StopSignals()) == 0
+    assert given == [["run"]]
+    assert log.getvalue() == f"no settings file at {absent}; using the environment alone\n"
+
+
+def test_options_that_mean_nothing_to_a_service_command_are_refused():
+    for argv, word in (
+        (["--env-file", "x.env", "service", "install"], "--env-file"),
+        (["--env-file", "x.env", "service", "uninstall"], "--env-file"),
+        (["service", "foreground", "--print"], "--print"),
+    ):
+        out, err = io.StringIO(), io.StringIO()
+        assert cli.main(argv, out=out, err=err) == 2
+        assert word in err.getvalue() and out.getvalue() == ""

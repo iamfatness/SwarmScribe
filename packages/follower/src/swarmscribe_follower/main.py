@@ -190,6 +190,17 @@ def command_cuda_paths(out: TextIO, err: TextIO) -> int:
 
 
 def command_service(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    # Options that mean nothing to the action are refused, not silently ignored.
+    if args.env_file and args.action != "foreground":
+        print(
+            f"error: --env-file applies to `service foreground` only: `service {args.action}`"
+            " has no settings file to read",
+            file=err,
+        )
+        return EXIT_CONFIGURATION
+    if args.print and args.action == "foreground":
+        print("error: --print applies to `service install` and `service uninstall`", file=err)
+        return EXIT_CONFIGURATION
     if os.name != "nt":
         print(
             "error: `service` is the Windows service; on Linux install the systemd unit"

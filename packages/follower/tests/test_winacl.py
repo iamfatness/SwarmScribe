@@ -141,8 +141,11 @@ def test_a_credential_file_others_can_read_is_refused(tmp_path):
     assert f"the file {store.path} can be reached by other accounts" in str(refused.value)
 
 
-def apply_sddl(path, sddl):
-    """Replace the access list of a folder of this account's own with `sddl`, through the API."""
+def apply_sddl(path, sddl, owner=None):
+    """Replace the access list of a folder of this account's own with `sddl`, through the API.
+    `owner`: a SID to make the owner as well. An account may always make itself the owner, so
+    this account's own SID works elevated or not; without it the owner stays whoever Windows
+    made it (the user, or the Administrators group for an elevated administrator)."""
     import ctypes
     from ctypes import wintypes
 
@@ -169,11 +172,25 @@ def apply_sddl(path, sddl):
         descriptor, ctypes.byref(present), ctypes.byref(dacl), ctypes.byref(defaulted)
     )
     # DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION
-    error = advapi.SetNamedSecurityInfoW(
-        str(path), 1, 0x4 | 0x80000000, None, None, dacl, None
-    )
+    info, owner_sid = 0x4 | 0x80000000, None
+    owned = ctypes.c_void_p()
+    if owner is not None:
+        advapi.GetSecurityDescriptorOwner.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.BOOL),
+        ]
+        assert advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            f"O:{owner}", 1, ctypes.byref(owned), None
+        ), ctypes.WinError(ctypes.get_last_error())
+        owner_sid = ctypes.c_void_p()
+        assert advapi.GetSecurityDescriptorOwner(
+            owned, ctypes.byref(owner_sid), ctypes.byref(defaulted)
+        )
+        info |= 0x1  # OWNER_SECURITY_INFORMATION
+    error = advapi.SetNamedSecurityInfoW(str(path), 1, info, owner_sid, None, dacl, None)
     kernel.LocalFree.argtypes = [ctypes.c_void_p]
     kernel.LocalFree(descriptor)
+    if owned.value:
+        kernel.LocalFree(owned)
     assert error == 0, ctypes.WinError(error)
 
 
@@ -360,7 +377,10 @@ def test_one_definition_of_who_is_trusted_for_the_check_and_for_making_private(
     service = winacl.service_sid("SwarmScribeFollower")
     folder = tmp_path / "state"
     folder.mkdir()
-    apply_sddl(folder, sddl_of(me, winacl.SYSTEM, winacl.ADMINISTRATORS, service))
+    # The folder is this account's own whoever it runs as: an elevated administrator's new
+    # folder belongs to Administrators, which is not what "not an administrator" owns.
+    apply_sddl(folder, sddl_of(me, winacl.SYSTEM, winacl.ADMINISTRATORS, service), owner=me)
+    assert winacl.read_acl(folder)[0] == me
     before = sorted(winacl.read_acl(folder)[1])
     # an elevated administrator: the service's folder is left exactly as it is
     monkeypatch.setattr(winacl, "is_administrator", lambda: True)

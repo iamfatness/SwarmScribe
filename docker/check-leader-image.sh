@@ -231,7 +231,7 @@ sign_in=(-e "SWARMSCRIBE_ENTRA_TENANT_ID=$tenant" -e SWARMSCRIBE_ENTRA_CLIENT_ID
 sql() { timeout 30 docker exec "$pg" psql -U postgres -d leader -t -A -c "$1"; }
 
 # A leader never starts on a database it has not migrated.
-run_to_end 90 "serve on an unmigrated database (it must refuse to start)" \
+run_to_end 30 "serve on an unmigrated database (it must refuse to start)" \
   "${locked[@]}" --network "$net" "${leader_env[@]}" "$image" serve
 [ "$status" = "2" ] || fail "serve on an unmigrated database exited $status, not 2: $output"
 grep -q 'run `swarmscribe-leader migrate`' <<<"$output" \
@@ -296,7 +296,7 @@ sql "update alembic_version set version_num = '9999_newer_leader'" >/dev/null
 sleep 2  # past the one-second reuse of the last readiness answer
 [ "$(probe /readyz)" = "200" ] || fail "/readyz is not 200 when the database is AHEAD of this leader"
 # ... and one that is starting refuses to: an image rolled back after a migration stays down.
-run_to_end 90 "serve on a database that is AHEAD of this leader (it must refuse to start)" \
+run_to_end 30 "serve on a database that is AHEAD of this leader (it must refuse to start)" \
   "${locked[@]}" --network "$net" "${leader_env[@]}" "$image" serve
 watched=("$name")
 [ "$status" = "2" ] || fail "serve on a database that is ahead exited $status, not 2: $output"
@@ -345,7 +345,25 @@ case "$status" in
 esac
 [ "$took" -lt 10 ] || fail "a stop while waiting for the database took $took s"
 
-# A stop while SERVING, with the database still silent, in the worst case: a background step
+# A stop while SERVING, with the database still silent. First the leader that has been
+# answering the probes: nothing of it is in progress, and its idle database connections
+# cannot be closed politely. It gives up on them after a second and ends by itself (143).
+watched=("$name")
+started=$SECONDS
+docker stop --time 30 "$name" >/dev/null
+took=$((SECONDS - started))
+status="$(docker inspect --format '{{.State.ExitCode}}' "$name")"
+case "$status" in
+  0 | 143) ;;
+  *) docker unpause "$pg" >/dev/null
+     fail "a stop while serving, with a database that does not answer, exited $status after $took s (137 is a kill: the leader never ended by itself)" ;;
+esac
+if [ "$took" -ge 10 ]; then
+  docker unpause "$pg" >/dev/null
+  fail "a stop while serving, with a database that does not answer and nothing in progress, took $took s"
+fi
+
+# Then the worst case: a background step
 # is in the middle of a query, and requests are in hand that wait for the database. The
 # leader gives the requests 10 s and its own shutdown 7 s, then ends by itself (143), long
 # before the stop window closes (137). Nothing it abandons needs finishing.
@@ -375,8 +393,10 @@ watched=("$name")
 
 # A stop while serving: the leader ends by itself, well inside the window. 0, or 143 when
 # uvicorn, having finished its requests, hands the signal back to the default action; never
-# 137, which is Docker's kill at the end of the window.
-for _ in $(seq 1 15); do [ "$(probe /readyz 2>/dev/null)" = "200" ] && break; sleep 1; done
+# 137, which is Docker's kill at the end of the window. (The same leader, started again now
+# that the database answers.)
+docker start "$name" >/dev/null
+for _ in $(seq 1 30); do [ "$(probe /readyz 2>/dev/null)" = "200" ] && break; sleep 1; done
 started=$SECONDS
 docker stop --time 30 "$name" >/dev/null
 took=$((SECONDS - started))

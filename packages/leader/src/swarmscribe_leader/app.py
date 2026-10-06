@@ -1,4 +1,6 @@
 import asyncio
+import logging
+from collections.abc import Awaitable
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from functools import partial
@@ -19,7 +21,36 @@ from .jobs.reaper import reap
 from .storage.links import LinkSigner
 from .storage.registry import backend_for
 
-SHUTDOWN_GRACE_SECONDS = 10
+logger = logging.getLogger(__name__)
+
+# Stopping, after the last request has been answered (main.REQUEST_DRAIN_SECONDS bounds
+# that). Nothing here has to finish for the data to be right: every reaper and scanner step
+# is a set of transactions another step repeats, and a step's advisory lock ends with its
+# connection. So each wait is a courtesy with a limit, and a database that does not answer
+# (frozen, or dropped by the network without a reset) cannot hold a stop past their sum.
+SHUTDOWN_GRACE_SECONDS = 5  # for the background step that is running to finish by itself
+CANCEL_GRACE_SECONDS = 1  # then for a cancelled step to unwind (it gives its lock back)
+DISPOSE_GRACE_SECONDS = 1  # then for the pool's connections to be closed politely
+
+
+def _retrieve(task: asyncio.Future) -> None:
+    if not task.cancelled():
+        task.exception()  # marks it retrieved; whoever waited has already moved on
+
+
+async def _finished_within(seconds: float, work: Awaitable[None]) -> bool:
+    """Wait for `work` for at most `seconds`; False when it had not finished. Unlike
+    asyncio.wait_for, never waits for the cancellation to be honoured: on a database that
+    does not answer, the driver holds a cancelled query or a closing connection for as long
+    as that database stays silent."""
+    task = asyncio.ensure_future(work)
+    done, _ = await asyncio.wait({task}, timeout=seconds)
+    if done:
+        task.result()
+        return True
+    task.cancel()
+    task.add_done_callback(_retrieve)
+    return False
 
 
 def create_app(
@@ -71,13 +102,26 @@ def create_app(
         finally:
             stop.set()
             try:
+                pending: set[asyncio.Task] = set()
                 if tasks:
                     _done, pending = await asyncio.wait(tasks, timeout=SHUTDOWN_GRACE_SECONDS)
-                    for task in pending:
-                        task.cancel()
-                    await asyncio.gather(*pending, return_exceptions=True)
+                for task in pending:
+                    task.cancel()
+                    task.add_done_callback(_retrieve)
+                if pending:
+                    _done, pending = await asyncio.wait(pending, timeout=CANCEL_GRACE_SECONDS)
+                if pending:
+                    logger.warning(
+                        "stopping: %d background task(s) did not stop in time and are "
+                        "abandoned (is the database answering?)",
+                        len(pending),
+                    )
             finally:
-                await engine.dispose()
+                if not await _finished_within(DISPOSE_GRACE_SECONDS, engine.dispose()):
+                    logger.warning(
+                        "stopping: the database connections were not closed in time and "
+                        "are abandoned (is the database answering?)"
+                    )
 
     app = FastAPI(
         title="SwarmScribe leader",

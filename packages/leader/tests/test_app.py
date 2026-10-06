@@ -278,10 +278,152 @@ async def test_shutdown_cannot_hang_on_a_stuck_background_step(
     assert time.monotonic() - started < 15
 
 
-async def test_the_shutdown_grace_is_ten_seconds():
+def test_shutdown_is_bounded_well_inside_a_stop_window():
+    """Everything the leader itself waits for after its last request, added up. With the ten
+    seconds given to requests in hand (main.REQUEST_DRAIN_SECONDS) it must stay well inside
+    a pod's grace period, and a stop with no request in hand inside Docker's ten seconds."""
     from swarmscribe_leader import app as app_module
 
-    assert app_module.SHUTDOWN_GRACE_SECONDS == 10
+    assert app_module.SHUTDOWN_GRACE_SECONDS == 5
+    assert (
+        app_module.SHUTDOWN_GRACE_SECONDS
+        + app_module.CANCEL_GRACE_SECONDS
+        + app_module.DISPOSE_GRACE_SECONDS
+        <= 7
+    )
+
+
+class _DeafUntilReleased:
+    """A database call that never returns and does not react to being cancelled, as a query
+    or a closing connection on a frozen database does. `release()` lets the test end."""
+
+    def __init__(self):
+        self.entered = asyncio.Event()
+        self._released = asyncio.Event()
+
+    async def __call__(self, *_args, **_kwargs):
+        self.entered.set()
+        while not self._released.is_set():
+            try:
+                await self._released.wait()
+            except asyncio.CancelledError:
+                continue
+
+    def release(self):
+        self._released.set()
+
+
+def _offline_app(background: bool, **overrides):
+    """An app whose database is never contacted: the engine connects lazily."""
+    settings = Settings(
+        database_url="postgresql://u:p@127.0.0.1:1/none",
+        public_url="http://leader",
+        link_key=LINK_KEY,
+        **overrides,
+    )
+    return create_app(settings, background=background)
+
+
+async def _shutdown_seconds(application, inside, limit=5.0) -> float | None:
+    """Run the app's lifespan around `inside()`; how long leaving it took, or None when it
+    had not ended after `limit` seconds."""
+    left = asyncio.Event()
+    started = 0.0
+
+    async def lifespan():
+        nonlocal started
+        async with application.router.lifespan_context(application):
+            await inside()
+            started = time.monotonic()
+        left.set()
+
+    task = asyncio.ensure_future(lifespan())
+    done, _ = await asyncio.wait({task}, timeout=limit)
+    if not done:
+        return None
+    task.result()
+    return time.monotonic() - started
+
+
+@pytest.fixture
+def short_graces(monkeypatch):
+    from swarmscribe_leader import app as app_module
+
+    monkeypatch.setattr(app_module, "SHUTDOWN_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(app_module, "CANCEL_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(app_module, "DISPOSE_GRACE_SECONDS", 0.2)
+
+
+async def test_shutdown_ends_when_closing_the_database_connections_never_returns(
+    monkeypatch, short_graces, caplog
+):
+    """A database that does not answer (frozen, or dropped by the network without a reset):
+    closing a connection politely waits for it. A stop must not."""
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
+    dispose = _DeafUntilReleased()
+    monkeypatch.setattr(AsyncEngine, "dispose", dispose)
+    application = _offline_app(background=False)
+    try:
+        with caplog.at_level("WARNING", logger="swarmscribe_leader.app"):
+            took = await _shutdown_seconds(application, lambda: asyncio.sleep(0))
+    finally:
+        dispose.release()
+        await asyncio.sleep(0)
+    assert took is not None, "shutdown was still waiting for the database after 5 s"
+    assert took < 2
+    assert dispose.entered.is_set()
+    assert "database connections were not closed" in caplog.text
+
+
+async def test_shutdown_ends_when_a_background_step_cannot_be_cancelled(
+    monkeypatch, short_graces, caplog
+):
+    """A reaper or scanner step in the middle of a query on such a database: cancelling it
+    makes the driver wait for the database. A stop must not."""
+    step = _DeafUntilReleased()
+    monkeypatch.setattr("swarmscribe_leader.app.run_exclusive", step)
+    application = _offline_app(
+        background=True, reaper_interval_seconds=0.05, scanner_interval_seconds=0.05
+    )
+    try:
+        with caplog.at_level("WARNING", logger="swarmscribe_leader.app"):
+            took = await _shutdown_seconds(application, step.entered.wait)
+    finally:
+        step.release()
+        await asyncio.sleep(0)
+    assert took is not None, "shutdown was still waiting for a background step after 5 s"
+    assert took < 2
+    assert "did not stop" in caplog.text
+
+
+async def test_shutdown_lets_a_background_step_in_progress_finish(monkeypatch):
+    """With a database that answers nothing is cut short: the step that is running ends by
+    itself (its advisory lock released by its own unlock), and no further step starts."""
+    from swarmscribe_leader import app as app_module
+
+    monkeypatch.setattr(app_module, "SHUTDOWN_GRACE_SECONDS", 3)
+    running = asyncio.Event()
+    finished = []
+    cancelled = []
+
+    async def slow_step(_engine, name, work):
+        running.set()
+        try:
+            await asyncio.sleep(0.4)
+        except asyncio.CancelledError:
+            cancelled.append(name)
+            raise
+        finished.append(name)
+
+    monkeypatch.setattr("swarmscribe_leader.app.run_exclusive", slow_step)
+    application = _offline_app(
+        background=True, reaper_interval_seconds=0.01, scanner_interval_seconds=0.01
+    )
+    took = await _shutdown_seconds(application, running.wait)
+    assert took is not None and took < 2
+    assert cancelled == []
+    assert sorted(finished) == ["reaper", "scanner"]
 
 
 async def test_upload_under_a_file_answers_400_and_leaves_no_temp(app, client, factory, tmp_path):

@@ -2283,7 +2283,7 @@ is from it.
   follower, revocation was reported as a stop with error 4, and a machine that could not do
   the work ended with code 3 and no `SERVICE_STOPPED`. What the service tells Windows and what
   its controls do is also tested on every platform, and the follower's tests are a CI job
-  on `windows-latest` (`follower-windows`; **it has not yet run on GitHub**).
+  on `windows-latest` (`follower-windows`; **it has not yet run green on GitHub**; it leaves out the contract tests against a real leader, which need a database and run on Linux CI).
 - **Not run: the Windows service under the service control manager.** Registering the service,
   the control manager starting it, the service's account reading its settings and writing its
   state, a GPU used from a service session, the stop control arriving from Windows, a

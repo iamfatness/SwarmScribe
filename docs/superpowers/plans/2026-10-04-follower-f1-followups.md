@@ -82,7 +82,7 @@ Still open:
 - A reboot was survived on neither system (the Linux proof is a container). The first real machine of each kind should be watched through one.
 - Sleep, hibernation and a Windows shutdown with Fast Startup freeze a follower mid-job; the recording costs one counted attempt. The service could accept the power event and hand the recording back before the machine sleeps; systemd could do the same with a sleep hook.
 - A system shutdown on Windows was not run even in a console (`test_a_shutdown_counts_two_stops_so_the_job_is_handed_back_at_once` covers the decision, not Windows' timing).
-- The Windows CI job has never run on GitHub's image (not pushed). If the local Postgres of the contract tests does not start there, deselect `test_real_leader.py` in that job.
+- The Windows CI job has never run on GitHub's image (not pushed). Its first run found that the local Postgres of the contract tests does not start there (`initdb` cannot set permissions under the runner's administrator account), so the job now ignores `test_real_leader.py`; those tests run on Linux CI.
 - The packages are on no index: an outside machine installs wheels built from the repository. Publishing them makes the spec's `uv tool install swarmscribe-follower` true.
 - After an upgrade that moves the interpreter or the follower's environment, the Windows service must be registered again (`service uninstall`, `service install`); nothing detects a stale registration except the service failing to start.
 - The Windows service's log is one file with one kept generation, rotated only at a start; a follower that runs for months without a restart is not rotated.

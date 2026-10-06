@@ -637,8 +637,8 @@ showed):
   multi-user.target` and on the service's start type, not on a run.
 - **A real Linux host.** No real `network-online.target`, no NVIDIA driver under the unit: the
   GPU was run in a plain container, not under systemd.
-- **The Windows CI job on GitHub's image**, until the branch is pushed: the same command
-  passed on the development machine.
+- **The Windows CI job on GitHub's image**, until it runs green there: the same command
+  passed on the development machine. The job leaves out `test_real_leader.py`, the contract tests against a real leader (their Postgres cannot run `initdb` under the runner's administrator account), so the job does not prove them; Linux CI does.
 - Any distribution but Debian 12, any systemd but 252, cgroup v1; any Windows but 11; any GPU
   but the RTX 4090; a Python from python.org (uv's own was used; the Store's was measured for
   the GPU library only, and cannot run a service).

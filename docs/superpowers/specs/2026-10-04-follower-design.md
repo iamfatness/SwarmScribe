@@ -840,7 +840,7 @@ as the container.
   as standalone binaries, as they did for the console chart.
 - **CUDA image.** Run on the development machine's GPU in F2 (section 8.1).
 - **Windows.** A CI job on `windows-latest` running the follower's unit
-  tests (signal handling, credential file, paths). GPU on Windows is checked
+  tests (signal handling, credential file, paths), without the contract tests against a real leader (they need a database, and run on Linux CI). GPU on Windows is checked
   by `doctor` on a real machine.
 
 ## 11. Build plans
@@ -1397,8 +1397,9 @@ follower chart (F3) and the outside-machine install (F4).
   `doctor` and `leave` against the service's folder; a prompt that is not elevated is refused there.
 - **The health listener (D18).** Off in a native install, as decided: neither the unit nor the service sets
   it. Under the Windows service the supervisor's tick comes from `run_supervised`, which the service runs.
-- **Windows CI (10).** Job `follower-windows` runs the follower package's tests on `windows-latest`. It has
-  not yet run on GitHub.
+- **Windows CI (10).** Job `follower-windows` runs the follower package's tests on `windows-latest`, without `test_real_leader.py`
+  (its Postgres cannot run `initdb` under the runner's administrator account; those tests run on Linux CI). It has
+  not yet run green on GitHub.
 - **Native tests (10).** `e2e/follower-systemd/` (a container with systemd as PID 1; passed twice, the second
   run with the harness fixed after review) and `e2e/follower-windows/` (the service's command in a console, on
   a GPU; passed once on the GPU and once on the CPU) are run by hand and recorded: the systemd proof is a

@@ -188,6 +188,27 @@ jobs:
       - name: Check it (cuBLAS loads by name; without a GPU it says so and exits 3)
         run: bash docker/check-follower-image.sh swarmscribe-follower:cuda cuda
 
+  # The follower's tests on Windows: signals, the credential's access control list, the
+  # working set, the service's own code and its command run from the real interpreter. No GPU
+  # here, and no service control manager: registering, starting and stopping the service is
+  # proven by hand (docs/superpowers/plans/2026-10-05-follower-f4-outcomes.md). The contract
+  # tests against a real leader (test_real_leader.py) are not part of it: see the pytest step.
+  follower-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      # 3.12 by name: where the runner has no Python of the 3.11 or 3.12 line, uv would fetch
+      # the newest, for which the test database (pgserver) has no wheel.
+      - run: uv sync --python 3.12
+      # test_real_leader.py is left out here: its throwaway Postgres (pgserver) cannot run
+      # initdb under the runner's administrator account (it cannot set permissions on its data
+      # folder), and a Windows runner has no service containers. It runs on Linux CI and on
+      # developers' Windows machines. --ignore, not --deselect: the whole file is skipped
+      # without importing it, so nothing of the database kit is loaded.
+      - run: uv run pytest packages/follower --ignore=packages/follower/tests/test_real_leader.py
+
   # The real leader image (docker/leader.Dockerfile), built, checked, then installed with
   # the leader chart on a kind cluster beside the follower chart: a recording is transcribed
   # end to end and the leader is upgraded, with a migration, while requests flow

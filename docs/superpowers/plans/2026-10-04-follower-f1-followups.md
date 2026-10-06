@@ -25,17 +25,21 @@ All done in F3 (`plans/2026-10-05-follower-f3a-listener-and-chart.md` and `plans
 
 ## F4 (native install)
 
-- `run` and `doctor` fall back to the stored leader after `join --leader` (M4).
+All done in F4 (`plans/2026-10-05-follower-f4a-native-install-and-systemd.md` and `plans/2026-10-05-follower-f4b-windows-service-and-guide.md`), except where a line says otherwise:
+
+- `run` and `doctor` fall back to the stored leader after `join --leader` (M4). *Done (F4a Task 2).*
 - `getpass` for the token (M7). *Done in the F1 final fix wave.*
 - `join` exits non-zero on a leader mismatch (M1). *Done in the F1 final fix wave.*
 - Exit 5 only for a protocol refusal (M9). *Done in the F1 final fix wave.*
-- The Windows ACL on the credential file (earlier carry): today it relies on the profile folder's inherited permissions.
-- The service stop calling `agent.stop()` (earlier carry): the Windows service's stop handler calls `agent.stop()` from `SERVICE_CONTROL_STOP`, reports stop-pending with a wait hint longer than the grace period, and reports stopped only after `serve()` returns.
+- The Windows ACL on the credential file (earlier carry). *Done (F4a Task 4): the folder's and the file's access control lists are read; a folder of the account's own is made private.*
+- The service stop calling `agent.stop()` (earlier carry). *Done differently (F4b Task 1): the stop control is counted on a `StopSignals` that `run_supervised` polls, which calls `stop()`; stop-pending carries a wait hint of the grace period plus 30 seconds; stopped is reported when the follower has ended. Tested without Windows and run in a console; **not yet run under the service control manager**.*
+- `Agent.tick()` under a Windows service (F2b). *Done: the service runs `run_supervised`, which ticks.*
+- `MemoryMax=` on a systemd unit was not seen by the memory guard (F2b). *Done (F4a Task 3), for cgroup v2; on cgroup v1 a unit's limit is still not seen.*
 
 ## Minors left open from the final review
 
 - M6: `doctor` can say `ready` when `run` will not start (it does not check the scratch marker or the state lock, and `joined:` is only a file check); it omits the compute types and host memory spec 8.3 lists.
-- M8: the join token stays in the environment for the life of the process and is inherited by `nvidia-smi`.
+- M8: the join token stays in the environment for the life of the process and is inherited by `nvidia-smi`. *Not in a native install (F4): there the token is a file, never a variable. It still holds for `docker run -e SWARMSCRIBE_JOIN_TOKEN=...`.*
 - M11: contract gaps: fresh links after a 403 and the 401 re-register are tested against the real leader with the raw client only; the tests reach into `agent._control`; the `swarmscribe_kit_follower` database is left behind.
 - M12: no unit test proves `--leader` reaches the stored credential (`run_cli` ignores the settings it is given).
 - M13: a bug caught by `main` leaves no frames, unlike `serve`.
@@ -71,3 +75,17 @@ Still open:
 - The listener's cap bounds threads but cannot keep a place for the kubelet: a peer the NetworkPolicy lets in, reconnecting without pause, could make the liveness probe fail (eight slow connections every five seconds would do it): name only trusted peers. The default policy lets nobody in.
 - No `PodMonitor` (it needs the Prometheus operator's CRD); pod annotations are offered instead.
 - A follower that downloads its model at start-up holds about 0.5 GiB more than one that reads it from a cache, until its container restarts (measured with `distil-large-v3`: 2257 against 1766 MiB). Not looked into; baked models avoid it.
+
+## Left open after F4 (2026-10-05)
+
+- **The Windows service has not run under the service control manager.** The owner's procedure is in `plans/2026-10-05-follower-f4-outcomes.md`; until its result is recorded there, the registration, the control manager's handshake, the service's account and folders, the GPU from a service, the stop control and the recovery actions are unproven.
+- A reboot was survived on neither system (the Linux proof is a container). The first real machine of each kind should be watched through one.
+- Sleep, hibernation and a Windows shutdown with Fast Startup freeze a follower mid-job; the recording costs one counted attempt. The service could accept the power event and hand the recording back before the machine sleeps; systemd could do the same with a sleep hook.
+- A system shutdown on Windows was not run even in a console (`test_a_shutdown_counts_two_stops_so_the_job_is_handed_back_at_once` covers the decision, not Windows' timing).
+- The Windows CI job has never run on GitHub's image (not pushed). Its first run found that the local Postgres of the contract tests does not start there (`initdb` cannot set permissions under the runner's administrator account), so the job now ignores `test_real_leader.py`; those tests run on Linux CI.
+- The packages are on no index: an outside machine installs wheels built from the repository. Publishing them makes the spec's `uv tool install swarmscribe-follower` true.
+- After an upgrade that moves the interpreter or the follower's environment, the Windows service must be registered again (`service uninstall`, `service install`); nothing detects a stale registration except the service failing to start.
+- The Windows service's log is one file with one kept generation, rotated only at a start; a follower that runs for months without a restart is not rotated.
+- On Windows the trust check reads allow entries only (deny entries are ignored; an entry of a kind it does not understand is refused), checks a state folder that is itself a link but not a link higher up its path, and a job object's memory limit is not read by the memory guard.
+- The systemd test and the Windows test are run by hand. The systemd one could be a CI job (a privileged container; about four minutes).
+- A native Linux install with a GPU was run in a plain container, not under the unit; `ProtectSystem=strict`, `ProtectKernelModules=yes` and the unit's other restrictions were not run with the NVIDIA device files, and the NVIDIA kernel modules are assumed to be loaded at boot.

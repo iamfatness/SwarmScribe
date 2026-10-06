@@ -1,0 +1,56 @@
+# SwarmScribe follower as a systemd service (follower spec 8.3). The README's section
+# "Run a follower on an outside machine" has the install steps; this file goes to
+# /etc/systemd/system/swarmscribe-follower.service.
+#
+# Settings are read from /etc/swarmscribe-follower/follower.env by the follower itself
+# (--env-file), so that `doctor` and `leave` run by hand use the same file. The join token is
+# never in this unit, in that file or on a command line: it is a file of its own, named there
+# by SWARMSCRIBE_JOIN_TOKEN_FILE and readable by the service's user only.
+[Unit]
+Description=SwarmScribe follower
+Documentation=https://github.com/iamfatness/SwarmScribe
+Wants=network-online.target
+After=network-online.target
+# Exit 2 (configuration) and 3 (this machine cannot do the work) are restarted, but not for
+# ever: five starts in ten minutes and systemd leaves the unit failed, with the reason as the
+# last line of its journal.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=swarmscribe-follower
+Group=swarmscribe-follower
+ExecStart=/usr/local/bin/swarmscribe-follower --env-file /etc/swarmscribe-follower/follower.env run
+
+# /var/lib/swarmscribe-follower: the credential, scratch and the model cache.
+StateDirectory=swarmscribe-follower
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/swarmscribe-follower
+
+# Exit 0 is final: stopped, or drained. Exit 4 (revoked, or the token was refused) and 5 (the
+# leader speaks another protocol) are never restarted: a restart cannot cure them.
+Restart=on-failure
+RestartSec=30
+RestartPreventExitStatus=4 5
+
+# A stop is SIGTERM to the follower. It finishes the recording in hand if that fits
+# SWARMSCRIBE_FOLLOWER_SHUTDOWN_GRACE_SECONDS (900 in follower.env) and hands it back
+# otherwise; 30 seconds more and systemd kills it.
+KillMode=mixed
+TimeoutStopSec=930
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

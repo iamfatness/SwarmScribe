@@ -22,9 +22,23 @@ This module imports only the standard library at import time. Keep it so."""
 import sys
 
 
+def command(argv: list[str]) -> str | None:
+    """The command on the command line: its first word that is not an option, nor the PATH
+    of `--env-file PATH`."""
+    skip = False
+    for argument in argv:
+        if skip:
+            skip = False
+        elif argument == "--env-file":
+            skip = True
+        elif not argument.startswith("-"):
+            return argument
+    return None
+
+
 def run() -> None:
     signals = previous = None
-    if sys.argv[1:2] == ["run"]:
+    if command(sys.argv[1:]) == "run":
         from .signals import StopSignals
 
         signals = StopSignals()

@@ -2,12 +2,9 @@
 
 One JSON file in the state folder, readable by its owner only. On POSIX a file or folder
 that another user owns, or that others can write to, is refused: it could have been planted.
-On Windows the folder relies on the account's profile permissions (POSIX modes do not apply
-there), as the admin CLI's sign-in cache does. Nothing here prints the credential, and its
-repr is hidden.
-
-On Windows nothing here restricts the file beyond the folder's inherited ACL (by default
-the user's profile: the user, SYSTEM and administrators); the 0600 mode is ignored there."""
+On Windows the same rule is applied to the access control list (winacl.py): the folder and
+the file may be reachable only by this account, SYSTEM and Administrators. Nothing here
+prints the credential, and its repr is hidden."""
 
 import json
 import os
@@ -55,10 +52,20 @@ class CredentialStore:
         """The rule for the folder, in one place: it must be this user's, and nobody else may
         be able to write to it. None when it can be trusted; else why not, naming the folder,
         its owner and mode, and what to do."""
-        if os.name == "nt":
-            return None
-        me = os.getuid()
         where = self.path.parent
+        if os.name == "nt":
+            from . import winacl
+
+            try:
+                return winacl.access_problem(where, owner_only=not mode_matters)
+            except OSError as exc:
+                # Windows will not even say who owns it: not a folder to keep a secret in.
+                return (
+                    f"the folder {where} cannot be checked"
+                    f" ({exc.strerror or type(exc).__name__}) and will not be trusted with the"
+                    " credential; use a folder of this account's own"
+                )
+        me = os.getuid()
         found = f"owner uid {folder.st_uid}, mode {stat.S_IMODE(folder.st_mode):04o}"
         if folder.st_uid != me:
             return (
@@ -101,12 +108,18 @@ class CredentialStore:
         if problem is not None:
             raise CredentialFileError(problem)
 
-    def _check_trust(self, folder: os.stat_result, file: os.stat_result) -> None:
-        if os.name == "nt":
-            return
+    def _check_trust(self, folder: os.stat_result, file: os.stat_result, acl=None) -> None:
+        """`file` is the open credential file's fstat; on Windows `acl` is its access control
+        list, read through the same open file."""
         problem = self._folder_problem(folder)
+        if problem is None and os.name == "nt":
+            from . import winacl
+
+            problem = winacl.access_problem(self.path, what="file", acl=acl)
         if problem is not None:
             raise CredentialFileError(problem)
+        if os.name == "nt":
+            return
         if file.st_uid != os.getuid():
             raise CredentialFileError(
                 f"{self.path} is owned by another user and will not be trusted; delete it"
@@ -147,9 +160,17 @@ class CredentialStore:
             # O_NOFOLLOW closes the window between the lstat and the open; the checks then run
             # on the opened descriptor, so they describe the file that is actually read.
             handle = self._open_for_reading()
+            acl = None
             with os.fdopen(handle, "rb") as source:
-                self._check_trust(self.path.parent.stat(), os.fstat(source.fileno()))
+                # Kept short: on Windows another writer cannot replace the file while this
+                # one has it open. What was read is used only if the checks below pass.
+                file = os.fstat(source.fileno())
+                if os.name == "nt":
+                    from . import winacl
+
+                    acl = winacl.read_acl(self.path, source.fileno())
                 raw = source.read()
+            self._check_trust(self.path.parent.stat(), file, acl)
             data = json.loads(raw.decode("utf-8"))
         except OSError as exc:
             raise CredentialFileError(

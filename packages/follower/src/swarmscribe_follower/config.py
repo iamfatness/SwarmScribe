@@ -176,15 +176,31 @@ class Settings(BaseSettings):
 
     def token(self) -> str | None:
         """The join token: the file's content if a file is configured, else the variable.
-        Read only when a registration needs it."""
+        Read only when a registration needs it.
+
+        The file is UTF-8 or ASCII. What Windows tools write is read too, because a
+        byte-order mark left in the token would have the leader refuse it (exit 4, final):
+        UTF-8 with a mark (PowerShell 5.1's `Set-Content -Encoding UTF8`) and UTF-16 with one
+        (its `>` and `Out-File`). Anything else is a settings error that names the file and
+        never shows what is in it."""
         if self.join_token_file is not None:
             try:
-                text = self.join_token_file.read_text(encoding="utf-8").strip()
+                data = self.join_token_file.read_bytes()
             except OSError as exc:
                 raise ValueError(
                     f"the join token file cannot be read: {exc.strerror or type(exc).__name__}"
                 ) from None
-            return text or None
+            try:
+                utf16 = data[:2] in (b"\xff\xfe", b"\xfe\xff")
+                text = data.decode("utf-16" if utf16 else "utf-8-sig")
+            except UnicodeDecodeError:
+                text = "\x00"
+            if "\x00" in text:  # also UTF-16 without a mark, which decodes as UTF-8 with NULs
+                raise ValueError(
+                    f"the join token file {self.join_token_file} is not plain text (UTF-8 or"
+                    " ASCII): write the token into it again, alone"
+                )
+            return text.strip() or None
         if self.join_token is not None:
             return self.join_token.get_secret_value().strip() or None
         return None

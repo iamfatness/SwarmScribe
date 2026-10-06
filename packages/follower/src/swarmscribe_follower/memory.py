@@ -22,8 +22,10 @@ JOB_BASE_MB = 100.0  # what a job of any length adds (measured: 50 to 80)
 MONO_MB_PER_HOUR = 3600.0  # measured 3460: mono, or `auto` on anything but a stereo file
 SPLIT_MB_PER_HOUR = 3900.0  # the same pass, with the other channel (about 230 MiB/h) held
 MIN_LIMIT_MB = 64
+CGROUP_SOURCE = "the cgroup's limit: a container's, or a systemd unit's MemoryMax="
 _UNLIMITED = 1 << 60  # cgroup v1 says "no limit" with a number near 2**63
-CGROUP_V2 = Path("/sys/fs/cgroup/memory.max")
+CGROUP_ROOT = Path("/sys/fs/cgroup")  # cgroup v2, as every current distribution mounts it
+PROC_CGROUP = Path("/proc/self/cgroup")
 CGROUP_V1 = Path("/sys/fs/cgroup/memory/memory.limit_in_bytes")
 
 
@@ -31,17 +33,52 @@ def _megabytes(count: int) -> int:
     return count // (1024 * 1024)
 
 
-def cgroup_limit_mb(paths: tuple[Path, ...] = (CGROUP_V2, CGROUP_V1)) -> int | None:
-    """The container's memory limit, or None when there is none (or no cgroup: Windows)."""
-    for path in paths:
-        try:
-            text = path.read_text(encoding="ascii").strip()
-        except (OSError, ValueError):
-            continue
-        if text.isdigit() and int(text) < _UNLIMITED:
-            return _megabytes(int(text))
+def own_cgroup(proc: Path = PROC_CGROUP) -> str | None:
+    """This process's cgroup (v2) as the kernel names it: `/` in a container (it sees its own
+    cgroup as the root), `/system.slice/swarmscribe-follower.service` under systemd. None
+    without cgroup v2 (Windows, macOS, a v1-only host)."""
+    try:
+        lines = proc.read_text(encoding="ascii").splitlines()
+    except (OSError, ValueError):
         return None
+    for line in lines:
+        hierarchy, _, rest = line.partition(":")
+        controllers, _, path = rest.partition(":")
+        if hierarchy == "0" and not controllers and path.startswith("/"):
+            return path
     return None
+
+
+def _limit_bytes(path: Path) -> int | None:
+    try:
+        text = path.read_text(encoding="ascii").strip()
+    except (OSError, ValueError):
+        return None
+    return int(text) if text.isdigit() and int(text) < _UNLIMITED else None
+
+
+def cgroup_limit_mb(
+    root: Path = CGROUP_ROOT, proc: Path = PROC_CGROUP, v1: Path = CGROUP_V1
+) -> int | None:
+    """The memory limit that binds this process, or None when there is none (or no cgroup:
+    Windows). On cgroup v2 it is the smallest `memory.max` of the process's own cgroup and of
+    every cgroup above it: a container's limit, a systemd unit's `MemoryMax=`, its slice's.
+    Reading the root's file alone (as the follower did before F4) sees a container's limit and
+    misses a unit's."""
+    own = own_cgroup(proc)
+    if own is not None:
+        parts = [part for part in own.split("/") if part]
+        if ".." in parts:  # a cgroup outside this namespace's root: only the root can be read
+            parts = []
+        found = []
+        for depth in range(len(parts), -1, -1):
+            value = _limit_bytes(root.joinpath(*parts[:depth]) / "memory.max")
+            if value is not None:
+                found.append(value)
+        if found:
+            return _megabytes(min(found))
+    value = _limit_bytes(v1)
+    return _megabytes(value) if value is not None else None
 
 
 def physical_mb() -> int | None:
@@ -66,9 +103,42 @@ def physical_mb() -> int | None:
         return None
 
 
+def _working_set_mb() -> int | None:
+    """Windows: the physical memory this process holds (its working set)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Counters(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("page_faults", wintypes.DWORD)] + [
+            (name, ctypes.c_size_t)
+            for name in (
+                "peak_working_set", "working_set", "peak_paged", "paged",
+                "peak_non_paged", "non_paged", "pagefile", "peak_pagefile",
+            )
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.K32GetProcessMemoryInfo.argtypes = [
+        wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD,
+    ]
+    counters = Counters()
+    counters.cb = ctypes.sizeof(Counters)
+    if not kernel32.K32GetProcessMemoryInfo(
+        kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb
+    ):
+        return None
+    return _megabytes(counters.working_set)
+
+
 def rss_mb() -> int | None:
     """What this process holds now (the loaded model is most of it), or None when the
-    platform will not say (then the guard counts the job alone)."""
+    platform will not say (macOS: then the guard counts the job alone)."""
+    if os.name == "nt":
+        try:
+            return _working_set_mb()
+        except (OSError, AttributeError):
+            return None
     try:
         with open("/proc/self/statm", encoding="ascii") as handle:
             return _megabytes(int(handle.read().split()[1]) * os.sysconf("SC_PAGE_SIZE"))
@@ -94,7 +164,7 @@ def find_limit(
         return Limit(configured, "SWARMSCRIBE_FOLLOWER_MEMORY_LIMIT_MB")
     found = [
         Limit(value, source)
-        for value, source in ((cgroup(), "the container's limit"), (physical(), "this machine"))
+        for value, source in ((cgroup(), CGROUP_SOURCE),(physical(), "this machine"))
         if value is not None and value >= MIN_LIMIT_MB
     ]
     return min(found, key=lambda limit: limit.megabytes) if found else None

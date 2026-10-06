@@ -1,2 +1,5 @@
 *.json text eol=lf
 *.sh text eol=lf
+# What a Linux machine reads as it is: a unit with CRLF does not load.
+deploy/systemd/* text eol=lf
+deploy/follower-constraints.txt text eol=lf

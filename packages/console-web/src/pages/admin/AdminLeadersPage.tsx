@@ -1,4 +1,4 @@
-import { useId, useState, type FormEvent } from "react";
+import { Fragment, useId, useState, type FormEvent } from "react";
 import { api } from "../../api/client";
 import { OwnRefusal } from "../../api/errors";
 import type { CredentialIn, LeaderEdit, LeaderIn, LeaderOut } from "../../api/types";
@@ -356,6 +356,28 @@ function RotateDialog({
 type Open = { kind: "add" } | { kind: "edit" | "rotate" | "remove"; leader: LeaderOut } | null;
 
 /** The Leaders section of Administration (pages/admin/AdminPage.tsx frames it). */
+/** A label up to this long stays on one line; a longer one may break, as a long name does. */
+const LABEL_KEPT_WHOLE = 24;
+
+/**
+ * A leader's labels, one to a line as they are stored. A label of ordinary length is never
+ * broken ("region=e" then "u"): its column keeps the room for it, and gives way only for a
+ * label too long for any column. The text is unchanged, line breaks included.
+ */
+function LabelLines({ labels }: { labels: Record<string, string> }) {
+  const lines = labelsText(labels).split("\n");
+  return (
+    <>
+      {lines.map((line, index) => (
+        <Fragment key={line}>
+          {index > 0 && "\n"}
+          {line.length <= LABEL_KEPT_WHOLE ? <span className="nowrap">{line}</span> : line}
+        </Fragment>
+      ))}
+    </>
+  );
+}
+
 export function AdminLeadersSection() {
   const read = useAdminList<LeaderOut>("/api/admin/leaders");
   const [open, setOpen] = useState<Open>(null);
@@ -405,7 +427,9 @@ export function AdminLeadersSection() {
                       <td className="mono long">
                         <BreakPath text={leader.base_url} />
                       </td>
-                      <td className="mono long label-lines">{labelsText(leader.labels) || "–"}</td>
+                      <td className="mono long label-lines">
+                        {Object.keys(leader.labels).length === 0 ? "–" : <LabelLines labels={leader.labels} />}
+                      </td>
                       <td className="nowrap">{leader.enabled ? "On" : "Switched off"}</td>
                       <td>
                         {leader.credential_revoked ? (
@@ -418,30 +442,32 @@ export function AdminLeadersSection() {
                         )}
                       </td>
                       <td className="actions">
-                        <button
-                          type="button"
-                          className="button"
-                          onClick={() => setOpen({ kind: "edit", leader })}
-                          aria-label={`Edit ${leader.name}`}
-                        >
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          className="button"
-                          onClick={() => setOpen({ kind: "rotate", leader })}
-                          aria-label={`Replace credential for ${leader.name}`}
-                        >
-                          Replace credential
-                        </button>
-                        <button
-                          type="button"
-                          className="button button-danger"
-                          onClick={() => setOpen({ kind: "remove", leader })}
-                          aria-label={`Remove ${leader.name}`}
-                        >
-                          Remove
-                        </button>
+                        <div className="action-set">
+                          <button
+                            type="button"
+                            className="button"
+                            onClick={() => setOpen({ kind: "edit", leader })}
+                            aria-label={`Edit ${leader.name}`}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            className="button"
+                            onClick={() => setOpen({ kind: "rotate", leader })}
+                            aria-label={`Replace credential for ${leader.name}`}
+                          >
+                            Replace credential
+                          </button>
+                          <button
+                            type="button"
+                            className="button button-danger"
+                            onClick={() => setOpen({ kind: "remove", leader })}
+                            aria-label={`Remove ${leader.name}`}
+                          >
+                            Remove
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}

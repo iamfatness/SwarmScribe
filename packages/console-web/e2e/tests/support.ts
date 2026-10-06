@@ -128,3 +128,99 @@ export const test = base.extend<{ guard: undefined }>({
     { auto: true },
   ],
 });
+
+/**
+ * The console sets no font of its own (system fonts only), so every table's fit depends on the
+ * machine: Segoe UI on Windows is about 15% narrower than DejaVu Sans, which GitHub's Linux
+ * runners use, and its semibold about 25% narrower than DejaVu's bold. A table that fits here
+ * can overflow there. These are the widths, in em per character of WIDE_SAMPLE, that the fit
+ * tests are also run at: a little over DejaVu's, which is about the widest system font in
+ * common use.
+ */
+const WIDE_FACES = [
+  { stack: "--sans", family: "Wide Sans", weight: 400, range: "1 500", em: 0.54 },
+  { stack: "--sans", family: "Wide Sans", weight: 600, range: "501 1000", em: 0.6 },
+  { stack: "--mono", family: "Wide Mono", weight: 400, range: "1 500", em: 0.61 },
+  { stack: "--mono", family: "Wide Mono", weight: 600, range: "501 1000", em: 0.61 },
+] as const;
+/** Words the tables really show: names, times, an address, the buttons. */
+const WIDE_SAMPLE =
+  "Replace credential Switched off Set 5 Oct 2026, 14:03 by admin@example.com https://eu-1.leaders.example";
+
+/**
+ * Makes this page's own system fonts as wide as the widest in common use, on any machine, so a
+ * Windows run sees the table fit a Linux run sees. No font is fetched (the Content Security
+ * Policy would refuse it, rightly): each font the page already uses is found by name on the
+ * machine and scaled (size-adjust) until WIDE_SAMPLE measures WIDE_FACES' width. A font already
+ * that wide is left as it is, never narrowed. Call it on an open console page; it holds for
+ * every page opened afterwards. It fails if it cannot reach the widths, so a fit test never
+ * passes at the machine's own widths by mistake.
+ */
+export async function widenFonts(page: Page): Promise<void> {
+  /** Em per character of the sample in each face, as the page lays it out now. */
+  const measure = () =>
+    page.evaluate(
+      async ({ faces, sample }) => {
+        await document.fonts.ready;
+        const root = getComputedStyle(document.documentElement);
+        return faces.map((face, index) => {
+          const probe = document.createElement("span");
+          probe.id = `wide-probe-${index}`;
+          probe.textContent = sample;
+          Object.assign(probe.style, {
+            position: "absolute",
+            visibility: "hidden",
+            whiteSpace: "nowrap",
+            fontFamily: root.getPropertyValue(face.stack),
+            fontWeight: String(face.weight),
+            fontSize: "100px",
+          });
+          document.body.append(probe);
+          return probe.getBoundingClientRect().width / sample.length / 100;
+        });
+      },
+      { faces: WIDE_FACES, sample: WIDE_SAMPLE },
+    );
+  const clear = () =>
+    page.evaluate(() => document.querySelectorAll("[id^='wide-probe-']").forEach((probe) => probe.remove()));
+
+  // Which font on this machine each face really is: only the browser's own tools say.
+  const own = await measure();
+  const devtools = await page.context().newCDPSession(page);
+  await devtools.send("DOM.enable");
+  await devtools.send("CSS.enable");
+  const { root } = await devtools.send("DOM.getDocument");
+  const rules: string[] = [];
+  for (const [index, face] of WIDE_FACES.entries()) {
+    const { nodeId } = await devtools.send("DOM.querySelector", { nodeId: root.nodeId, selector: `#wide-probe-${index}` });
+    const { fonts } = await devtools.send("CSS.getPlatformFontsForNode", { nodeId });
+    const most = [...fonts].sort((a, b) => b.glyphCount - a.glyphCount)[0];
+    if (most === undefined) throw new Error(`widenFonts: no font for ${face.stack} at ${face.weight}`);
+    const scale = Math.max(1, face.em / (own[index] ?? Number.NaN));
+    rules.push(
+      `@font-face { font-family: "${face.family}"; font-weight: ${face.range}; font-display: block; ` +
+        `src: local("${most.postScriptName}"), local("${most.familyName}"); size-adjust: ${(scale * 100).toFixed(2)}%; }`,
+    );
+  }
+  await devtools.detach();
+  await clear();
+  rules.push(':root:root { --sans: "Wide Sans", sans-serif; --mono: "Wide Mono", monospace; }');
+
+  // A constructed style sheet is the page's own script's doing, which the policy allows; an
+  // injected <style> is not. First in every page opened from now on, then in this one.
+  const adopt = (css: string) => {
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(css);
+    document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+  };
+  await page.addInitScript(adopt, rules.join("\n"));
+  await page.evaluate(adopt, rules.join("\n"));
+
+  const wide = await measure();
+  await clear();
+  for (const [index, face] of WIDE_FACES.entries()) {
+    const wanted = Math.max(face.em, own[index] ?? Number.NaN);
+    const got = wide[index] ?? Number.NaN;
+    expect(Math.abs(got / wanted - 1), `${face.family} ${face.weight}: ${got} em a character, not ${wanted}`).toBeLessThan(0.01);
+  }
+}

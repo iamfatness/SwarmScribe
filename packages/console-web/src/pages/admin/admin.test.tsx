@@ -143,6 +143,27 @@ describe("administration frame", () => {
     expect(us).toHaveTextContent("Revoked by the leader");
   });
 
+  it("keeps a label of ordinary length whole, one label to a line, and lets a long one break", async () => {
+    const long = `note=${"x".repeat(40)}`;
+    const labelled = { ...LEADER, labels: { env: "prod", note: "x".repeat(40), region: "eu" } };
+    const bare = { ...LEADER, name: "us-1", base_url: "https://us-1.leaders.example", labels: {} };
+    renderApp("/admin/leaders", { session: ADMIN_SESSION }).on(
+      "GET /api/admin/leaders",
+      reply(200, [labelled, bare]),
+    );
+    const region = await screen.findByRole("region", { name: "Registered leaders" });
+    const cell = within(within(region).getByRole("row", { name: /eu-1/ })).getAllByRole("cell")[1];
+    // The text is the labels as they are stored, line breaks included.
+    expect(cell?.textContent).toBe(`env=prod\n${long}\nregion=eu`);
+    expect(Array.from(cell?.querySelectorAll(".nowrap") ?? [], (el) => el.textContent)).toEqual([
+      "env=prod",
+      "region=eu",
+    ]);
+    expect(within(within(region).getByRole("row", { name: /us-1/ })).getAllByRole("cell")[1]?.textContent).toBe("–");
+    // The row's actions are one set, which wraps as a whole (styles/surfaces.css, .action-set).
+    expect(region.querySelectorAll("td.actions > .action-set")).toHaveLength(2);
+  });
+
   it("keeps the heading and the way to add a leader when the list cannot be loaded", async () => {
     let n = 0;
     renderApp("/admin/leaders", { session: ADMIN_SESSION }).on("GET /api/admin/leaders", () =>

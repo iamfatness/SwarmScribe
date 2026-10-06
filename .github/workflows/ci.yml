@@ -261,4 +261,4 @@ jobs:
       - name: Check what the leader chart renders
         run: >-
           uv run --no-project --with pyyaml
-          python deploy/helm/swarmscribe-leader/ci/check_render.py --only core,storage
+          python deploy/helm/swarmscribe-leader/ci/check_render.py --only core,storage,migrate

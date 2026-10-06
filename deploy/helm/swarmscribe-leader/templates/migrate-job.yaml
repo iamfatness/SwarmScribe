@@ -1,0 +1,68 @@
+{{- if .Values.migrate.enabled }}
+# Runs `swarmscribe-leader migrate` before any pod of this release starts (install) or is
+# replaced (upgrade). A hook runs before the release's ConfigMap, ServiceAccount and
+# NetworkPolicy exist, so this Job carries its settings inline (no envFrom), uses the
+# namespace's default service account with no token, and reads the operator's own Secret
+# (secrets.existingSecret), which must exist before `helm install`. It mounts no storage
+# volume: a migration touches the database only.
+#
+# Delete policy: before-hook-creation removes the previous Job when the next one is made, so
+# an old Job never blocks an upgrade; hook-succeeded removes a Job that worked. A FAILED Job
+# is kept (hook-failed is deliberately not listed), so `kubectl logs job/...` shows why, and
+# the failed hook fails the install or upgrade.
+#
+# During a pre-upgrade migration the old pods keep running against the new schema, and stay
+# Ready: the leader's /readyz is ready when the schema is its own or newer. Migrations must
+# therefore stay compatible with the previous release (add, then remove in a later release).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "swarmscribe-leader.fullname" . }}-migrate
+  labels:
+    {{- include "swarmscribe-leader.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrate.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migrate.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "swarmscribe-leader.labels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "swarmscribe-leader.jobSecurityContext" . | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "swarmscribe-leader.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["migrate"]
+          env:
+            {{- range $name, $value := (include "swarmscribe-leader.settings" . | fromYaml) }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- include "swarmscribe-leader.secretEnv" . | nindent 12 }}
+          securityContext:
+            {{- include "swarmscribe-leader.containerSecurityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.migrate.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

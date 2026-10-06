@@ -287,6 +287,9 @@ def helm4() -> str | None:
     return path if done.stdout.startswith("v4.") else None
 
 
+# This test is SKIPPED in CI's `test` job (only the runner image's Helm 3 is there). What
+# covers leader-values.yaml on a runner is the chart's own check, in the `chart` job, which
+# renders that file as a must-render case and compares what it renders.
 @pytest.mark.skipif(helm4() is None, reason="Helm 4 is not on the PATH or named in $HELM")
 @pytest.mark.parametrize(
     ("chart", "values", "release"),
@@ -430,7 +433,7 @@ networkPolicy:
               app: postgres
 ```
 
-The chart refuses a key it does not have, at every depth, and `settings` takes eleven names and no other (L2's schema). Every key above is one of them, and `deploy/helm/swarmscribe-leader/ci/check_render.py` renders this file as a must-render case from the moment it exists (`KIND_VALUES_FILE`; until then it renders a copy of the block above, `KIND_VALUES`). After creating the file, run that check: if a value added here later is refused, the check says which, and the fix is here or in the schema, never a looser schema for the test's sake. When the file exists, delete `KIND_VALUES` from the check and its fallback.
+The chart refuses a key it does not have, at every depth, and `settings` takes eleven names and no other (L2's schema). Every key above is one of them, and `deploy/helm/swarmscribe-leader/ci/check_render.py` renders this file as a must-render case from the moment it exists (`KIND_VALUES_FILE`; until then it renders a copy of the block above, `KIND_VALUES`). The check expects three things of that file, all tied to its content: 7 objects (no Ingress), two egress rules, and no `ipBlock` (no sign-in, so no HTTPS egress); and, while the file does not exist yet, it compares the whole render of its copy `KIND_VALUES` with hand-written objects. A later `replicaCount: 1`, an Ingress or sign-in in this file fails the check with a message about an object count or an egress rule, not about this file: change the numbers in `core_must_render` with it. After creating the file, run that check: if a value added here later is refused, the check says which, and the fix is here or in the schema, never a looser schema for the test's sake. When the file exists, delete `KIND_VALUES` from the check and its fallback.
 
 Create `e2e/leader-kind/follower-values.yaml`:
 
@@ -1540,8 +1543,17 @@ Keep a list of every change made and why: it goes into the outcomes document.
 
 1. `helm install` with **no Secret**: the pod's status and the `describe pod` event; how long Helm waited and its last line; `helm list --all` and `helm status` (the release's state); `kubectl get all,cm,networkpolicy` (is anything but the Job there?).
 2. Then create the Secret and try, in this order, `helm upgrade --install` and, if that is refused, `helm uninstall` followed by `helm install`. **Record which one Helm 4 accepts and its exact message for the other.** That sentence replaces the guide's two commands.
-3. `helm install` with an **image that does not exist** (`--set image.tag=nope`, `pullPolicy: IfNotPresent`): the same four observations.
-4. A **failed upgrade**: install properly, then `helm upgrade` with a database URL that cannot be reached (a second Secret, `--set secrets.existingSecret=...`): the Job's log's last lines and its exit status; that the old pods are untouched and Ready; the release's revisions and states; then that a corrected `helm upgrade` goes through.
+3. `helm install` with an **image that does not exist**, twice: `--set image.tag=nope --set image.pullPolicy=IfNotPresent` (the node tries a registry: `ErrImagePull`, then `ImagePullBackOff`; the message differs on a machine without a network) and with the values file's own `pullPolicy: Never` (`ErrImageNeverPull`, which the guide's table does not list yet). Record both states and add the second to the table. The same four observations for each.
+4. A **failed upgrade**, in the test's own namespace `swarmscribe-e2e` after the scenario has passed (it needs a working install: Postgres, the claim and the Secret are there, and not in `swarmscribe-e2e-fail`): `helm upgrade` with a database URL that cannot be reached (a second Secret, `--set secrets.existingSecret=...`): the Job's log's last lines and its exit status (2 and one line, on a leader with L1's follow-up fixes); that the old pods are untouched and Ready; the release's revisions and states; then that a corrected `helm upgrade` goes through. Whether the Job's connection is refused or silently dropped depends on whether kind's network plugin enforces the NetworkPolicy for the Job's pod: say which was seen.
+
+During those four runs, settle these six points of the guide, each of which is the likeliest place for it to be wrong on Helm 4 (L2's re-review):
+
+- **Revisions.** After a failed upgrade and a corrected one, `helm history leader`: the guide says the failed revision stays listed beside the new one. Quote the listing.
+- **Which clock ends the wait.** The Job's `activeDeadlineSeconds` (300) equals Helm's default timeout (5m), and Helm's clock starts first. With the defaults (not this step's shortened ones), once: which one ended it, and Helm's last line. Then with the deadline shortened: the other message. If the race makes the message unpredictable, say so and consider a default deadline a little under five minutes (a chart change: `DEFAULTS` and `expected_job` in `check_render.py` change with it).
+- **Retries.** With `backoffLimit: 3` a failing migration makes up to four pods and more than a minute of back-off before the Job fails: how many pods, how long, and which pod `kubectl logs job/...` shows.
+- **The failed Job after `helm uninstall`.** That it is still there (a hook is not part of the release), and that the next install's `before-hook-creation` removes it before making the new one.
+- **`helm.sh/hook-output-log-policy: hook-failed`** on the Job: try it once by hand (`kubectl annotate` will not do; render the chart with the annotation added in a scratch copy). If Helm 4 prints the migration's log itself on failure, half of the guide's table is unnecessary: record it as a follow-up with what was printed. (It would be a fourth annotation: `HOOKS` in the check changes with it.)
+- **Does kind's network plugin enforce NetworkPolicy at all?** The scenario's blocking step answers it; say it here too, because it decides what run 4 shows.
 
 - [ ] **Step 5: Run it until it has passed twice in a row, timed**
 
@@ -1624,7 +1636,7 @@ Expected: both pods `0/1`; `0` ready addresses; a prober line whose `failed` is 
 
 **If the control run passes, the test does not see the defect: stop and report.** Do not go on to Step 8.
 
-(L1's reviewer built this control image as written: `$old` resolves to `2fc774b`, the grep finds its line, and the image runs. If L1's follow-up fixes have since changed `app.py` or `health.py` again, take the two files from the commit before L1's first, not from a later one.)
+(The control image is the leader with the readiness check as it was before L1: take `health.py` and `app.py` from the commit the step's `$old` resolves to (`2fc774b`, the last one before L1), not from a later one, since L1's follow-up fixes changed both again. With those fixes in the tree, `check-leader-image.sh` on the control image fails earlier than it used to, at "/readyz is not 200 ... provider is unreachable" (the old readiness waits for the identity provider), and no longer at the newer-schema case. That is the image check noticing the same defect by another road; the control run that matters here is the scenario's step 5 on the cluster.)
 
 - [ ] **Step 8: `down`, and remove the control images**
 
@@ -1710,9 +1722,11 @@ So the scenario's step 5 fails on the defect and passes on the fix.
 - **A network plugin other than kind's**, an IPv6 or dual-stack cluster, a node drain, and
   the PodDisruptionBudget doing anything.
 - **Load.** The leader's requests and limits were not measured beyond the one figure above.
-- **A stop during a database outage.** A leader stopped while its database does not answer
-  was not run on the cluster (L1's review measured the image alone: the whole grace period,
-  then killed; say here whether the leader under test limits its own stop).
+- **A stop during a database outage, on the cluster.** The image's own check runs it (a
+  leader on a silent database ends about 17 seconds after it is told to); a pod of the
+  chart, with its `preStop` sleep and its grace period, was not stopped that way.
+- **A follower's retry of a transfer cut by a stop** (a transfer still running 10 seconds
+  after the leader is told to stop is cut; the retry was read in the follower's code).
 - **Sign-in behind a blocked egress or a proxy**: Ready pods, and `503` from the admin API.
 - **`fsGroup` on a driver that honours it, on a shared volume** (unless Step 6 showed kind's
   does), and how long a first mount of a large volume takes.
@@ -1814,7 +1828,7 @@ In `.github/workflows/ci.yml`, replace the whole job `leader-image` (its comment
         run: python3 e2e/leader-kind/run_e2e.py down || true
 ```
 
-This job replaces `leader-image`, so the image is built and checked once, here, and not in two jobs. The check is given five minutes (`timeout 300`): an image whose `serve` wrongly starts on a newer schema used to hold that script until the job's own limit (L1 review, I1); if L1's follow-up has bounded the script itself, the `timeout` costs nothing.
+This job replaces `leader-image`, so the image is built and checked once, here, and not in two jobs. With L1's follow-up fixes every step of `check-leader-image.sh` has its own limit and the whole script takes about 85 seconds; the `timeout 300` around it then costs nothing and stays as the outer bound. The script makes an `--internal` Docker network of its own (no route out, so that "the provider is unreachable" is real) and removes it: on the development machine that is one more thing of this plan's that `docker network ls` shows while it runs, and nothing of another agent's. A stopped leader still exits 143, and nothing here asserts a stopped pod's exit status.
 
 The leaders and followers never log a token, a credential or a link (the scenario checks the leaders' logs for the pool token, the link key and `/v1/files/`: keep that assertion, since the image's own check cannot see a request line that a later change switches on), so printing the logs on failure is safe. `python3` and `kubectl` are on GitHub's Ubuntu runners; the driver uses the standard library only, so there is no `uv sync`.
 
@@ -1912,11 +1926,13 @@ translation, so the port that counts is the pod's, not the Service's 80.
 
 - [ ] **Step 2: "What has been run, and what has not"**
 
+**Every ```` ```yaml ```` block under "## Deploy the leader" is rendered by the chart's check as chart values** (`readme_examples`: the first block is a whole values file, each later one is laid over it). A manifest, a kind configuration or any other YAML in that section fails CI with "additional properties 'apiVersion' not allowed": give anything that is not chart values another fence (```` ``` ```` or ```` ```text ````).
+
 First, **"When the install or an upgrade fails"** (the subsection L2 wrote from reading, which says so in its first paragraph): correct every row and both commands from Task 2's four failure runs, quote Helm's own last line for each, and replace its first paragraph with "Run on a `kind` cluster on <date>; Helm 4.3.0." If a case was not run, leave its row and say "not run" in it.
 
 The notes (`NOTES.txt`) print a shared-files paragraph for two or more replicas and, with sign-in on, a paragraph on a blocked identity provider; the driver does not compare notes text, and nothing in this plan uses `helm install --dry-run` (L2's check reads the notes with `helm template`).
 
-A chart fix found on `kind` changes `check_render.py` too: that check compares each rendered object with the whole object it must be (`expected_leader_pod`, `expected_job_pod`, `expected_policy`, `NOTES`), so a deliberate change to a pod, a policy or the notes means changing the expected object in the check in the same commit. Run it with `HELM` naming Helm 4.
+A chart fix found on `kind` changes `check_render.py` too. That check compares everything rendered with the whole objects it must be, for the test values and for about thirty other renders (`core_whole`, one for each branch the templates have), and compares `values.yaml` with `DEFAULTS`. So: a deliberate change to a pod, a policy, a default or the notes means changing the expected object in the check in the same commit (the constants at its top feed every render; its last line on failure says so); **and a fix that adds a branch to a template (an `if` on a value) needs a new render in `core_whole` that takes it**, or nothing compares what that branch renders. Run it with `HELM` naming Helm 4.
 
 Then replace the whole subsection "### What has been run, and what has not" of "## Deploy the leader" with the text below. Every `<...>` comes from the outcomes document; if a sentence here says more than the outcomes document shows, change the sentence.
 

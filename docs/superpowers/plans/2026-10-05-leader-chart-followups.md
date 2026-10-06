@@ -1,7 +1,12 @@
 # Leader chart: follow-ups
 
 From the leader chart spec (section 16) and from building plans L1 to L3. None blocks merge.
-Plan L3 adds "From the build: L1" and "From the build: L3", and marks what its runs settle.
+Plan L3 adds "From the build: L3", and marks what its runs settle.
+
+**From the build: L1** is not repeated here. What L1's review raised and its fixes left open
+is in `2026-10-03-leader-admin-followups.md`, under "From the review of the leader chart's
+first plan (L1), 2026-10-06" (it arrives with the pull request of the branch
+`leader-chart-l1-fixes`).
 
 ## From the spec
 
@@ -49,9 +54,10 @@ and the fixes left open, and what the fixes themselves found. Each says what was
 - **B4. `fsGroup` where a driver honours it**: the cost of the first mount on a large volume
   is described, not measured (review m2). `storage.fsGroup: null` is rendered and checked;
   it has not been installed.
-- **B5. A stop during a database outage with the chart's grace period**, and **sign-in
-  behind a blocked egress or a proxy**, on a cluster (L1 review I2, M1). The guide words both
-  so that they hold with or without the leader's own limits on a stop and on a connection.
+- **B5. A stop during a database outage, and sign-in behind a blocked egress or a proxy, on
+  a cluster** (L1 review I2, M1). The image's own check now runs the first without a
+  cluster. The guide states both as they are with L1's follow-up fixes: a leader ends about
+  17 seconds after it is told to, and a blocked provider answers 503 in about 3 seconds.
 
 ### What the chart cannot do yet
 
@@ -95,13 +101,13 @@ and the fixes left open, and what the fixes themselves found. Each says what was
   present**, not what each object is (review I1 was about the leader's; its rework was not
   carried over). The follower chart's schema is closed at 17 levels; **the console chart's
   schema refuses no unknown key at all** (review, schema strictness: console 0).
-- **B16. Those two checks had been running on the runner image's Helm 3**, unnoticed, since
-  they were written: `uv run` put `/usr/local/bin` ahead of the pinned Helm's folder for its
-  child. They only call `helm template`, which Helm 3 has, so they passed. All three now
-  name the binary and refuse anything but Helm 4 (`deploy/helm/helm_tool.py`); nothing was
-  found to differ, but nothing was compared either.
-- **B17. The leader check runs Helm about 400 times and takes some 40 seconds** on the
-  development machine. Running the renders in parallel would cut that;
+- **B16. Closed.** The console's and the follower's checks had been running on the runner
+  image's Helm 3 since they were written. L2's re-review ran every `helm template` call of
+  all three checks under Helm 3.22.0 and Helm 4.3.0 (603 calls): the same exit status and
+  the same parsed objects in every one; only blank lines and, in three refusals, the order
+  of two schema errors differ. All three checks now refuse anything but Helm 4.
+- **B17. The leader check runs Helm about 625 times and takes about a minute** on the
+  development machine (the first 410 took 18 seconds on a runner). Running the renders in parallel would cut that;
   not done.
 - **B18. `KIND_VALUES` in the leader check is a copy of plan L3's `leader-values.yaml`**,
   used until that file exists. L3 deletes the copy (its plan says so).
@@ -111,9 +117,50 @@ and the fixes left open, and what the fixes themselves found. Each says what was
 
 ### Elsewhere
 
-- **B20. `docker/check-leader-image.sh:48` says "the chart gives none"** of the arguments;
-  the chart passes `serve --host 0.0.0.0 --port <port>` (L1 review M5). Left to the L1
-  follow-up fixes, which touch that script.
+- **B20. Done in L1's follow-up fixes**: `docker/check-leader-image.sh` no longer says "the
+  chart gives none" of the arguments.
 - **B21. Thousands of `tmp*/values.yaml` folders in `%TEMP%` on the development machine**,
   left by the three checks before they shared one scratch folder per run (review m6). They
   carry Python's default prefix, not one of the checks' own, so nothing here deletes them.
+
+## From the build: L2, second review
+
+`.superpowers/sdd/2026-10-05-leader-chart/l2-re-review.md`. Its findings R1 and M1 to M8 are
+fixed; these are what stays.
+
+- **B22. A branch nobody wrote a render for is still not seen.** The check now compares
+  everything rendered, whole, for about thirty renders (`core_whole`), one for each branch
+  the templates have today, and compares `values.yaml` with a hand-written `DEFAULTS`. A new
+  `if` in a template needs a new render there; nothing tells the author so but the check's
+  docstring and the README.
+- **B23. A whole map set to null** (`ingress: null`, `networkPolicy.egress.dns: null`) is
+  refused by the schema with a plain message (`missing property`). With the schema switched
+  off it is still refused, but in Go's words (`nil pointer evaluating ...`): the templates'
+  own guard reaches plain values only.
+- **B24. Values an operator may ask for, which the chart does not have** (none promised by
+  the spec): `priorityClassName`; `subPath` on a storage mount (one folder of a shared
+  claim); annotations on the Service and on the chart's ServiceAccount (the way round for
+  the second, `serviceAccount.create: false`, is in `values.yaml`); labels on every object;
+  `hostAliases`; an Ingress whose certificate is not a Secret (the way round is
+  `ingress.enabled: false` and an Ingress of your own).
+- **B25. The ingress-nginx example.** The guide now labels it as an example for that
+  controller only, untested, and says the Kubernetes project has announced the controller's
+  retirement. That last statement was written from memory, not checked against a source
+  here: verify it, and give an example for a maintained controller once one has been run.
+- **B26. The README repeats defaults in prose** (the probes' numbers, the resources, the
+  grace period, the connection count) and nothing ties them to `values.yaml`. The check's
+  closing line on failure names the README; it does not compare it.
+- **B27. `migrate.activeDeadlineSeconds` (300) equals Helm's default timeout (5 minutes)**,
+  so which of the two ends a hung install is a race. L3 records both messages; a default a
+  little under five minutes would make it predictable. Also for L3 to try:
+  `helm.sh/hook-output-log-policy: hook-failed` on the Job.
+- **B28. Statements that are true only once the L1 follow-up fixes are merged** (the pull
+  request of `leader-chart-l1-fixes`). In the chart: the Job's comment on exit statuses, the
+  Deployment's comment and `values.yaml` on the 10 and 17 seconds, the notes' "about 3
+  seconds", and the refusal of a grace period under `preStopSleepSeconds` plus 25 (harmless
+  before it). In the guide: exit status 2 with one line for a database that cannot be
+  reached and no traceback; the 17-second stop on a silent database; the transfer cut after
+  10 seconds; the 503 in about 3 seconds for all callers at once; the pointer to "Upgrading
+  a leader" and to `packages/leader/tests/test_migration_compatibility.py`, neither of
+  which exists on `main` until that pull request is merged. Merge that one first, or read
+  those sentences as describing the next image.

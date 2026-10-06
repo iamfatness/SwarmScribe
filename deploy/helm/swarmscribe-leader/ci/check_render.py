@@ -4,10 +4,14 @@ Run from the repository root (CI job `chart` does), with Helm 4 on the PATH or n
 
     uv run --no-project --with pyyaml python deploy/helm/swarmscribe-leader/ci/check_render.py
 
-It renders the chart with `helm template` and ci/test-values.yaml and compares every object
-with the whole object it must be, so that anything added, removed or changed fails; renders
-it again with other values and compares what they must change; and renders it with values
-that must be refused. It reads the leader's own code for what the chart has to agree with:
+It renders the chart with `helm template` and compares everything rendered with the whole
+objects it must be, so that anything added, removed or changed fails. It does that for
+ci/test-values.yaml and for some thirty other renders, one for each branch the templates
+have: another release name, sign-in on and off, each object switched off, each optional
+field, the guide's example values alone and the kind test's. It compares values.yaml with
+the defaults it must hold, renders the notes with a marker in every free-form value to see
+that none is printed, and renders the chart with values that must be refused. It reads
+the leader's own code for what the chart has to agree with:
 the settings (config.py), the probes' routes (api/health.py) and the routers (api/*.py).
 `--only core,storage` runs some sections only (core, storage, migrate, ingress, network,
 values). Every problem is listed, one `FAILED:` line each, and the exit status is 1; a part
@@ -209,7 +213,7 @@ A NetworkPolicy limits who reaches the leader and what it reaches. It needs a ne
 that enforces NetworkPolicy; check that yours does.
 
 The pods are Ready whether or not they can reach the identity provider. If `login` is
-answered 503 "sign-in cannot be checked right now" after some seconds, the leader cannot
+answered 503 "sign-in cannot be checked right now" after about 3 seconds, the leader cannot
 fetch the provider's keys: look in its log for "sign-in keys could not be fetched", and at
 the HTTPS egress (networkPolicy.egress.https, or the proxy your cluster needs)."""
 # The files of the packaged chart: these and no other.
@@ -229,6 +233,114 @@ PACKAGED = {
     "templates/service.yaml",
     "templates/serviceaccount.yaml",
 }
+
+# values.yaml, whole: every default the chart ships. A default that test-values.yaml
+# overrides, or that only a refusal reads (oidc.allowNone, the empty extraExcept), is seen
+# by no render of the test values; it is seen here.
+DEFAULTS = {
+    "nameOverride": "",
+    "fullnameOverride": "",
+    "replicaCount": 2,
+    "image": {"repository": "", "tag": "", "digest": "", "pullPolicy": "IfNotPresent"},
+    "imagePullSecrets": [],
+    "publicUrl": "",
+    "allowHttpPublicUrl": False,
+    "secrets": {
+        "existingSecret": "",
+        "keys": {
+            "databaseUrl": "database-url",
+            "linkKey": "link-key",
+            "entraClientSecret": "entra-client-secret",
+            "googleClientSecret": "google-client-secret",
+            "googleServiceAccount": "google-service-account",
+        },
+    },
+    "oidc": {
+        "allowNone": False,
+        "entra": {"enabled": False, "tenantId": "", "clientId": "", "clientSecret": False},
+        "google": {"enabled": False, "clientId": "", "hostedDomain": "", "serviceAccount": False},
+    },
+    "roles": {
+        role: {"entraGroups": [], "googleGroups": [], "emails": [], "domains": []}
+        for role in ("viewer", "operator", "admin")
+    },
+    "settings": {},
+    "extraEnv": [],
+    "storage": {"volumes": [], "fsGroup": 10001, "supplementalGroups": []},
+    "port": 8080,
+    "service": {"type": "ClusterIP", "port": 80},
+    "ingress": {
+        "enabled": True,
+        "className": "",
+        "annotations": {},
+        "tls": {"secretName": ""},
+        "paths": [{"path": "/v1", "pathType": "Prefix"}],
+    },
+    "migrate": {
+        "enabled": True,
+        "backoffLimit": 3,
+        "activeDeadlineSeconds": 300,
+        "resources": MIGRATE_RESOURCES,
+    },
+    "resources": LEADER_RESOURCES,
+    "updateStrategy": "RollingUpdate",
+    "preStopSleepSeconds": 5,
+    "terminationGracePeriodSeconds": 60,
+    "podDisruptionBudget": {"enabled": True, "maxUnavailable": 1},
+    "networkPolicy": {
+        "enabled": True,
+        "ingress": {"from": [], "anySource": False},
+        "egress": {
+            "dns": {"peers": KUBE_DNS},
+            "postgres": {"port": 5432, "peers": []},
+            "https": {"ports": [443], "cidrs": ["0.0.0.0/0", "::/0"], "extraExcept": []},
+            "extra": [],
+        },
+    },
+    "serviceAccount": {"create": True, "name": ""},
+    "podAnnotations": {},
+    "podLabels": {},
+    "nodeSelector": {},
+    "tolerations": [],
+    "affinity": {},
+    "spreadAcrossNodes": True,
+    "topologySpreadConstraints": [],
+}
+# The three values where null means something; every other key must have a value.
+NULLABLE = {
+    "storage.fsGroup",
+    "networkPolicy.ingress.from",
+    "networkPolicy.egress.postgres.peers",
+}
+# The maps of values.yaml whose keys the chart owns (the others are Kubernetes' own, or
+# resources, where `limits: null` is how a default limit is taken away).
+OWNED_MAPS = {
+    "image",
+    "secrets",
+    "secrets.keys",
+    "oidc",
+    "oidc.entra",
+    "oidc.google",
+    "roles",
+    "roles.viewer",
+    "roles.operator",
+    "roles.admin",
+    "storage",
+    "service",
+    "ingress",
+    "ingress.tls",
+    "migrate",
+    "podDisruptionBudget",
+    "networkPolicy",
+    "networkPolicy.ingress",
+    "networkPolicy.egress",
+    "networkPolicy.egress.dns",
+    "networkPolicy.egress.postgres",
+    "networkPolicy.egress.https",
+    "serviceAccount",
+}
+# The marker put into every free-form value to see that the notes print none of them.
+MARK = "zzmark"
 
 # --- other values the chart is rendered with ----------------------------------------------
 
@@ -343,7 +455,9 @@ def helm_template(
     command = [HELM, "template", release, str(chart), "--namespace", "swarmscribe"]
     if base:
         command += ["-f", str(VALUES)]
-    done = subprocess.run([*command, *extra], capture_output=True, text=True)
+    done = subprocess.run(
+        [*command, *extra], capture_output=True, text=True, encoding="utf-8", errors="replace"
+    )
     _runs["rendered" if done.returncode == 0 else "refused"] += 1
     return done
 
@@ -765,8 +879,9 @@ def expected_policy(
     }
 
 
-def expected_objects() -> dict[tuple[str, str], dict]:
-    """Everything test-values.yaml renders, whole. Nothing else may be rendered."""
+def expected_objects() -> dict[str, dict]:
+    """Everything test-values.yaml renders, whole, by kind (one of each). Nothing else may
+    be rendered. A fresh copy each time: a variant changes its own."""
     meta = {"name": NAME, "labels": LABELS}
     objects = [
         {"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta, "data": SETTINGS},
@@ -807,31 +922,76 @@ def expected_objects() -> dict[tuple[str, str], dict]:
             "spec": expected_policy(),
         },
     ]
-    return {(doc["kind"], doc["metadata"]["name"]): doc for doc in objects}
+    return {doc["kind"]: copy.deepcopy(doc) for doc in objects}
 
 
-def compare_objects(docs: list[dict], which: set[str]) -> list[str]:
-    """The rendered objects of these kinds are exactly the expected ones."""
-    problems: list[str] = []
-    wanted = expected_objects()
+def for_release(node: object, release: str) -> object:
+    """Expected objects under another release name: every object name and the instance label."""
+    if isinstance(node, dict):
+        return {
+            key: release if key == "app.kubernetes.io/instance" else for_release(value, release)
+            for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [for_release(item, release) for item in node]
+    if isinstance(node, str) and (node == NAME or node.startswith(f"{NAME}-")):
+        return f"{release}-swarmscribe-leader" + node.removeprefix(NAME)
+    return node
+
+
+def compare_all(problems: list[str], what: str, docs: list[dict], wanted: dict[str, dict]) -> None:
+    """Everything rendered is exactly `wanted`: the same objects, and each of them whole."""
+    label = f"{what}: " if what else ""
+    rendered = sorted(str(doc.get("kind")) for doc in docs)
+    if rendered != sorted(wanted):
+        problems.append(f"{label}the chart renders {rendered}, not exactly {sorted(wanted)}")
     for doc in docs:
-        key = (str(doc.get("kind")), str(dig(doc, "metadata", "name")))
-        if key[0] not in which or key not in wanted:
+        kind = str(doc.get("kind"))
+        if kind not in wanted:
             continue
         got = copy.deepcopy(doc)
-        if key[0] == "Deployment":
+        if kind == "Deployment":
             # The checksum is of the settings: checked for what it does, in core_variants.
             marks = dig(got, "spec", "template", "metadata", "annotations")
             mark = marks.pop("checksum/settings", "") if isinstance(marks, dict) else ""
             if not re.fullmatch(r"[0-9a-f]{64}", str(mark)):
-                problems.append("Deployment: the pods carry no checksum of the settings")
-        same(problems, key[0], got, wanted[key])
-    for kind, name in sorted(wanted):
-        if kind in which and not any(
-            d.get("kind") == kind and dig(d, "metadata", "name") == name for d in docs
-        ):
-            problems.append(f"expected one {kind} named {name}, found 0")
+                problems.append(f"{label}Deployment: the pods carry no checksum of the settings")
+        same(problems, f"{label}{kind}", got, wanted[kind])
+
+
+def compare_objects(docs: list[dict], which: set[str]) -> list[str]:
+    """The objects of these kinds that test-values.yaml renders are exactly the expected."""
+    problems: list[str] = []
+    wanted = {kind: doc for kind, doc in expected_objects().items() if kind in which}
+    compare_all(problems, "", [doc for doc in docs if doc.get("kind") in which], wanted)
     return problems
+
+
+def pod_of(objects: dict[str, dict]) -> dict:
+    return objects["Deployment"]["spec"]["template"]["spec"]
+
+
+def job_pod_of(objects: dict[str, dict]) -> dict:
+    return objects["Job"]["spec"]["template"]["spec"]
+
+
+def variant(
+    problems: list[str],
+    what: str,
+    docs: list[dict],
+    change: Callable[[dict[str, dict]], object] | None = None,
+    *,
+    release: str = "leader",
+    without: tuple[str, ...] = (),
+) -> None:
+    """A render with other values is the test values' objects with exactly this change:
+    `change` edits the expected objects, `without` names the kinds that are gone."""
+    wanted = expected_objects()
+    for kind in without:
+        del wanted[kind]
+    if change is not None:
+        change(wanted)
+    compare_all(problems, what, docs, for_release(wanted, release))  # type: ignore[arg-type]
 
 
 # --- core ---------------------------------------------------------------------------------
@@ -840,7 +1000,7 @@ def compare_objects(docs: list[dict], which: set[str]) -> list[str]:
 def core_objects(docs: list[dict]) -> list[str]:
     problems: list[str] = []
     wanted = expected_objects()
-    rendered = sorted((str(d.get("kind")), str(dig(d, "metadata", "name"))) for d in docs)
+    rendered = sorted(str(doc.get("kind")) for doc in docs)
     if rendered != sorted(wanted):
         problems.append(f"the chart renders {rendered}, not exactly {sorted(wanted)}")
     if "Secret" in kinds(docs):
@@ -850,6 +1010,224 @@ def core_objects(docs: list[dict]) -> list[str]:
     if kinds(docs) & {"PersistentVolumeClaim", "PersistentVolume"}:
         problems.append("the chart renders storage of its own; storage is the operator's")
     problems += compare_objects(docs, {"ConfigMap", "Deployment", "Service", "ServiceAccount"})
+    return problems
+
+
+def core_whole(_docs: list[dict]) -> list[str]:
+    """R1: whole objects under other values too. Each render below takes a branch of the
+    templates that test-values.yaml does not, and everything it renders is compared with
+    the test values' objects changed in exactly the way that value should change them."""
+    problems: list[str] = []
+
+    def set_in(kind: str, *keys: object, to: object) -> Callable[[dict[str, dict]], None]:
+        def change(objects: dict[str, dict]) -> None:
+            node = objects[kind]
+            for key in keys[:-1]:
+                node = node[key]  # type: ignore[index]
+            node[keys[-1]] = to  # type: ignore[index]
+
+        return change
+
+    def gone(kind: str, *keys: object) -> Callable[[dict[str, dict]], None]:
+        def change(objects: dict[str, dict]) -> None:
+            node = objects[kind]
+            for key in keys[:-1]:
+                node = node[key]  # type: ignore[index]
+            del node[keys[-1]]  # type: ignore[index]
+
+        return change
+
+    def both_images(image: str) -> Callable[[dict[str, dict]], None]:
+        def change(objects: dict[str, dict]) -> None:
+            pod_of(objects)["containers"][0]["image"] = image
+            job_pod_of(objects)["containers"][0]["image"] = image
+
+        return change
+
+    def one_replica(objects: dict[str, dict]) -> None:
+        objects["Deployment"]["spec"]["replicas"] = 1
+        del pod_of(objects)["topologySpreadConstraints"]
+
+    def no_account(objects: dict[str, dict]) -> None:
+        pod_of(objects)["serviceAccountName"] = "default"
+
+    def three(objects: dict[str, dict]) -> None:
+        objects["Deployment"]["spec"]["replicas"] = 3
+
+    def labelled(objects: dict[str, dict]) -> None:
+        template = objects["Deployment"]["spec"]["template"]["metadata"]
+        template["labels"] = {**template["labels"], "app.kubernetes.io/part-of": "swarmscribe"}
+
+    container = ("spec", "template", "spec", "containers", 0)
+    # Another release in the same namespace: every name and every selector follows it.
+    variant(problems, "release other", render(release="other"), release="other")
+    cases: tuple[tuple[str, tuple[str, ...], object, tuple[str, ...]], ...] = (
+        # (what, --set values, the change, the kinds that are gone)
+        ("ingress.className empty (the default)", ("ingress.className=",),
+         gone("Ingress", "spec", "ingressClassName"), ()),
+        ("updateStrategy=Recreate", ("updateStrategy=Recreate",),
+         set_in("Deployment", "spec", "strategy", to={"type": "Recreate"}), ()),
+        ("image.digest", (f"image.digest={DIGEST}",),
+         both_images(f"swarmscribe-leader@{DIGEST}"), ()),
+        ("serviceAccount.create=false", ("serviceAccount.create=false",),
+         no_account, ("ServiceAccount",)),
+        ("migrate.backoffLimit=0", ("migrate.backoffLimit=0",),
+         set_in("Job", "spec", "backoffLimit", to=0), ()),
+        ("migrate.activeDeadlineSeconds=900", ("migrate.activeDeadlineSeconds=900",),
+         set_in("Job", "spec", "activeDeadlineSeconds", to=900), ()),
+        ("service.type=LoadBalancer", ("service.type=LoadBalancer",),
+         set_in("Service", "spec", "type", to="LoadBalancer"), ()),
+        ("service.type=NodePort", ("service.type=NodePort",),
+         set_in("Service", "spec", "type", to="NodePort"), ()),
+        ("replicaCount=3", ("replicaCount=3",), three, ()),
+        ("replicaCount=1", ("replicaCount=1",), one_replica, ("PodDisruptionBudget",)),
+        ("ingress.enabled=false", ("ingress.enabled=false",), None, ("Ingress",)),
+        ("networkPolicy.enabled=false", ("networkPolicy.enabled=false",), None,
+         ("NetworkPolicy",)),
+        ("migrate.enabled=false", ("migrate.enabled=false",), None, ("Job",)),
+        ("podDisruptionBudget.enabled=false", ("podDisruptionBudget.enabled=false",), None,
+         ("PodDisruptionBudget",)),
+        ("preStopSleepSeconds=0", ("preStopSleepSeconds=0",),
+         gone("Deployment", *container, "lifecycle"), ()),
+        ("spreadAcrossNodes=false", ("spreadAcrossNodes=false",),
+         gone("Deployment", "spec", "template", "spec", "topologySpreadConstraints"), ()),
+    )
+    for what, values, change, without in cases:
+        rendered = render(*(arg for value in values for arg in ("--set", value)))
+        variant(problems, what, rendered, change, without=without)  # type: ignore[arg-type]
+
+    variant(
+        problems,
+        "a label of the operator's own",
+        render_with({"podLabels": {"app.kubernetes.io/part-of": "swarmscribe"}}),
+        labelled,
+    )
+
+    # The guide's whole example file, alone: the render that rides on values.yaml's defaults
+    # (Entra only, one claim, no class of groups, the default egress with nothing more cut out).
+    def readme(objects: dict[str, dict]) -> None:
+        settings = {
+            "SWARMSCRIBE_PUBLIC_URL": "https://leader.example.org",
+            "SWARMSCRIBE_ENTRA_TENANT_ID": "0f0e0d0c-0b0a-4908-8706-050403020100",
+            "SWARMSCRIBE_ENTRA_CLIENT_ID": "6d3a6b52-1c2e-4a8f-9d61-2f6a4c0b7e11",
+            "SWARMSCRIBE_ROLE_ADMIN_ENTRA_GROUPS": "3f2b0c5e-8f6d-4a51-9c0e-6f1d2a7b9c11",
+        }
+        objects["ConfigMap"]["data"] = settings
+        objects["Deployment"]["spec"]["template"]["spec"] = expected_leader_pod(
+            secrets=ALWAYS_SECRET, volumes=TEST_VOLUMES[:1], mounts=TEST_MOUNTS[:1], groups=()
+        )
+        objects["Job"]["spec"]["template"]["spec"] = expected_job_pod(settings, ALWAYS_SECRET)
+        both_images("registry.example.org/swarmscribe-leader:0.1.0")(objects)
+        objects["NetworkPolicy"]["spec"] = expected_policy(
+            sources=TEST_SOURCES[:1], more_refused=None
+        )
+
+    whole = readme_examples()[0]
+    variant(
+        problems,
+        "the README's example values, alone",
+        render_with(whole, base=False),
+        readme,
+    )
+
+    # The kind test's values, alone: no sign-in, no Ingress, peers by label, another Secret.
+    def kind(objects: dict[str, dict]) -> None:
+        settings = {
+            "SWARMSCRIBE_PUBLIC_URL": "http://leader-swarmscribe-leader",
+            **{f"SWARMSCRIBE_{name}": value for name, value in KIND_VALUES["settings"].items()},
+        }
+        refs = secret_env(ALWAYS_SECRET, "leader")
+        objects["ConfigMap"]["data"] = settings
+        pod = expected_leader_pod(
+            secrets=ALWAYS_SECRET,
+            volumes=[
+                {"name": "storage-data", "persistentVolumeClaim": {"claimName": "leader-data"}}
+            ],
+            mounts=[{"name": "storage-data", "mountPath": "/data"}],
+            groups=(),
+            pull="Never",
+        )
+        pod["containers"][0]["env"] = refs
+        objects["Deployment"]["spec"]["template"]["spec"] = pod
+        hook = expected_job_pod(settings, ALWAYS_SECRET)
+        hook["containers"][0]["env"] = [e for e in hook["containers"][0]["env"] if "value" in e]
+        hook["containers"][0]["env"] += refs
+        hook["containers"][0]["imagePullPolicy"] = "Never"
+        objects["Job"]["spec"]["template"]["spec"] = hook
+        both_images("swarmscribe-leader:kind")(objects)
+        peers = KIND_VALUES["networkPolicy"]
+        policy = expected_policy(sign_in=False, sources=peers["ingress"]["from"])
+        policy["egress"][1]["to"] = peers["egress"]["postgres"]["peers"]
+        objects["NetworkPolicy"]["spec"] = policy
+
+    if not KIND_VALUES_FILE.exists():
+        variant(
+            problems,
+            "the kind test's values, alone",
+            render_with(KIND_VALUES, base=False),
+            kind,
+            without=("Ingress",),
+        )
+    return problems
+
+
+def core_defaults(_docs: list[dict]) -> list[str]:
+    """values.yaml holds exactly the defaults it must (R1), and every key of it must have a
+    value: the schema requires each, and the templates refuse a null (M1)."""
+    problems: list[str] = []
+    shipped = yaml.safe_load((CHART / "values.yaml").read_text(encoding="utf-8"))
+    same(problems, "values.yaml: the default", shipped, DEFAULTS)
+    # Every path that must not be null: each key, at every depth of a map the chart owns.
+    paths: list[str] = []
+    levels: dict[str, list[str]] = {}
+
+    def walk(node: dict, prefix: str) -> None:
+        levels[prefix.rstrip(".")] = [k for k in node if f"{prefix}{k}" not in NULLABLE]
+        for key, value in node.items():
+            if f"{prefix}{key}" in NULLABLE:
+                continue
+            paths.append(f"{prefix}{key}")
+            if isinstance(value, dict) and f"{prefix}{key}" in OWNED_MAPS:
+                walk(value, f"{prefix}{key}.")
+
+    walk(DEFAULTS, "")
+    schema = json.loads((CHART / "values.schema.json").read_text(encoding="utf-8"))
+    for level, keys in levels.items():
+        node = schema
+        for key in filter(None, level.split(".")):
+            node = dig(node, "properties", key) or {}
+            if "$ref" in node:
+                node = dig(schema, "definitions", str(node["$ref"]).rpartition("/")[2]) or {}
+        same(
+            problems,
+            f"values.schema.json: `required` of {level or 'the root'}",
+            node.get("required"),
+            keys,
+        )
+    helpers = (CHART / "templates" / "_helpers.tpl").read_text(encoding="utf-8")
+    listed = re.search(r'"swarmscribe-leader\.requiredValues" -\}\}\n([A-Za-z. ]+)\n', helpers)
+    same(
+        problems,
+        "_helpers.tpl: swarmscribe-leader.requiredValues",
+        listed.group(1).split() if listed else None,
+        paths,
+    )
+    # A null, or a key left blank, takes the default away with it. Refused everywhere by
+    # the schema; by the templates too for a plain value (a whole map set to null fails in
+    # them as well, but in Go's own words).
+    for name in paths:
+        values: object = None
+        for key in reversed(name.split(".")):
+            values = {key: values}
+        refused_file(problems, f"{name}: null", values, says="missing property")
+        if name not in OWNED_MAPS:
+            refused_file(
+                problems,
+                f"{name}: null",
+                values,  # type: ignore[arg-type]
+                says=name,
+                unchecked=True,
+            )
     return problems
 
 
@@ -907,6 +1285,38 @@ def core_notes(_docs: list[dict]) -> list[str]:
         problems.append("NOTES: a leader without sign-in is not told so, or is told to sign in")
     if "NetworkPolicy" in printed_notes("--set", "networkPolicy.enabled=false"):
         problems.append("NOTES: a NetworkPolicy is spoken of when there is none")
+    # The notes print the address and the mount paths, and nothing else an operator wrote:
+    # a proxy URL can hold a password, and an annotation anything at all.
+    marked = {
+        "extraEnv": [
+            {"name": f"{MARK.upper()}_PROXY", "value": f"http://user:{MARK}@proxy.internal:3128"},
+            {"name": "HTTPS_PROXY", "valueFrom": {"secretKeyRef": {"name": MARK, "key": MARK}}},
+        ],
+        "settings": {"LEASE_SECONDS": 98765, "FOLLOWER_GONE_AFTER_SECONDS": "987650"},
+        "podAnnotations": {f"example.org/{MARK}": MARK},
+        "podLabels": {f"example.org/{MARK}": MARK},
+        "nodeSelector": {MARK: MARK},
+        "tolerations": [{"key": MARK, "operator": "Exists"}],
+        "imagePullSecrets": [{"name": MARK}],
+        "serviceAccount": {"name": MARK},
+        "ingress": {
+            "className": MARK,
+            "annotations": {f"example.org/{MARK}": MARK},
+            "tls": {"secretName": MARK},
+        },
+        "secrets": {
+            "existingSecret": MARK,
+            "keys": dict.fromkeys(DEFAULTS["secrets"]["keys"], MARK),
+        },
+        "oidc": {"entra": {"clientId": MARK}, "google": {"clientId": MARK, "hostedDomain": MARK}},
+        "roles": {"admin": {"entraGroups": [MARK], "emails": [f"{MARK}@example.org"]}},
+        "networkPolicy": {"egress": {"https": {"extraExcept": ["10.98.76.0/24"]}}},
+    }
+    told = printed_notes("-f", str(values_file(marked))).lower()
+    for marker in (MARK, "98765", "10.98.76"):
+        if marker in told:
+            line = next(line for line in told.splitlines() if marker in line)
+            problems.append(f"NOTES: a value the operator wrote is printed ({line.strip()[:120]})")
     return problems
 
 
@@ -1029,7 +1439,7 @@ def core_settings(_docs: list[dict]) -> list[str]:
     # I6: a number arrives written out in full, never as 1e+06; and a fraction as one.
     numbers = {
         "FOLLOWER_GONE_AFTER_SECONDS": (1000000, "1000000"),
-        "UPLOAD_LINK_TTL_SECONDS": (12345678901, "12345678901"),
+        "UPLOAD_LINK_TTL_SECONDS": (2000000000, "2000000000"),
         "REAPER_INTERVAL_SECONDS": (0.5, "0.5"),
         "SCANNER_INTERVAL_SECONDS": (2, "2"),
         "LINKS_REFRESH_MIN_SECONDS": (0, "0"),
@@ -1072,6 +1482,14 @@ def core_settings(_docs: list[dict]) -> list[str]:
             says="must be a number or a string",
             unchecked=True,
         )
+    huge = {"settings": {"FOLLOWER_GONE_AFTER_SECONDS": 10**21}}
+    refused_twice(problems, "a setting of 10^21", huge, schema="maximum", template="is too large")
+    refused_file(
+        problems,
+        "a setting of twenty digits",
+        {"settings": {"FOLLOWER_GONE_AFTER_SECONDS": "1" + "0" * 19}},
+        says="FOLLOWER_GONE_AFTER_SECONDS",
+    )
     refused_file(problems, "an interval of 0", {"settings": {"REAPER_INTERVAL_SECONDS": 0}})
     refused_file(problems, "an interval of 0.0", {"settings": {"REAPER_INTERVAL_SECONDS": "0.0"}})
 
@@ -1384,11 +1802,13 @@ def core_sign_in(_docs: list[dict]) -> list[str]:
     refused(problems, "no image tag", "image.tag=", says="image.tag is required")
     refused(problems, "no publicUrl", "publicUrl=")
     refused(problems, "no Secret", "secrets.existingSecret=")
-    refused(
+    # oidc.allowNone is not named here: it is the default (false) that must refuse this.
+    providers_off = {key: value for key, value in NO_SIGN_IN["oidc"].items() if key != "allowNone"}
+    refused_file(
         problems,
-        "no sign-in provider",
-        "oidc.entra.enabled=false",
-        "oidc.google.enabled=false",
+        "no sign-in provider (oidc.allowNone left at its default)",
+        {**NO_SIGN_IN, "oidc": providers_off},
+        says="without sign-in refuses every admin call",
     )
     refused_file(
         problems,
@@ -1523,6 +1943,7 @@ def core_numbers(_docs: list[dict]) -> list[str]:
         ("an unknown service type", "service.type=ExternalName"),
         ("a grace period of 0", "terminationGracePeriodSeconds=0"),
         ("a grace period no longer than the preStop sleep", "terminationGracePeriodSeconds=5"),
+        ("a grace period too short for a leader to stop in", "terminationGracePeriodSeconds=29"),
         ("a negative preStop sleep", "preStopSleepSeconds=-1"),
         ("a preStop sleep of an hour", "preStopSleepSeconds=3600"),
         ("an unknown update strategy", "updateStrategy=OnDelete"),
@@ -1545,6 +1966,15 @@ def core_numbers(_docs: list[dict]) -> list[str]:
         ("a supplemental group of 0", {"storage": {"supplementalGroups": [0]}}),
     ):
         refused_file(problems, what, values)
+    # The leader needs about 17 s to stop after the preStop sleep: 25 are kept for it.
+    refused_file(
+        problems,
+        "a grace period of 40 s after a preStop sleep of 20",
+        {"terminationGracePeriodSeconds": 40, "preStopSleepSeconds": 20},
+        says="must be at least preStopSleepSeconds (20) plus 25",
+    )
+    for grace, sleep in ((30, 5), (25, 0), (45, 20)):
+        render_with({"terminationGracePeriodSeconds": grace, "preStopSleepSeconds": sleep})
     half = render_with({"podDisruptionBudget": {"maxUnavailable": "50%"}})
     if dig(one(half, "PodDisruptionBudget"), "spec", "maxUnavailable") != "50%":
         problems.append("PodDisruptionBudget: a percentage is not passed on")
@@ -1888,12 +2318,12 @@ def core_quoting(_docs: list[dict]) -> list[str]:
     if volume != {"name": "storage-123", "persistentVolumeClaim": {"claimName": "123"}}:
         problems.append(f"Deployment: a numeric volume or claim name is not a string ({volume})")
     # The chart's own labels and its checksum are not the operator's to replace.
-    for label in ("app.kubernetes.io/component", "app.kubernetes.io/name", "helm.sh/chart"):
+    for label in sorted(LEADER_LABELS):
         refused_file(
             problems,
             f"podLabels that replace {label}",
             {"podLabels": {label: "x"}},
-            says="podLabels must not set",
+            says="the chart writes that label itself",
         )
     refused_file(
         problems,
@@ -1969,9 +2399,7 @@ def storage_mounts(_docs: list[dict]) -> list[str]:
 
 def storage_refusals(_docs: list[dict]) -> list[str]:
     problems: list[str] = []
-    refused(
-        problems, "no storage volume", "storage.volumes=null", says="storage.volumes is required"
-    )
+    refused(problems, "no storage volume", "storage.volumes=null", says="missing property")
     refused_file(
         problems, "an empty list of volumes", volumes(), says="storage.volumes is required"
     )
@@ -2041,9 +2469,25 @@ def storage_refusals(_docs: list[dict]) -> list[str]:
         ("a mountPath of /sys", "/sys"),
         ("a mountPath of /run", "/run"),
         ("a mountPath under /lib", "/lib/x"),
+        # M8: nothing of the leader's is there, but the image's own files are.
+        ("a mountPath of /root", "/root"),
+        ("a mountPath under /var/run", "/var/run/recordings"),
+        ("a mountPath of /var", "/var"),
+        ("a mountPath of /home", "/home"),
+        ("a mountPath of /opt", "/opt"),
     ):
         refused_file(problems, what, volumes({**CLAIM, "mountPath": path}), says="mountPath")
-    for path in ("/data", "/apps", "/tmpfiles", "/usrdata/a", "/var/lib/recordings", "/mnt/a"):
+    for path in (
+        "/data",
+        "/apps",
+        "/tmpfiles",
+        "/usrdata/a",
+        "/var/lib/recordings",
+        "/opt/recordings",
+        "/home/recordings",
+        "/mnt/a",
+        "/srv",
+    ):
         render_with(volumes({**CLAIM, "mountPath": path}))
     refused_file(
         problems, "a volume name that is not a DNS label", volumes({**CLAIM, "name": "A_b"})
@@ -2533,6 +2977,30 @@ def values_passed_on(_docs: list[dict]) -> list[str]:
         policy_spec(moved),
         expected_policy(dns=dns, postgres_port=6432, https_ports=(443, 8443)),
     )
+    # And everything that render holds, whole: nothing else moved with those values.
+    def everything(objects: dict[str, dict]) -> None:
+        objects["Deployment"]["spec"]["replicas"] = 3
+        objects["Deployment"]["spec"]["template"] = {
+            "metadata": {
+                "labels": {**LEADER_LABELS, "example.org/team": "b"},
+                "annotations": {"example.org/note": "a"},
+            },
+            "spec": pod,
+        }
+        objects["Job"]["spec"] = {
+            "backoffLimit": 1,
+            "activeDeadlineSeconds": 600,
+            "template": {"metadata": {"labels": MIGRATE_LABELS}, "spec": hook_pod},
+        }
+        objects["Service"]["spec"]["type"] = "NodePort"
+        objects["Service"]["spec"]["ports"][0]["port"] = 8443
+        objects["ServiceAccount"]["metadata"]["name"] = "named"
+        objects["PodDisruptionBudget"]["spec"]["maxUnavailable"] = 2
+        objects["NetworkPolicy"]["spec"] = expected_policy(
+            dns=dns, postgres_port=6432, https_ports=(443, 8443)
+        )
+
+    variant(problems, "every pass-through value moved", moved, everything)
     deployment = one(moved, "Deployment")
     template = dig(deployment, "spec", "template", "metadata") or {}
     account = dig(one(moved, "ServiceAccount", "named"), "metadata", "name")
@@ -2567,6 +3035,8 @@ def values_passed_on(_docs: list[dict]) -> list[str]:
 SECTIONS: dict[str, list[Callable[[list[dict]], list[str]]]] = {
     "core": [
         core_objects,
+        core_whole,
+        core_defaults,
         core_notes,
         core_no_secret,
         core_settings,
@@ -2624,6 +3094,16 @@ def main() -> int:
             )
     for problem in problems:
         print(f"FAILED: {problem}", file=sys.stderr)
+    if problems:
+        # A deliberate change shows as one line per render that takes it: say where it goes.
+        print(
+            "If a change to the chart is deliberate, change what this check expects in the "
+            f"same commit: the constants at the top of {Path(__file__).name} feed every "
+            "render (DEFAULTS for values.yaml, NOTES for the notes, expected_leader_pod, "
+            "expected_job_pod and expected_policy for the objects), and the README's "
+            '"Deploy the leader" repeats the defaults in its tables and prose.',
+            file=sys.stderr,
+        )
     print(f"{sum(_runs.values())} Helm runs: {_runs['rendered']} rendered, {_runs['refused']} not")
     if not problems:
         print(f"the rendered chart is exactly what it must be ({', '.join(chosen)})")

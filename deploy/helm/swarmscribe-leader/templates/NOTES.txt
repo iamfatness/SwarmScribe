@@ -40,7 +40,7 @@ that enforces NetworkPolicy; check that yours does.
 {{- if include "swarmscribe-leader.signIn" . }}
 
 The pods are Ready whether or not they can reach the identity provider. If `login` is
-answered 503 "sign-in cannot be checked right now" after some seconds, the leader cannot
+answered 503 "sign-in cannot be checked right now" after about 3 seconds, the leader cannot
 fetch the provider's keys: look in its log for "sign-in keys could not be fetched", and at
 the HTTPS egress (networkPolicy.egress.https, or the proxy your cluster needs).
 {{- end }}

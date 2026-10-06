@@ -3,7 +3,9 @@
 # one entry in `storage.volumes`, and with the NetworkPolicy on (the default)
 # `networkPolicy.egress.postgres.peers` and `networkPolicy.ingress.from`.
 # A key this file does not have is refused (values.schema.json): a misspelt one would
-# otherwise be silently without effect. Kubernetes 1.27 or later.
+# otherwise be silently without effect. So is a key set to null or left blank (`enabled:`),
+# which would remove the default with it; the three values where null means something say
+# so. Kubernetes 1.27 or later.
 
 # Names. fullnameOverride replaces <release>-swarmscribe-leader as the base of every object
 # name; either way the base is cut to 55 characters, so that -migrate still fits the 63 a
@@ -142,8 +144,9 @@ extraEnv: []
 # mounts one volume you provide into every leader pod; a location's root
 # (`swarmscribe-admin locations add NAME --root /data/recordings`) is a folder inside one.
 #   - name: recordings              a DNS label, unique
-#     mountPath: /data/recordings   absolute, unique; never /, and never the image's own
-#                                   folders (/app, /etc, /tmp, /usr and the like)
+#     mountPath: /data/recordings   absolute, unique; never /, never the image's own
+#                                   folders (/app, /etc, /tmp, /usr and the like), and
+#                                   not /var, /home or /opt themselves (a folder in them is fine)
 #     existingClaim: recordings     a PersistentVolumeClaim you created ...
 #     # volume: {nfs: {server: nas.internal, path: /exports/recordings}}   ... or a volume source
 #     readOnly: false               true: recordings can be read, transcripts cannot be written
@@ -153,6 +156,9 @@ extraEnv: []
 # makes an empty volume per pod. Everything else is refused: emptyDir and ephemeral (a
 # folder per pod, lost with it), hostPath (a folder per node, and the node's filesystem in
 # the pod), secret, configMap, projected and downwardAPI (not storage).
+# On a cluster of ONE node (kind, k3s, a development machine), where a hostPath is
+# tempting: make a claim instead. The `local-path` storage class those clusters ship with
+# gives a claim a folder of the node, which is the same thing with nothing opened to the pod.
 # EVERY REPLICA MUST SEE THE SAME FILES. With pods on more than one node that means a
 # ReadWriteMany claim (NFS, CephFS, Azure Files, Filestore, ...). A ReadWriteOnce claim
 # works only while every leader pod is on one node, and a rollout whose new pod lands on
@@ -236,10 +242,11 @@ resources:
 updateStrategy: RollingUpdate
 
 # A stopping pod waits this long before the leader is told to stop, so that Services and
-# ingress controllers stop sending it new requests first. Then the leader finishes the
-# requests in hand, for as long as the grace period lasts: what is still running when
-# terminationGracePeriodSeconds is over is cut off with the pod (the follower retries).
-# terminationGracePeriodSeconds must be longer than preStopSleepSeconds.
+# ingress controllers stop sending it new requests first. Then the leader gives the
+# requests in hand 10 seconds, and has ended about 17 seconds after it was told to,
+# whatever its database does; a transfer still running after those 10 seconds is cut (the
+# follower retries). terminationGracePeriodSeconds must be at least preStopSleepSeconds
+# plus 25, so that the pod is never killed in the middle of stopping.
 preStopSleepSeconds: 5
 terminationGracePeriodSeconds: 60
 
@@ -312,12 +319,16 @@ networkPolicy:
     #     ports: [{protocol: TCP, port: 3128}]
     extra: []
 
+# The leader never calls the Kubernetes API and its pods mount no token. For an account
+# with annotations of your own (workload identity for a storage driver), make it yourself:
+# create: false and its name.
 serviceAccount:
   create: true
   name: ""
 
-# For the leader pods (not the migration Job's). The chart's own labels
-# (app.kubernetes.io/..., helm.sh/chart) and checksum/settings are refused here.
+# For the leader pods (not the migration Job's). The six labels the chart writes itself
+# (app.kubernetes.io/name, instance, component, version, managed-by; helm.sh/chart) and the
+# annotation checksum/settings are refused here; any other is yours.
 podAnnotations: {}
 podLabels: {}
 nodeSelector: {}

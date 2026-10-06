@@ -94,8 +94,8 @@ spec:
             failureThreshold: 3
           {{- if gt (int .Values.preStopSleepSeconds) 0 }}
           # The pod is taken out of the Service while it still answers: only then is the
-          # leader told to stop. It then finishes the requests it has, for as long as the
-          # grace period lasts.
+          # leader told to stop. It then has 10 seconds for the requests in hand and is
+          # gone within about 17, well inside the grace period.
           lifecycle:
             preStop:
               exec:

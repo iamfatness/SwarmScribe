@@ -85,6 +85,23 @@ is https and has no port. */}}
 {{/* Fails the render on values that would deploy a leader that cannot start, cannot be
 administered, or is cut off. */}}
 {{- define "swarmscribe-leader.validate" -}}
+{{- /* A value written as null (or left blank: `enabled:`) is dropped by Helm before the
+schema sees it, and the key's default goes with it: `networkPolicy.enabled: null` would
+render no policy and say nothing. The schema requires every key; this is the second line. */}}
+{{- range $path := splitList " " (include "swarmscribe-leader.requiredValues" $) }}
+{{- $node := $.Values }}
+{{- $found := true }}
+{{- range $key := splitList "." $path }}
+{{- if and $found (kindIs "map" $node) (hasKey $node $key) }}
+{{- $node = index $node $key }}
+{{- else }}
+{{- $found = false }}
+{{- end }}
+{{- end }}
+{{- if or (not $found) (kindIs "invalid" $node) }}
+{{- fail (printf "%s is null: a value that is null, or left blank, removes the chart's default with it. Give it a value, or leave the line out" $path) }}
+{{- end }}
+{{- end }}
 {{- $_ := include "swarmscribe-leader.host" . }}
 {{- $_ := required "secrets.existingSecret is required: the Secret holding the database URL and the link key" .Values.secrets.existingSecret }}
 {{- $entra := .Values.oidc.entra.enabled }}
@@ -128,6 +145,9 @@ without effect) are all refused. The schema says the same; this is the second li
 {{- if not (or (kindIs "string" $value) (kindIs "float64" $value) (kindIs "int64" $value) (kindIs "int" $value)) }}
 {{- fail (printf "settings.%s must be a number or a string (got %s)" $name (kindOf $value)) }}
 {{- end }}
+{{- if and (not (kindIs "string" $value)) (gt (float64 $value) 2147483647.0) }}
+{{- fail (printf "settings.%s is too large (%v): at most 2147483647" $name $value) }}
+{{- end }}
 {{- end }}
 {{- /* The leader's own two rules across settings (config.py), with its defaults for what is
 not set: a leader that broke one would refuse to start, and the migration Job with it. */}}
@@ -156,11 +176,12 @@ leader reads its environment case-insensitively, so the prefix is compared in up
 {{- end }}
 {{- $extra = append $extra .name }}
 {{- end }}
-{{- /* The chart's own labels and its checksum are not the operator's to replace: a changed
-selector label fails at the API server, after the migration hook has already run. */}}
+{{- /* The six labels the chart writes itself, and its checksum, are not the operator's to
+replace: a changed selector label fails at the API server, after the migration hook has
+already run. Any other label is theirs (app.kubernetes.io/part-of, for one). */}}
 {{- range $key, $_ := .Values.podLabels }}
-{{- if or (hasPrefix "app.kubernetes.io/" $key) (eq $key "helm.sh/chart") }}
-{{- fail (printf "podLabels must not set %s: the chart sets it, and the Deployment's selector, the Service and the NetworkPolicy match on it" $key) }}
+{{- if has $key (list "app.kubernetes.io/name" "app.kubernetes.io/instance" "app.kubernetes.io/component" "app.kubernetes.io/version" "app.kubernetes.io/managed-by" "helm.sh/chart") }}
+{{- fail (printf "podLabels must not set %s: the chart writes that label itself (the Deployment's selector, the Service and the NetworkPolicy match on name, instance and component)" $key) }}
 {{- end }}
 {{- end }}
 {{- if hasKey .Values.podAnnotations "checksum/settings" }}
@@ -194,10 +215,15 @@ a service-account token into a pod the chart says has none). */}}
 {{- if or (ne $path $entry.mountPath) (eq $path "/") }}
 {{- fail (printf "storage.volumes %q: mountPath %q must be a clean absolute path, and not /" $entry.name $entry.mountPath) }}
 {{- end }}
-{{- range $root := list "/app" "/bin" "/boot" "/dev" "/etc" "/lib" "/lib64" "/proc" "/run" "/sbin" "/sys" "/tmp" "/usr" }}
+{{- range $root := list "/app" "/bin" "/boot" "/dev" "/etc" "/lib" "/lib64" "/proc" "/root" "/run" "/sbin" "/sys" "/tmp" "/usr" "/var/run" }}
 {{- if or (eq $path $root) (hasPrefix (printf "%s/" $root) $path) }}
 {{- fail (printf "storage.volumes %q: mountPath %q is %s or under it, which is the image's own (the leader's files are in /app, and it needs no /tmp). Mount storage somewhere of its own, for example /data" $entry.name $entry.mountPath $root) }}
 {{- end }}
+{{- end }}
+{{- /* A folder under these is fine (/var/lib/recordings, /opt/recordings); the folder
+itself would hide everything the image has there. */}}
+{{- if has $path (list "/var" "/home" "/opt") }}
+{{- fail (printf "storage.volumes %q: mountPath %q would hide the image's own %s. Mount storage in a folder of its own, for example /data or %s/recordings" $entry.name $entry.mountPath $path $path) }}
 {{- end }}
 {{- with $entry }}
 {{- if or (has .name $names) (has $path $paths) }}
@@ -219,8 +245,12 @@ whatever the controller makes of it: "/*" is everything on some). */}}
 {{- if and .Values.ingress.enabled (not .Values.ingress.tls.secretName) }}
 {{- fail "ingress.tls.secretName is required: the leader is published over TLS only" }}
 {{- end }}
-{{- if le (int .Values.terminationGracePeriodSeconds) (int .Values.preStopSleepSeconds) }}
-{{- fail "terminationGracePeriodSeconds must be longer than preStopSleepSeconds: the leader would be killed before it is asked to stop" }}
+{{- /* A leader told to stop ends within about 17 seconds whatever its database does: 10
+for the requests in hand, 6 for a running background step, 1 for its connections. The
+grace period must leave room for that after the preStop sleep, or the pod is killed
+mid-stop (exit status 137) on every rollout. */}}
+{{- if lt (int .Values.terminationGracePeriodSeconds) (add 25 (int .Values.preStopSleepSeconds)) }}
+{{- fail (printf "terminationGracePeriodSeconds (%d) must be at least preStopSleepSeconds (%d) plus 25: the leader is told to stop only after the preStop sleep, and then takes up to about 17 seconds to finish the requests in hand and close its connections. A shorter period kills it before it has stopped" (int .Values.terminationGracePeriodSeconds) (int .Values.preStopSleepSeconds)) }}
 {{- end }}
 {{- if .Values.networkPolicy.enabled }}
 {{- if not .Values.networkPolicy.egress.postgres.peers }}
@@ -249,6 +279,14 @@ of ports means every port: an empty value would open the policy, not close it. *
 {{- end }}
 {{- end }}
 {{- end }}
+{{- end }}
+
+{{/* Every key of values.yaml that must have a value (all of them, at every depth of a map
+the chart owns, but storage.fsGroup, networkPolicy.ingress.from and
+networkPolicy.egress.postgres.peers, where null means something). ci/check_render.py derives
+the same list from values.yaml and fails when they differ. */}}
+{{- define "swarmscribe-leader.requiredValues" -}}
+nameOverride fullnameOverride replicaCount image image.repository image.tag image.digest image.pullPolicy imagePullSecrets publicUrl allowHttpPublicUrl secrets secrets.existingSecret secrets.keys secrets.keys.databaseUrl secrets.keys.linkKey secrets.keys.entraClientSecret secrets.keys.googleClientSecret secrets.keys.googleServiceAccount oidc oidc.allowNone oidc.entra oidc.entra.enabled oidc.entra.tenantId oidc.entra.clientId oidc.entra.clientSecret oidc.google oidc.google.enabled oidc.google.clientId oidc.google.hostedDomain oidc.google.serviceAccount roles roles.viewer roles.viewer.entraGroups roles.viewer.googleGroups roles.viewer.emails roles.viewer.domains roles.operator roles.operator.entraGroups roles.operator.googleGroups roles.operator.emails roles.operator.domains roles.admin roles.admin.entraGroups roles.admin.googleGroups roles.admin.emails roles.admin.domains settings extraEnv storage storage.volumes storage.supplementalGroups port service service.type service.port ingress ingress.enabled ingress.className ingress.annotations ingress.tls ingress.tls.secretName ingress.paths migrate migrate.enabled migrate.backoffLimit migrate.activeDeadlineSeconds migrate.resources resources updateStrategy preStopSleepSeconds terminationGracePeriodSeconds podDisruptionBudget podDisruptionBudget.enabled podDisruptionBudget.maxUnavailable networkPolicy networkPolicy.enabled networkPolicy.ingress networkPolicy.ingress.anySource networkPolicy.egress networkPolicy.egress.dns networkPolicy.egress.dns.peers networkPolicy.egress.postgres networkPolicy.egress.postgres.port networkPolicy.egress.https networkPolicy.egress.https.ports networkPolicy.egress.https.cidrs networkPolicy.egress.https.extraExcept networkPolicy.egress.extra serviceAccount serviceAccount.create serviceAccount.name podAnnotations podLabels nodeSelector tolerations affinity spreadAcrossNodes topologySpreadConstraints
 {{- end }}
 
 {{/* The names `settings` takes: every setting of the leader (config.py) that is not a

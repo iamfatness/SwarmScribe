@@ -1,4 +1,5 @@
-import { expect, signIn, test } from "./support";
+import type { Page } from "@playwright/test";
+import { expect, signIn, test, widenFonts } from "./support";
 
 /** The console tests' credential shape (console_testkit.CREDENTIAL): 43 URL-safe characters. */
 const CREDENTIAL = "c".repeat(20) + "_-" + "D".repeat(21);
@@ -91,8 +92,7 @@ test("the console refuses a leader address it may not call", async ({ page }) =>
   await expect(dialog.getByRole("alert")).toContainText("The console may not call that address.");
 });
 
-test("a leader's address is on one line at 1280, 900 and 768, never broken after https://", async ({ page }) => {
-  await signIn(page, "admin", "/admin/leaders");
+async function expectAddressesOnOneLine(page: Page): Promise<void> {
   for (const width of [1280, 900, 768]) {
     await page.setViewportSize({ width, height: 900 });
     const region = page.getByRole("region", { name: "Registered leaders" });
@@ -111,6 +111,18 @@ test("a leader's address is on one line at 1280, 900 and 768, never broken after
     // And the table still fits its region: the room came from the columns beside it.
     expect(await region.evaluate((el) => el.scrollWidth - el.clientWidth), `at ${width}`).toBeLessThanOrEqual(1);
   }
+}
+
+test("a leader's address is on one line at 1280, 900 and 768, never broken after https://", async ({ page }) => {
+  await signIn(page, "admin", "/admin/leaders");
+  await expectAddressesOnOneLine(page);
+});
+
+// And on a machine whose system fonts are wider (see widenFonts): the room is still found.
+test("a leader's address is on one line at 1280, 900 and 768 in the widest system fonts", async ({ page }) => {
+  await signIn(page, "admin", "/admin/leaders");
+  await widenFonts(page);
+  await expectAddressesOnOneLine(page);
 });
 
 test("the last console administrator cannot be removed", async ({ page }) => {

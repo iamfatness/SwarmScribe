@@ -194,6 +194,16 @@ td.actions > :last-child {
   margin-right: 0;
 }
 
+/* A row with several actions, one of them long (a leader's): they sit side by side while there
+   is room and go onto a second line before the table would need a sideways scroll. How much
+   room there is depends on the system font, which is wider on some machines than on others,
+   so the row is never counted on to fit. */
+.action-set {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .action {
   display: inline-flex;
   flex-direction: column;
@@ -466,6 +476,26 @@ html:has(dialog[open]) {
 
   td.actions > :last-child {
     margin-bottom: 0;
+  }
+
+  /* Stacked as the others are. A long name ("Replace credential") goes onto two lines when the
+     font is too wide for the column, and beside these "by {who}" always has its own line: so
+     the room an address needs to stay on one line is taken from the buttons, last of all. */
+  .action-set {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+  }
+
+  .action-set .button {
+    padding-top: 5px;
+    padding-bottom: 5px;
+    text-align: center;
+    white-space: normal;
+  }
+
+  tr:has(.action-set) .by-line {
+    display: block;
   }
 }
 

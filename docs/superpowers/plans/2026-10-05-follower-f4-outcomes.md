@@ -197,16 +197,25 @@ the leader image `swarmscribe-leader:f4-e2e`.
 
 Everything above was run without the service control manager. This procedure is the one
 part of F4 that needs an administrator: it registers the service on the development machine,
-runs it against the test leader on the GPU, stops it mid-job and removes it again. About
-fifteen minutes, plus the 3 GB download of `large-v3` at step 4. **If a step does not show
-what it should, stop, paste what it printed under "Result" below, and go to step 7 (undo).**
+runs it against the test leader on the GPU, checks it from an elevated prompt, stops it
+mid-job and removes it again. About fifteen minutes, plus the 3 GB download of `large-v3` at
+step 4. **If a step does not show what it should, stop, paste what it printed under "Result"
+below, and go to step 8 (undo).**
 
-All of it in one PowerShell 5.1 window opened with "Run as administrator", in the order
-given. Every "Should show" below is derived from the code and from `service install --print`;
-none of it has been run under the control manager: it is **expected, not proven**, and where
-this document says "unproven" it is the first time the thing is tried.
+This procedure assumes a machine with **no earlier install** of the follower: it creates
+`C:\Program Files\swarmscribe-follower` and `C:\ProgramData\swarmscribe-follower` and the
+service `SwarmScribeFollower`, and step 8 deletes exactly those three things and nothing else.
+Step 0 refuses to go on if any of them already exists, so that step 8 can never remove
+something this procedure did not make.
 
-**0. Nothing from before is in the way:**
+Step 1 is run in a normal (not elevated) PowerShell 5.1 window; every other step in one
+PowerShell 5.1 window opened with "Run as administrator", in the order given. Every "Should
+show" below is derived from the code (`windows.py`, `winacl.py`, `main.py`) and from the
+output of `service install --print`; none of it has been run under the control manager: it is
+**expected, not proven**, and where this document says "unproven" it is the first time the
+thing is tried.
+
+**0. Nothing from before is in the way** (elevated window):
 
 ```powershell
 cd C:\Users\walla\SwarmScribe-f4
@@ -216,31 +225,42 @@ Test-Path "C:\Program Files\swarmscribe-follower"
 ```
 
 Should show: `[SC] EnumQueryServicesStatus:OpenService FAILED 1060:` (no such service), then
-`False` twice. If either folder exists, look at what is in it before going on:
-`service install` refuses a data folder that an account other than an administrator made.
+`False` twice. **If the service exists, or either path says `True`: STOP.** Something was
+installed or made there before this procedure, and step 8 would delete it; do not go on.
+Look at what is there, and remove or rename it yourself if it is yours to remove (`service
+install` would refuse such a folder anyway, and says to remove or rename it).
 
-**1. The test leader and the wheels** (the agent's runs left the wheels in
-`e2e\follower-windows\work\dist` and removed the leader; this makes both). The driver uses only
-Python's standard library, so it is run with plain `python`; `$env:UV` is how it runs uv.
-About 15 seconds when the wheels are cached.
+**1. The test leader and the wheels** (a normal, not elevated window: nothing in `up` needs an
+administrator, and run from an elevated window it would leave `e2e\follower-windows\work`
+owned by Administrators). The agent's runs left the leader removed; the wheels are rebuilt
+from the current code each time. The driver uses only Python's standard library, so it is run
+with plain `python`; `$env:UV` is how it runs uv. About 15 seconds when uv's packages are
+cached.
 
 ```powershell
+cd C:\Users\walla\SwarmScribe-f4
 $env:Path += ";C:\Users\walla\AppData\Local\Programs\DockerDesktop\resources\bin"
 $env:UV = "python -m uv"
 $env:LEADER_IMAGE = "swarmscribe-leader:f4-e2e"
 python e2e/follower-windows/run_e2e.py up
 ```
 
-Should end: `up: a leader at http://127.0.0.1:18080; swarmscribe-follower 0.1.0 in ...`. (The
-driver's `token`, `recording` and `state` commands, used below, were run from a non-elevated
-PowerShell against such a leader; an elevated window has not been tried.)
+Should end: `up: a leader at http://127.0.0.1:18080; swarmscribe-follower 0.1.0 in ...`. The leader
+keeps running in Docker for the rest of the procedure. The driver's `token`, `recording` and
+`state` commands, used below from the elevated window, only talk to Docker; they were run from
+a non-elevated window, an elevated one has not been tried (if Docker refuses there, run them
+from the normal window; the token's path is the only thing they write).
 
-**2. Install the follower for the machine, and register the service.** The Python the service
-runs on is the one the next lines make: uv's own, under `C:\Program Files`. The development
-machine's default Python (the Microsoft Store's) belongs to one user and `service install`
-refuses it on purpose, as it refuses anything under a user's profile.
+**2. Install the follower for the machine, and register the service** (elevated window). The
+Python the service runs on is the one the next lines make: uv's own, under `C:\Program
+Files`. The development machine's default Python (the Microsoft Store's) belongs to one user
+and `service install` refuses it on purpose, as it refuses anything under a user's profile.
 
 ```powershell
+cd C:\Users\walla\SwarmScribe-f4
+$env:Path += ";C:\Users\walla\AppData\Local\Programs\DockerDesktop\resources\bin"
+$env:UV = "python -m uv"
+$env:LEADER_IMAGE = "swarmscribe-leader:f4-e2e"
 $root = "C:\Program Files\swarmscribe-follower"
 $env:UV_PYTHON_INSTALL_DIR = "$root\python"
 $env:UV_TOOL_DIR = "$root\tools"
@@ -255,7 +275,8 @@ $follower = "$root\bin\swarmscribe-follower.exe"
 The `uv` lines take a few minutes the first time (the 700 MB cuBLAS wheel). `--print` changes
 nothing; it must show **no line that starts `warning:`** (that warning means the Python is
 refused: stop). It should show these lines (the Python's folder name follows the version uv
-installs; 3.12.15 when this was written):
+installs; 3.12.15 when this was written; the long number is the service's SID, which Windows
+derives from the name `SwarmScribeFollower` alone, so it is the same on every machine):
 
 ```
 folders: C:\ProgramData\swarmscribe-follower with state, models, logs inside
@@ -265,18 +286,25 @@ sc.exe create SwarmScribeFollower binPath= "\"C:\Program Files\swarmscribe-follo
 sc.exe description SwarmScribeFollower "Takes recordings from a SwarmScribe leader and transcribes them."
 sc.exe failure SwarmScribeFollower reset= 86400 actions= restart/60000/restart/60000//60000
 sc.exe failureflag SwarmScribeFollower 0
-icacls.exe C:\ProgramData\swarmscribe-follower /grant:r "NT SERVICE\SwarmScribeFollower:(OI)(CI)RX"
-icacls.exe C:\ProgramData\swarmscribe-follower\state /grant:r "NT SERVICE\SwarmScribeFollower:(OI)(CI)M"
-icacls.exe C:\ProgramData\swarmscribe-follower\models /grant:r "NT SERVICE\SwarmScribeFollower:(OI)(CI)M"
-icacls.exe C:\ProgramData\swarmscribe-follower\logs /grant:r "NT SERVICE\SwarmScribeFollower:(OI)(CI)M"
+icacls.exe C:\ProgramData\swarmscribe-follower /grant:r *S-1-5-80-274616168-3456989120-2567103782-416646175-3250980778:(OI)(CI)RX
+icacls.exe C:\ProgramData\swarmscribe-follower\state /grant:r *S-1-5-80-274616168-3456989120-2567103782-416646175-3250980778:(OI)(CI)M
+icacls.exe C:\ProgramData\swarmscribe-follower\models /grant:r *S-1-5-80-274616168-3456989120-2567103782-416646175-3250980778:(OI)(CI)M
+icacls.exe C:\ProgramData\swarmscribe-follower\logs /grant:r *S-1-5-80-274616168-3456989120-2567103782-416646175-3250980778:(OI)(CI)M
 ```
 
-(The `\"` are how Python prints the quotes; the program runs each as an argument list.)
-`service install` does them in this order: look at who owns anything already in the data
-folder; create the folder and at once lock it to Administrators and SYSTEM (inheritance
-removed); create `state`, `models`, `logs` and `follower.env`; `sc.exe create`, `description`,
-`failure`, `failureflag`; then grant the service's account read and execute on the folder and
-modify on the three folders; look at the owners again. Then, taking a few seconds:
+**The first `icacls` line (`/inheritance:r`, the lock) is printed always but runs only for a
+data folder that already existed**; `service install` makes a folder that is not there already
+protected, through the Windows API, with a list for SYSTEM and Administrators only. Step 0
+guarantees the folder is not there, so in this procedure that line does not run. (The
+`\"` are how Python prints the quotes; the program runs each as an argument list.) The grants
+name the service's account by SID, so they do not depend on the account's name resolving.
+
+`service install` does, in this order: look at everything under the data folder, if it exists
+(every owner must be Administrators, SYSTEM or the service's own account, and no junction or
+symbolic link at any depth; otherwise it refuses and says to remove or rename the folder);
+create the data folder protected; create `state`, `models`, `logs` (each refused if it is a
+link) and `follower.env`; `sc.exe create`, `description`, `failure`, `failureflag`; the four
+grants; look at the owners and links again. Then, taking a few seconds:
 
 ```powershell
 & $follower service install
@@ -291,9 +319,9 @@ lines (`1. set SWARMSCRIBE_LEADER_URL in ...\follower.env`, `2. put the join tok
 of two quoted paths (`...\python.exe` and `...\swarmscribe_follower\service_boot.py`, both under
 `C:\Program Files\swarmscribe-follower`) and `SERVICE_START_NAME : NT SERVICE\SwarmScribeFollower`;
 in `qfailure`, `RESET_PERIOD (in seconds) : 86400` and two `RESTART -- Delay = 60000
-milliseconds` lines. **Unproven: this is the first time the `sc.exe failure` and the `icacls`
-lines are run.** If `service install` stops with `error: ... failed: ...`, paste it; when it
-adds that the service was registered, step 7 removes it (its `service uninstall` comes first).
+milliseconds` lines. **Unproven: this is the first time the protected-folder creation, the
+`sc.exe failure` line and the grants by SID are run.** If `service install` stops with `error:
+...`, paste it; when it adds that the service was registered, step 8 removes it.
 
 **3. Its settings and its token** (the test leader is plain http, which needs the development
 switch; a one-second grace period, so that step 5 shows a recording handed back; the model and
@@ -310,39 +338,68 @@ icacls "$data\state"
 
 Should show: `wrote a pool token to C:\ProgramData\swarmscribe-follower\join-token (its name at the
 leader: owner-...)` (the token itself is printed nowhere); `icacls $data` three entries,
-`BUILTIN\Administrators:(OI)(CI)(F)`, `NT AUTHORITY\SYSTEM:(OI)(CI)(F)` and
-`NT SERVICE\SwarmScribeFollower:(OI)(CI)(RX)`, **and no entry for Users or Authenticated
-Users** (the folder is locked), then `Successfully processed 1 files with 0 failures` (or
-Windows' wording of it); `icacls "$data\state"` the same three, the service's with `(M)`. The
-`join-token` file takes the folder's list, so the service can read it.
+`BUILTIN\Administrators:(OI)(CI)(F)`, `NT AUTHORITY\SYSTEM:(OI)(CI)(F)` and the service's
+account, shown as `NT SERVICE\SwarmScribeFollower:(OI)(CI)(RX)` (or as the bare SID, if
+Windows does not resolve it), **and no entry for Users or Authenticated Users** (the folder is
+protected), then `Successfully processed 1 files; Failed processing 0 files`; `icacls
+"$data\state"` the same three, the service's with `(M)`. The `join-token` file takes the
+folder's list, so the service can read it.
 
 **4. Start it.** The control manager is told `RUNNING` before the model is loaded, so a state
 of `RUNNING` alone proves little: the log and `state` are the evidence. The first start
 downloads `large-v3` (3 GB) into `models`, as the service's account; the loop waits up to 15
-minutes for the follower to say it registered.
+minutes for the follower to say it registered, and gives up at once if the service has
+stopped.
 
 ```powershell
 sc.exe start SwarmScribeFollower
 for ($i = 0; $i -lt 90; $i++) {
     Start-Sleep 10
-    if (Select-String -Path "$data\logs\follower.log" -Pattern '"event": "registered"' -Quiet) { break }
+    if ((Get-Service SwarmScribeFollower).Status -eq 'Stopped') {
+        Write-Host "the service has stopped before it registered: read the log below"
+        break
+    }
+    if (Select-String -Path "$data\logs\follower.log" -Pattern '"event": "registered"' -Quiet -ErrorAction SilentlyContinue) { break }
 }
 sc.exe query SwarmScribeFollower
-Get-Content "$data\logs\follower.log" -Tail 6
+Get-Content "$data\logs\follower.log" -Tail 6 -ErrorAction SilentlyContinue
 python e2e/follower-windows/run_e2e.py state
 ```
 
-Should show: `STATE : 4 RUNNING`; in the log a line with `"message": "model large-v3 (float16)
-loaded on cuda"` and one with `"event": "registered"`; from `state`, one follower, `active`,
-`cuda` (`follower <8 hex> active cuda`). This step proves the control manager's start, the
-service's account and its folders, the token file, the state folder's check, and the GPU from
-a service. **Unproven, and the likeliest to surprise: the GPU from a service session.** If the
-state is `1 STOPPED`: `sc.exe query` shows `WIN32_EXIT_CODE : 1066` and a `SERVICE_EXIT_CODE`
-(2: settings, 3: this machine cannot do the work, 4: refused by the leader), and the log says
-why; a start-up failure of the code itself is `error: unexpected <ExceptionClassName>` in the
-log; if there is no log at all, the service never reached its own code: run `& $follower
-service foreground` in the window and paste what it prints (that is the same code, in a
-console, with your account's rights).
+(A service that ends without telling Windows, exit 3, is restarted by Windows after 60
+seconds, and shows `Stopped` in between; the loop would stop at that point, and the log says
+why.) Should show: `STATE : 4 RUNNING`; in the log a line with `"message": "model large-v3
+(float16) loaded on cuda"` and one with `"event": "registered"`; from `state`, one follower,
+`active`, `cuda` (`follower <8 hex> active cuda`). This step proves the control manager's
+start, the service's account and its folders, the token file, the state folder's check, and
+the GPU from a service. **Unproven, and the likeliest to surprise: the GPU from a service
+session.** If the state is `1 STOPPED`: `sc.exe query` shows `WIN32_EXIT_CODE : 1066` and a
+`SERVICE_EXIT_CODE` (2: settings, 3: this machine cannot do the work, 4: refused by the
+leader), and the log says why; a start-up failure of the code itself is `error: unexpected
+<ExceptionClassName>` in the log; if there is no log at all, the service never reached its own
+code: run `& $follower service foreground` in the window and paste what it prints (that is the
+same code, in a console, with your account's rights).
+
+**4b. `doctor`, run by you, against the service's own settings** (the service keeps running;
+it loads `large-v3` a second time on the GPU, about 3 GB more, for a few seconds):
+
+```powershell
+& $follower --env-file "$data\follower.env" doctor
+```
+
+Should show, one line per check, ending in `result: ready`: `settings: ok (leader
+http://127.0.0.1:18080, pool ...)`; **`state folder: ok (C:\ProgramData\swarmscribe-follower\state,
+... GiB free)`** and `scratch folder: ok (...)`; **`device: cuda (NVIDIA GeForce RTX 4090, 24564
+MiB)`** (the GPU); `cached models: large-v3`; **`model: large-v3 (float16) loaded and ran`**;
+**`leader: answers`**; `joined: yes`; `result: ready`. These three bold lines are the ones that
+say the GPU, the state folder and the leader are fine. This works only because the follower
+trusts the service's own account on its folder when the process is an elevated administrator:
+**expected but unproven.** From a window that is not elevated the same command is refused,
+which is by design (try it if you like): the state folder line reads `state folder: FAILED:
+... will not be trusted with the credential ...` and the last line `result: NOT READY (exit
+2)`. If the elevated run shows that refusal, the service's account was not recognised: paste
+it, and the rest of the procedure is unaffected, except that `leave` in step 8 will be refused
+the same way (then the credential is deleted with the folder).
 
 **5. Stop it in the middle of a recording, and start it again.** The recording is eight minutes
 of speech; the first loop waits until it is being transcribed, and the stop comes three seconds
@@ -369,11 +426,15 @@ python e2e/follower-windows/run_e2e.py state
 
 Should show: from `sc.exe stop`, `STATE : 3 STOP_PENDING` with `WAIT_HINT : 0x7918` (31000
 ms); eight seconds later `STATE : 1 STOPPED` with `WIN32_EXIT_CODE : 0`; from the first
-`state`, `talks/long.wav queued attempts=1 tried=['released']`; from the last, the same single `follower ... active
-cuda` and `talks/long.wav completed attempts=1` (eight minutes of audio take `large-v3` under
-a minute on this GPU; the loop waits at most five minutes). If the recording was already
-`completed` before the stop, or never `leased`, the timing missed: queue another (`recording
-again.wav 96`) and repeat this step with that name.
+`state`, the recording handed back and **not counted as an attempt** (the leader takes the
+attempt back when a follower releases): `talks/long.wav queued attempts=0 tried=['released']`;
+from the last, the same single `follower ... active cuda` and, the recording having been done
+again, `talks/long.wav completed attempts=1 tried=['released', 'completed']`. Eight minutes of
+audio should take `large-v3` about a minute on this GPU (expected, not measured: the agent's
+whole GPU scenario, with a recording of that length in it, took 1 min 13 s); the loop waits at
+most five minutes. If the recording was already `completed` before the stop, or never
+`leased`, the timing missed: queue another (`recording again.wav 96`) and repeat this step
+with that name.
 
 **6. (Optional) Windows restarts a follower that dies** (about 75 seconds):
 
@@ -387,15 +448,38 @@ Get-WinEvent -FilterHashtable @{LogName='System'; Id=7031} -MaxEvents 1 | Format
 Should show: `STATE : 4 RUNNING` again, and an entry that names the SwarmScribe Follower
 service, "terminated unexpectedly" and "Restart the service" (after 60000 milliseconds).
 
-**7. Undo everything.** The test leader, and with it the follower's registration there, go
-with `down`, so the follower need not be told to leave. `service uninstall` stops the service
-first; the name may stay busy for up to the grace period (one second here), hence the pause.
+**7. Leave the leader, as an elevated administrator.** The follower registered at the test
+leader in step 4; giving that registration up needs the leader still up (it is: `down` comes
+last) and the state folder's lock free, so the service is stopped first. `leave` deregisters at
+the leader and deletes the follower's stored credential from the service's state folder.
+
+```powershell
+sc.exe stop SwarmScribeFollower
+(Get-Service SwarmScribeFollower).WaitForStatus('Stopped', '00:01:00')
+& $follower --env-file "$data\follower.env" leave
+python e2e/follower-windows/run_e2e.py state
+```
+
+Should show: (`sc.exe stop` says it is stopping, or that it is not running if step 6 left it
+so); `left; the credential is deleted`; and from `state` the follower no longer `active`
+(`follower <8 hex> gone`, or `revoked`, or no follower line: the leader's word for a
+deregistered follower is not asserted here). Other outputs of `leave`: `the leader could not
+be told; it will notice the silence` (then the credential is still deleted), `this follower
+has not joined a leader` (nothing was stored), or, if the elevated administrator is not
+trusted for the service's folder, `error: ... will not be trusted with the credential ...`
+with exit 2 (expected but unproven, as in 4b; the credential is then removed with the folder
+in step 8, and the leader notices the silence or is torn down).
+
+**8. Undo everything.** Exactly what steps 2 and 3 created, and only if step 0 found the
+machine clean: the service (`service uninstall` stops it first; the name may stay busy for up
+to the grace period, one second here, hence the pause), the data folder, the tool folder, and
+then the test leader. Nothing else is touched.
 
 ```powershell
 & $follower service uninstall
 Start-Sleep 5
-Remove-Item -Recurse -Force "C:\ProgramData\swarmscribe-follower"
-Remove-Item -Recurse -Force "C:\Program Files\swarmscribe-follower"
+Remove-Item -LiteralPath "C:\ProgramData\swarmscribe-follower" -Recurse -Force
+Remove-Item -LiteralPath "C:\Program Files\swarmscribe-follower" -Recurse -Force
 python e2e/follower-windows/run_e2e.py down
 sc.exe query SwarmScribeFollower
 Test-Path "C:\ProgramData\swarmscribe-follower"
@@ -405,11 +489,13 @@ Test-Path "C:\Program Files\swarmscribe-follower"
 Should end: `removed the service SwarmScribeFollower. ...` from `service uninstall`; then
 `[SC] EnumQueryServicesStatus:OpenService FAILED 1060:` (the service does not exist) and
 `False` twice. If `service uninstall` fails, `sc.exe delete SwarmScribeFollower` does the same
-(`sc.exe stop SwarmScribeFollower` first if it is running). Nothing else was changed: uv's
-three variables lived in this window only. To remove the agent's work folder too (1.3 GB:
-uv's Python, the wheels and the follower installed without administrator rights), from any
-window: `Remove-Item -Recurse -Force e2e\follower-windows\work`. The `swarmscribe-leader:f4-e2e`
-image is kept.
+(`sc.exe stop SwarmScribeFollower` first if it is running): it names only the service step 2
+made. Nothing else was changed: uv's three variables lived in that window only, and `down`
+removes only the test leader's containers and network. The `swarmscribe-leader:f4-e2e` image
+is kept. To remove the harness's own work folder too (1.3 GB: uv's Python, the wheels and the
+follower installed without administrator rights; made by `up` and by the agent's runs), from a
+normal window: `Remove-Item -LiteralPath C:\Users\walla\SwarmScribe-f4\e2e\follower-windows\work
+-Recurse -Force` (from the elevated window, if step 1 was mistakenly run there).
 
 **Result** (the owner's, or an agent's from the owner's paste; date, and what each step
 showed):

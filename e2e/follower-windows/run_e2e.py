@@ -78,6 +78,9 @@ TOOL_PYTHON = WORK / "tools" / "swarmscribe-follower" / "Scripts" / "python.exe"
 ENV_FILE = WORK / "follower.env"
 TOKEN_FILE = WORK / "join-token"
 OUTPUT = WORK / "service-output.txt"
+# The follower this harness started: its pid and creation time, so that `down` can find a leftover
+# of a failed run by what it is, never by a name.
+PID_FILE = WORK / "service.pid"
 # Postgres needs a moment after its container starts.
 MIGRATE = "for i in $(seq 60); do swarmscribe-leader migrate && exit 0; sleep 2; done; exit 1"
 LONG_REPEATS = 96  # the 5-second speech fixture 96 times: eight minutes
@@ -160,17 +163,45 @@ def service_image() -> list[str]:
     return json.loads(printed)
 
 
+def creation_time(pid: int) -> int | None:
+    """When the process `pid` was created (a FILETIME), or None when there is no such process."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    handle = kernel.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        times = [wintypes.FILETIME() for _ in range(4)]
+        if not kernel.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+            return None
+        exited = wintypes.DWORD()
+        kernel.GetExitCodeProcess(handle, ctypes.byref(exited))
+        if exited.value != 259:  # STILL_ACTIVE
+            return None
+        return (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+    finally:
+        kernel.CloseHandle(handle)
+
+
+STARTED: list["Service"] = []  # every follower this run started, for the clean-up
+
+
 class Service:
     """The service's code in a console of its own, started by the service's own command."""
 
     def __init__(self) -> None:
         self._out = OUTPUT.open("w", encoding="utf-8")
+        STARTED.append(self)
         self.process = subprocess.Popen(
             [*service_image(), "--foreground", "--env-file", str(ENV_FILE)],
             stdout=self._out, stderr=subprocess.STDOUT, env=follower_env(),
             # A group of its own, so that the stop control below reaches it alone.
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
         )
+        PID_FILE.write_text(f"{self.process.pid} {creation_time(self.process.pid)}", "utf-8")
 
     def stop_control(self) -> None:
         self.process.send_signal(signal.CTRL_BREAK_EVENT)  # what Ctrl+Break sends
@@ -184,6 +215,17 @@ class Service:
             expect(False, f"the service did not end within {seconds:.0f} s:\n{said}")
         self._out.close()
         return code
+
+    def stop(self) -> None:
+        """Whatever state it is in, it is gone afterwards: terminate, then kill."""
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(10)
+        self._out.close()
 
     def output(self) -> str:
         return OUTPUT.read_text(encoding="utf-8", errors="replace")
@@ -240,7 +282,24 @@ def up() -> None:
     print(f"up: a leader at {LEADER_URL}; {run(str(FOLLOWER), '--version').strip()} in {WORK}")
 
 
+def leftover_follower() -> None:
+    """A follower of an earlier run that is still alive: found by the pid and creation time this
+    harness wrote down (a reused pid has another creation time), and stopped."""
+    if not PID_FILE.exists():
+        return
+    try:
+        pid, created = (int(part) for part in PID_FILE.read_text("utf-8").split())
+    except ValueError:
+        pid, created = 0, 0
+    if pid and creation_time(pid) == created:
+        print(f"down: a follower of an earlier run (pid {pid}) was still running; stopping it")
+        run("taskkill", "/PID", str(pid), "/T", "/F", check=False)
+    PID_FILE.unlink()
+
+
 def down() -> None:
+    if WORK.exists():
+        leftover_follower()
     for name in (LEADER, POSTGRES):
         docker("rm", "-f", "-v", name, check=False)
     docker("network", "rm", NETWORK, check=False)
@@ -256,6 +315,17 @@ def down() -> None:
 
 
 def scenario(cpu: bool) -> None:
+    """The scenario; whatever happens in it, the followers it started are stopped afterwards."""
+    try:
+        run_scenario(cpu)
+    finally:
+        for started in STARTED:
+            started.stop()
+        if PID_FILE.exists():
+            PID_FILE.unlink()
+
+
+def run_scenario(cpu: bool) -> None:
     device, model, compute = ("cpu", "tiny.en", "int8") if cpu else ("cuda", "large-v3", "float16")
     base = {"SWARMSCRIBE_FOLLOWER_DEVICE": device, "SWARMSCRIBE_FOLLOWER_STARTUP_MODEL": model}
     TOKEN_FILE.write_text(admin("pool-token", "outside", "default"), encoding="utf-8")

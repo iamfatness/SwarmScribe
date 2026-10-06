@@ -6,7 +6,7 @@ Run from the repository root (CI job `chart` does), with Helm on the PATH:
 
 It renders the chart with `helm template` and ci/test-values.yaml, checks the manifests, then
 renders it with values that must be refused. `--only core,storage` runs some sections only
-(core, storage, migrate, ingress, network). Exit status 1 lists every problem."""
+(core, storage, migrate, ingress, network, values). Exit status 1 lists every problem."""
 
 import argparse
 import ipaddress
@@ -67,6 +67,27 @@ MUST_BE_BLOCKED = (
 )
 # Identity providers and proxies live at addresses like these; none may be cut out.
 MUST_BE_ALLOWED = ("10.1.2.3", "192.168.1.50", "20.190.128.1", "142.250.1.1", "2606:4700::1111")
+CONTAINER_CONTEXT = {
+    "allowPrivilegeEscalation": False,
+    "readOnlyRootFilesystem": True,
+    "capabilities": {"drop": ["ALL"]},
+}
+POD_CONTEXT_KEYS = {
+    "runAsNonRoot",
+    "runAsUser",
+    "runAsGroup",
+    "fsGroup",
+    "fsGroupChangePolicy",
+    "supplementalGroups",
+    "seccompProfile",
+}
+SHARED_NAMESPACES = ("hostNetwork", "hostPID", "hostIPC", "shareProcessNamespace")
+# Template functions that make up a value, read the cluster, or decode a Secret. The chart
+# generates no secret and reads none: none of these has a place in it.
+FORBIDDEN_FUNCTIONS = re.compile(
+    r"\b(lookup|rand[A-Za-z]*|genCA\w*|genPrivateKey|genSelfSignedCert\w*|genSignedCert\w*"
+    r"|derivePassword|htpasswd|uuidv4|b64dec|b32dec|encryptAES|decryptAES|now|getHostByName)\b"
+)
 DIGEST = "sha256:" + "ab" * 32
 NAME_PATTERN = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?")
 
@@ -157,8 +178,16 @@ def check_pod(
         problems.append(f"{where}: no RuntimeDefault seccomp profile")
     if spec.get("automountServiceAccountToken") is not False:
         problems.append(f"{where}: the service-account token is mounted")
-    if spec.get("hostNetwork") or spec.get("hostPID") or spec.get("shareProcessNamespace"):
+    if pod.get("runAsGroup") != 10001:
+        problems.append(f"{where}: the pod's group is not 10001")
+    # Nothing else may be set on the pod: a later `sysctls` or `runAsUser: 0` beside these
+    # would pass every check above.
+    for key in sorted(set(pod) - POD_CONTEXT_KEYS):
+        problems.append(f"{where}: the pod's securityContext sets {key}")
+    if any(spec.get(key) for key in SHARED_NAMESPACES):
         problems.append(f"{where}: the pod shares a host or process namespace")
+    if len(spec["containers"]) != 1 or spec.get("initContainers"):
+        problems.append(f"{where}: more than the one container (none of the others is checked)")
     (found,) = [c for c in spec["containers"] if c["name"] == container]
     context = found.get("securityContext", {})
     if context.get("readOnlyRootFilesystem") is not True:
@@ -167,11 +196,17 @@ def check_pod(
         problems.append(f"{where}: privilege escalation is allowed")
     if context.get("capabilities", {}).get("drop") != ["ALL"]:
         problems.append(f"{where}: capabilities are not dropped")
+    # Exactly these three: `privileged`, `capabilities.add` or a `runAsUser: 0` on the
+    # container would undo them without touching them.
+    if context != CONTAINER_CONTEXT:
+        problems.append(f"{where}: the container's securityContext is {context}")
     names = set()
     for entry in found.get("env", []):
         names.add(entry["name"])
         if entry["name"] in SECRET_NAMES and "secretKeyRef" not in entry.get("valueFrom", {}):
             problems.append(f"{where}: {entry['name']} is not read from the Secret")
+        elif entry["name"] in SECRET_NAMES and "value" in entry:
+            problems.append(f"{where}: {entry['name']} also has a plain value")
     for needed in sorted(secrets):
         if needed not in names:
             problems.append(f"{where}: {needed} is missing")
@@ -199,10 +234,7 @@ def check_core(docs: list[dict]) -> list[str]:
         problems.append("NOTES: two replicas, and nothing says the volume must be shared")
     if "MUST SEE THE SAME FILES" in printed_notes("--set", "replicaCount=1"):
         problems.append("NOTES: one replica is told to share its volume with the others")
-    # Nothing of the Secret is printed: not its name, not a key of it.
-    for word in ("swarmscribe-leader\n", "database-url", "link-key", "client-secret"):
-        if word in printed:
-            problems.append(f"NOTES: {word.strip()!r} (the Secret, or a key of it) is printed")
+    problems += check_no_secret_is_made()
     deployment = one(docs, "Deployment")
     if deployment["spec"]["replicas"] != 2:
         problems.append("Deployment: the default is not 2 replicas")
@@ -219,13 +251,32 @@ def check_core(docs: list[dict]) -> list[str]:
         problems.append("Deployment: the image's entrypoint is replaced")
     if leader["image"] != "swarmscribe-leader:local":
         problems.append("Deployment: the image is not image.repository:image.tag")
+    if leader["ports"][0].get("name") != "http":
+        problems.append("Deployment: the container port is not named http")
     for probe, path in (
         ("startupProbe", "/healthz"),
         ("livenessProbe", "/healthz"),
         ("readinessProbe", "/readyz"),
     ):
-        if leader.get(probe, {}).get("httpGet", {}).get("path") != path:
+        asked = leader.get(probe, {}).get("httpGet", {})
+        if asked.get("path") != path:
             problems.append(f"Deployment: {probe} does not ask {path} with GET (httpGet)")
+        if asked.get("port") != "http" or asked.get("scheme", "HTTP") != "HTTP" or "host" in asked:
+            problems.append(f"Deployment: {probe} does not ask the leader's own port over HTTP")
+    if "readinessProbe" not in leader or "livenessProbe" not in leader:
+        raise SystemExit("Deployment: the leader has no readiness or no liveness probe")
+    # The settings reach the leader through the ConfigMap, and only that way.
+    if leader.get("envFrom") != [{"configMapRef": {"name": NAME}}]:
+        problems.append("Deployment: the leader does not read its settings from the ConfigMap")
+    # A changed setting restarts the pods; an unchanged one does not.
+    marks = [
+        one(rendered, "Deployment")["spec"]["template"]["metadata"]["annotations"].get(
+            "checksum/settings"
+        )
+        for rendered in (docs, render(), render("--set-string", "settings.LEASE_SECONDS=121"))
+    ]
+    if not marks[0] or marks[0] != marks[1] or marks[0] == marks[2]:
+        problems.append("Deployment: the pods' checksum does not follow the settings")
     if leader["readinessProbe"].get("timeoutSeconds", 1) < 5:
         problems.append("Deployment: the readiness timeout is under 5 s (the check takes up to 3)")
     if "/readyz" in str(leader["startupProbe"]) or "/readyz" in str(leader["livenessProbe"]):
@@ -389,6 +440,15 @@ def check_core(docs: list[dict]) -> list[str]:
         ("a lower-case setting name", "settings.lease_seconds=4"),
     ):
         refused(problems, what, value)
+    # All twelve role lists, each under the name the leader reads it by.
+    every = {"entraGroups": ["g"], "googleGroups": ["g@example.org"]}
+    every |= {"emails": ["a@example.org"], "domains": ["example.org"]}
+    all_roles = {"roles": dict.fromkeys(("viewer", "operator", "admin"), every)}
+    full = one(render_with(all_roles), "ConfigMap")
+    role_names = {name for name in full["data"] if name.startswith("SWARMSCRIBE_ROLE_")}
+    if len(role_names) != 12:
+        problems.append(f"ConfigMap: {len(role_names)} role lists are rendered, not twelve")
+    problems += check_setting_names(full["data"])
     # ROLE_CACHE_SECONDS is a setting like any other: no chart value sets it.
     cached = render_with({"settings": {"ROLE_CACHE_SECONDS": 60}})
     if one(cached, "ConfigMap")["data"].get("SWARMSCRIBE_ROLE_CACHE_SECONDS") != "60":
@@ -460,6 +520,13 @@ def check_core(docs: list[dict]) -> list[str]:
         {"publicUrl": "http://leader.example.org", "allowHttpPublicUrl": True},
         says="https:// with the Ingress on",
     )
+    # With the Ingress off, only allowHttpPublicUrl stands between http:// and a render.
+    refused_file(
+        problems,
+        "an http publicUrl with the Ingress off and no allowHttpPublicUrl",
+        {"publicUrl": "http://leader.example.org", "ingress": {"enabled": False}},
+        says="publicUrl must be https://",
+    )
     # What the kind test uses: plain http to the Service's name, no Ingress.
     inside = render_with(
         {
@@ -512,6 +579,58 @@ def check_core(docs: list[dict]) -> list[str]:
 
     problems += check_names()
     problems += check_quoting()
+    return problems
+
+
+def check_no_secret_is_made() -> list[str]:
+    """The chart never generates, reads, prints or stores a secret."""
+    problems: list[str] = []
+    for source in sorted((CHART / "templates").iterdir()):
+        text = source.read_text(encoding="utf-8")
+        for action in re.findall(r"\{\{.*?\}\}", text, flags=re.DOTALL):
+            if action.lstrip("{- ").startswith("/*"):
+                continue
+            # Function names only: not the words of a message.
+            called = re.sub(r'"(\\.|[^"\\])*"|`[^`]*`', '""', action)
+            for found in FORBIDDEN_FUNCTIONS.findall(called):
+                problems.append(f"{source.name}: the template calls {found}")
+    # The same values give the same manifests: nothing in them is made up at render time.
+    first, second = helm_template(), helm_template()
+    if first.stdout != second.stdout:
+        problems.append("two renders of the same values differ: something is generated")
+    # The Secret is referred to by name and key in secretKeyRef, and nowhere else: not in
+    # the ConfigMap, an annotation, an argument or the notes.
+    marked = {
+        "secrets": {
+            "existingSecret": "zz-secret",
+            "keys": {
+                "databaseUrl": "zz-database-url",
+                "linkKey": "zz-link-key",
+                "entraClientSecret": "zz-entra",
+                "googleClientSecret": "zz-google",
+                "googleServiceAccount": "zz-account",
+            },
+        }
+    }
+    path = str(values_file(marked))
+    if "zz-" in printed_notes("-f", path):
+        problems.append("NOTES: the Secret's name or one of its keys is printed")
+
+    def strays(node: object, under: str) -> list[str]:
+        if isinstance(node, dict):
+            return [
+                where
+                for key, value in node.items()
+                if key != "secretKeyRef"
+                for where in strays(value, f"{under}.{key}")
+            ]
+        if isinstance(node, list):
+            return [where for item in node for where in strays(item, under)]
+        return [under] if isinstance(node, str) and "zz-" in node else []
+
+    for doc in render("-f", path):
+        for where in strays(doc, doc["kind"]):
+            problems.append(f"{where}: holds the Secret's name or a key outside a secretKeyRef")
     return problems
 
 
@@ -715,6 +834,21 @@ def check_migrate(docs: list[dict]) -> list[str]:
         problems.append("Job: an old or succeeded Job is not removed")
     if "hook-failed" in policy:
         problems.append("Job: a failed Job is removed, and its log with it")
+    # The three annotations, as written: the chart has one hook, at weight 0, and anything
+    # that is to run before or after it is placed against that.
+    if hooks != {
+        "helm.sh/hook": "pre-install,pre-upgrade",
+        "helm.sh/hook-weight": "0",
+        "helm.sh/hook-delete-policy": "before-hook-creation,hook-succeeded",
+    }:
+        problems.append(f"Job: its annotations are {hooks}")
+    hooked = [
+        f"{doc['kind']} {doc['metadata']['name']}"
+        for doc in docs
+        if "helm.sh/hook" in doc["metadata"].get("annotations", {})
+    ]
+    if hooked != [f"Job {NAME}-migrate"]:
+        problems.append(f"the chart's hooks are {hooked}, not the migration Job alone")
     spec = job["spec"]["template"]["spec"]
     migrate = check_pod(spec, "migrate", problems, "Job", SECRET_NAMES)
     if migrate["args"] != ["migrate"]:
@@ -886,6 +1020,14 @@ def check_network(docs: list[dict]) -> list[str]:
         problems.append("NetworkPolicy: does not select the leader pods")
     if "app.kubernetes.io/component" in selector:
         problems.append("NetworkPolicy: leaves the migration pod out")
+    # This release's pods and no other's: the Service's selector, without the component.
+    service = dict(one(docs, "Service")["spec"]["selector"])
+    service.pop("app.kubernetes.io/component", None)
+    if selector != service or "app.kubernetes.io/instance" not in selector:
+        problems.append(f"NetworkPolicy: selects {selector}, not every pod of this release only")
+    job_labels = one(docs, "Job", f"{NAME}-migrate")["spec"]["template"]["metadata"]["labels"]
+    if any(job_labels.get(k) != v for k, v in selector.items()):
+        problems.append("NetworkPolicy: does not select the migration pod")
 
     (inbound,) = policy["ingress"]
     if inbound["ports"] != [{"protocol": "TCP", "port": 8080}]:
@@ -989,12 +1131,130 @@ def check_network(docs: list[dict]) -> list[str]:
     return problems
 
 
+def check_values(docs: list[dict]) -> list[str]:
+    """Every value that is a plain pass-through arrives: none is hard-coded at its default."""
+    problems: list[str] = []
+    account = one(docs, "ServiceAccount")
+    if account.get("automountServiceAccountToken") is not False:
+        problems.append("ServiceAccount: it mounts its token")
+    if pod_spec(docs).get("serviceAccountName") != NAME:
+        problems.append("Deployment: it does not run as the chart's ServiceAccount")
+    job = one(docs, "Job", f"{NAME}-migrate")["spec"]["template"]["spec"]["containers"][0]
+    if job["resources"] != {
+        "requests": {"cpu": "50m", "memory": "128Mi"},
+        "limits": {"memory": "256Mi"},
+    }:
+        problems.append("Job: its resources are not migrate.resources")
+    if leader_container(docs)["resources"] != {
+        "requests": {"cpu": "100m", "memory": "256Mi"},
+        "limits": {"memory": "512Mi"},
+    }:
+        problems.append("Deployment: its resources are not the documented defaults")
+    if leader_container(docs)["imagePullPolicy"] != "IfNotPresent":
+        problems.append("Deployment: the default pull policy is not IfNotPresent")
+
+    toleration = {"key": "dedicated", "operator": "Equal", "value": "leader"}
+    spread = {
+        "maxSkew": 2,
+        "topologyKey": "topology.kubernetes.io/zone",
+        "whenUnsatisfiable": "DoNotSchedule",
+    }
+    affinity = {"podAntiAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": []}}
+    dns = [{"ipBlock": {"cidr": "169.254.20.10/32"}}]
+    moved = render_with(
+        {
+            "replicaCount": 3,
+            "image": {"pullPolicy": "Always"},
+            "imagePullSecrets": [{"name": "registry"}],
+            "service": {"type": "NodePort", "port": 8443},
+            "storage": {"fsGroup": 2000},
+            "resources": {"requests": {"cpu": "1"}},
+            "migrate": {
+                "backoffLimit": 1,
+                "activeDeadlineSeconds": 600,
+                "resources": {"requests": {"cpu": "2"}},
+            },
+            "preStopSleepSeconds": 10,
+            "terminationGracePeriodSeconds": 90,
+            "podDisruptionBudget": {"maxUnavailable": 2},
+            "podAnnotations": {"example.org/note": "a"},
+            "podLabels": {"example.org/team": "b"},
+            "nodeSelector": {"disk": "fast"},
+            "tolerations": [toleration],
+            "affinity": affinity,
+            "topologySpreadConstraints": [spread],
+            "serviceAccount": {"name": "named"},
+            "networkPolicy": {
+                "egress": {
+                    "dns": {"peers": dns},
+                    "postgres": {"port": 6432},
+                    "https": {"ports": [443, 8443]},
+                }
+            },
+        }
+    )
+    deployment = one(moved, "Deployment")
+    spec = deployment["spec"]["template"]["spec"]
+    leader = spec["containers"][0]
+    hook = one(moved, "Job", f"{NAME}-migrate")["spec"]
+    hook_pod = hook["template"]["spec"]
+    service = one(moved, "Service")["spec"]
+    policy = one(moved, "NetworkPolicy")["spec"]
+    ports = [port for rule in policy["egress"] for port in rule["ports"]]
+    template = deployment["spec"]["template"]["metadata"]
+    for what, got, wanted in (
+        ("replicaCount", deployment["spec"]["replicas"], 3),
+        ("image.pullPolicy (leader)", leader["imagePullPolicy"], "Always"),
+        ("image.pullPolicy (migration)", hook_pod["containers"][0]["imagePullPolicy"], "Always"),
+        ("imagePullSecrets (leader)", spec.get("imagePullSecrets"), [{"name": "registry"}]),
+        ("imagePullSecrets (migration)", hook_pod.get("imagePullSecrets"), [{"name": "registry"}]),
+        ("service.type", service["type"], "NodePort"),
+        ("service.port", service["ports"][0]["port"], 8443),
+        ("storage.fsGroup", spec["securityContext"]["fsGroup"], 2000),
+        ("resources", leader["resources"]["requests"]["cpu"], "1"),
+        ("migrate.resources", hook_pod["containers"][0]["resources"]["requests"]["cpu"], "2"),
+        ("migrate.backoffLimit", hook["backoffLimit"], 1),
+        ("migrate.activeDeadlineSeconds", hook["activeDeadlineSeconds"], 600),
+        ("preStopSleepSeconds", leader["lifecycle"]["preStop"]["exec"]["command"], ["sleep", "10"]),
+        ("terminationGracePeriodSeconds", spec["terminationGracePeriodSeconds"], 90),
+        (
+            "podDisruptionBudget.maxUnavailable",
+            one(moved, "PodDisruptionBudget")["spec"]["maxUnavailable"],
+            2,
+        ),
+        ("podAnnotations", template["annotations"].get("example.org/note"), "a"),
+        ("podLabels", template["labels"].get("example.org/team"), "b"),
+        ("nodeSelector (leader)", spec.get("nodeSelector"), {"disk": "fast"}),
+        ("nodeSelector (migration)", hook_pod.get("nodeSelector"), {"disk": "fast"}),
+        ("tolerations (leader)", spec.get("tolerations"), [toleration]),
+        ("tolerations (migration)", hook_pod.get("tolerations"), [toleration]),
+        ("affinity", spec.get("affinity"), affinity),
+        ("topologySpreadConstraints", spec.get("topologySpreadConstraints"), [spread]),
+        ("serviceAccount.name", one(moved, "ServiceAccount", "named")["metadata"]["name"], "named"),
+        ("serviceAccount.name (leader)", spec.get("serviceAccountName"), "named"),
+        ("networkPolicy.egress.dns.peers", policy["egress"][0]["to"], dns),
+        ("networkPolicy.egress.postgres.port", policy["egress"][1]["ports"][0]["port"], 6432),
+        ("networkPolicy.egress.https.ports", {"protocol": "TCP", "port": 8443} in ports, True),
+    ):
+        if got != wanted:
+            problems.append(f"{what} is not passed on: {got!r}, not {wanted!r}")
+    # A fixed Postgres port would cut the leader off from a database on another one.
+    if {"protocol": "TCP", "port": 5432} in ports:
+        problems.append("NetworkPolicy: 5432 is still open after postgres.port moved")
+
+    own = render("--set", "serviceAccount.create=false")
+    if "ServiceAccount" in kinds(own) or pod_spec(own).get("serviceAccountName") != "default":
+        problems.append("serviceAccount.create=false does not fall back to `default`")
+    return problems
+
+
 SECTIONS = {
     "core": check_core,
     "storage": check_storage,
     "migrate": check_migrate,
     "ingress": check_ingress,
     "network": check_network,
+    "values": check_values,
 }
 
 

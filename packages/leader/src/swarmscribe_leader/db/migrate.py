@@ -1,3 +1,22 @@
+"""The leader's schema migrations (Alembic), and what `serve` and `/readyz` ask about them.
+
+THE RULE FOR A NEW MIGRATION: it must leave the previous release working. In a rolling
+upgrade `migrate` runs first, and the previous release's replicas keep serving on the new
+schema until they are replaced: `/readyz` deliberately stays 200 on a schema newer than the
+leader (api/health.py). So a change that takes something away is made in two releases:
+
+  1. expand:   add the new column or table; keep, and keep filling, the old one;
+  2. contract: a release later, when no running leader uses the old one, remove it.
+
+Dropping or renaming a column or table, narrowing a type, making a column required, or
+adding a required column without a server default, all in the release that stops using it,
+makes the old replicas answer 500 for the length of the rollout while still Ready.
+tests/test_migration_compatibility.py refuses such a step unless a `# contract: <why>`
+comment stands above it; nothing checks the rest (a new constraint the old release's writes
+break, a changed meaning). A rollback to the previous image needs the same: `serve` refuses
+to START on a schema it does not know, so going back means restoring the database.
+"""
+
 from pathlib import Path
 
 from alembic import command
@@ -27,7 +46,11 @@ def upgrade(database_url: str) -> None:
 
 
 def autogenerate(database_url: str, message: str, rev_id: str) -> None:
-    """Developer tool: write a new revision from the difference between models and database."""
+    """Developer tool: write a new revision from the difference between models and database.
+
+    Read what it wrote against the rule at the top of this module before committing it:
+    autogenerate turns a renamed or removed model attribute into `drop_column`, which the
+    previous release's replicas do not survive."""
     config = alembic_config(database_url)
     command.revision(config, message=message, autogenerate=True, rev_id=rev_id)
 

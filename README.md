@@ -152,10 +152,16 @@ shortly.
 
 `/readyz` answers for the database alone: 200 when the database answers and its schema is
 this leader's, or a newer one (a rolling upgrade's migration has run and this replica is
-still serving), and 503 otherwise, within 3 seconds. It does not ask an identity provider:
+still serving), and 503 otherwise, in about 3 seconds. Staying ready on a newer schema is
+only safe because of a rule for whoever writes a migration; see
+[Upgrading a leader](#upgrading-a-leader). `/readyz` does not ask an identity provider:
 while one cannot be reached, followers are served as usual and an administrator's call is
-answered `503` with `Retry-After`. `/healthz` says only that the process answers. A leader
-never *starts* on a database that is ahead of it.
+answered `503` with `Retry-After`. That 503 comes at once when the provider refuses or its
+name does not resolve, and after about 3 seconds when the connection is silently dropped
+(a firewall or egress rule); administrators who call at the same moment share the one
+attempt, and for the next 5 seconds the answer is immediate. The leader's log then holds
+`<provider> sign-in keys could not be fetched: ConnectTimeout`. `/healthz` says only that
+the process answers. A leader never *starts* on a database that is ahead of it.
 
 ### `swarmscribe-admin`
 
@@ -370,19 +376,83 @@ docker run -d --read-only --cap-drop ALL --security-opt no-new-privileges -p 808
 folder: run it on your own machine, not in the leader's container.
 
 An init (tini) is PID 1, so a stop is never lost: a leader that is still waiting for its
-database ends at once, and one that is serving finishes the requests it has and then ends by
-itself, in about a second. Both end with status 143 (stopped by the signal), never 137
-(killed when the stop window closed). The image's health check asks `/healthz`, which never
-touches the database: a database outage does not make an orchestrator restart every leader.
+database ends at once. One that is serving stops in three bounded steps, and ends with
+status 143 (stopped by the signal) by itself:
 
-What `check-leader-image.sh` proves, with a throwaway Postgres: what the image holds and
-does not; that `migrate` and `serve` run read-only with every capability dropped; that a
-leader refuses to start on a database it has not migrated; that a *serving* leader stays
-ready when a newer leader has migrated the database, and a *starting* one refuses to start
-on it; that `/readyz` says 503 within its limit when the database stops answering; and that
-its log holds neither the link key nor the database password. CI runs it (job
-`leader-image`). The Compose tests still use the older test image
+| Step | Limit | What happens at the limit |
+|---|---|---|
+| requests in hand are answered | 10 s | they are cancelled; an upload cut short leaves its target as it was (a file is replaced whole or not at all) |
+| the reaper or scanner step that is running finishes | 5 s, then 1 s to unwind | it is abandoned; its transactions roll back, its lock ends with its connection, and the next step (here or on another replica) does the work again |
+| the database connections are closed | 1 s | they are dropped |
+
+Nothing in that list has to finish for the data to be right, which is why each may have a
+limit. Measured with the image (2026-10-06): with a database that answers and nothing in
+hand, about half a second. With a database that has stopped answering (frozen, or cut off by
+the network without a reset): 1.5 s when nothing was in progress, 7 to 8 s when a background
+step was in the middle of a query, and 17 s when requests were also waiting for the
+database. The log then says what was abandoned, and SQLAlchemy adds one
+`Exception closing connection` traceback per connection. So a leader needs a stop window of
+more than 17 s to end by itself in the worst case: Kubernetes' default of 30 s is enough;
+`docker stop` gives 10 s by default, so use `docker stop --time 30` (in Compose,
+`stop_grace_period: 30s`) or the last case ends with status 137 (killed), which loses
+nothing either. A transfer still running 10 s after the stop signal is cut; a follower takes
+that for a passing failure and transfers again from the first byte.
+
+The image's health check asks `/healthz`, which never touches the database: a database
+outage does not make an orchestrator restart every leader.
+
+`migrate` and `serve` end with status 2, and one line that says why, when nothing was
+tried: a setting is missing or malformed (a `SWARMSCRIBE_DATABASE_URL` that is not a
+PostgreSQL URL is named like any other setting, and never echoed), or the database cannot
+be reached; `serve` also when the schema is not this leader's. `migrate` ends with status 1,
+and the database's own error (the statement included, no Python traceback), when a migration
+started and failed.
+
+What `check-leader-image.sh` proves, with a throwaway Postgres on a network that has no way
+out: what the image holds and does not (no tests or sources anywhere in it, no setting or
+secret in its environment, no code its own user can overwrite); that `migrate` and `serve`
+run read-only with every capability dropped; that a malformed or unreachable database is
+one line and status 2; that a leader refuses to start on a database it has not migrated;
+that a *serving* leader stays ready when a newer leader has migrated the database, and a
+*starting* one refuses to start on it; that with sign-in configured and its provider out of
+reach `/readyz` is still 200 and a sign-in is answered 503 in seconds; that `/readyz` says
+503 within its limit when the database stops answering; that a serving leader told to stop
+while the database is silent, with a background step and requests stuck on it, ends by
+itself; and that its log holds neither the link key, nor the database password, nor any
+request. Every step has a time limit: a leader that keeps running where it should have
+refused fails the check with its last log lines instead of leaving it waiting. CI runs it
+(job `leader-image`). The Compose tests still use the older test image
 (`e2e/compose/Dockerfile`), which is not for deployment.
+
+### Upgrading a leader
+
+Run the new release's `migrate`, then replace the replicas one at a time. The replicas of
+the previous release keep serving on the migrated schema until they are replaced (`/readyz`
+stays 200 on a newer schema, so they are not all taken out of service at once). There is no
+downgrade command, and a leader never *starts* on a schema newer than its own: after a
+migration, going back to the previous image alone leaves replicas that refuse to start, so
+roll forward, or restore the database.
+
+That is safe only if **every migration leaves the previous release working**, and nothing
+but the rule below makes it so. If you write a migration
+(`packages/leader/src/swarmscribe_leader/db/migrations/versions/`):
+
+- Make a change that takes something away in two releases. *Expand* first: add the new
+  column or table, and keep (and keep filling) the old one. *Contract* a release later, when
+  no running leader uses the old one: drop it then.
+- In the release that stops using something, do not drop or rename its column or table,
+  narrow its type, make it required, or add a required column without a server default. The
+  previous release's replicas would answer 500 for the length of the rollout while still
+  counted as ready.
+- A step that does take something away needs a comment directly above it that starts
+  `# contract:` and says why the previous release no longer needs it.
+  `packages/leader/tests/test_migration_compatibility.py` reads every migration and fails
+  without it, so that a destructive migration is a decision someone reviewed. It is a
+  tripwire, not a proof: it does not see a new constraint that the previous release's writes
+  break, or a changed meaning. Running the previous release's tests against the new schema
+  would be the real check, and is not built.
+
+Migrations 0002 to 0006 only add.
 
 ## Run a follower (development)
 

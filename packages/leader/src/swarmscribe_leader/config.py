@@ -6,6 +6,9 @@ from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from sqlalchemy.engine import make_url
+
+from .db.session import to_async_url
 
 ROLES = ("viewer", "operator", "admin")
 _ROLE_KINDS = ("entra_groups", "google_groups", "emails", "domains")
@@ -79,6 +82,22 @@ class Settings(BaseSettings):
         if parts.scheme not in ("http", "https") or not parts.netloc:
             raise ValueError("public_url must be an absolute http(s) URL, e.g. https://leader")
         return value.rstrip("/")
+
+    @field_validator("database_url")
+    @classmethod
+    def _postgres_url(cls, value: SecretStr) -> SecretStr:
+        # Caught here so that `serve` and `migrate` name the setting in one line. The
+        # parser's own error is dropped (`from None`): it can quote part of the password.
+        try:
+            driver = make_url(to_async_url(value.get_secret_value())).drivername
+        except Exception:
+            driver = None
+        if driver != "postgresql+asyncpg":
+            raise ValueError(
+                "database_url must be a PostgreSQL URL, "
+                "e.g. postgresql://user:password@host:5432/database"
+            ) from None
+        return value
 
     @field_validator("link_key")
     @classmethod

@@ -123,3 +123,87 @@ def test_migrate_upgrades_and_reports_the_revision(monkeypatch, capsys, migrated
     monkeypatch.setenv("SWARMSCRIBE_LINK_KEY", "k" * 32)
     assert entry.main(["migrate"]) == 0
     assert head_revision() in capsys.readouterr().out
+
+
+def test_serve_gives_requests_in_hand_ten_seconds_at_a_stop(environment, monkeypatch):
+    # Without a limit uvicorn waits for them for ever: a request waiting for a database that
+    # does not answer would hold the stop until the container is killed.
+    import uvicorn
+
+    at_revision(monkeypatch, head_revision())
+    calls = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(entry.logging.config, "dictConfig", lambda config: None)
+    assert entry.main(["serve"]) == 0
+    assert entry.REQUEST_DRAIN_SECONDS == 10
+    assert calls[0]["timeout_graceful_shutdown"] == 10
+
+
+@pytest.mark.parametrize("command", ["serve", "migrate"])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "hunter2-db is not a URL",
+        "postgresql://user:hunter2-db@db:not-a-port/leader",
+        "mysql://user:hunter2-db@db/leader",
+    ],
+)
+def test_a_malformed_database_url_is_named_but_never_echoed(monkeypatch, capsys, command, url):
+    monkeypatch.setenv("SWARMSCRIBE_DATABASE_URL", url)
+    monkeypatch.setenv("SWARMSCRIBE_PUBLIC_URL", "http://leader")
+    monkeypatch.setenv("SWARMSCRIBE_LINK_KEY", "k" * 32)
+    assert entry.main([command]) == 2
+    captured = capsys.readouterr()
+    assert "database_url: " in captured.err
+    assert "postgresql://" in captured.err  # says what one looks like
+    assert len(captured.err.splitlines()) == 2
+    assert "hunter2-db" not in captured.err + captured.out
+
+
+def test_migrate_says_in_one_line_that_the_database_cannot_be_reached(monkeypatch, capsys):
+    monkeypatch.setenv("SWARMSCRIBE_DATABASE_URL", "postgresql://user:hunter2-db@127.0.0.1:1/none")
+    monkeypatch.setenv("SWARMSCRIBE_PUBLIC_URL", "http://leader")
+    monkeypatch.setenv("SWARMSCRIBE_LINK_KEY", "k" * 32)
+    assert entry.main(["migrate"]) == 2  # as `serve` does; it used to raise (a traceback, 1)
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: cannot connect to the database: ")
+    assert len(captured.err.splitlines()) == 1
+    assert "hunter2-db" not in captured.err + captured.out
+    assert "database is at revision" not in captured.out
+
+
+def test_a_migration_that_fails_is_one_error_without_the_password(monkeypatch, capsys):
+    url = "postgresql://user:hunter2-db@db/none"
+    monkeypatch.setenv("SWARMSCRIBE_DATABASE_URL", url)
+    monkeypatch.setenv("SWARMSCRIBE_PUBLIC_URL", "http://leader")
+    monkeypatch.setenv("SWARMSCRIBE_LINK_KEY", "k" * 32)
+    at_revision(monkeypatch, "0001")
+
+    def fails(database_url):
+        raise RuntimeError(f"column jobs.nope does not exist\n[SQL: ...] on {database_url}")
+
+    monkeypatch.setattr(entry, "upgrade", fails)
+    assert entry.main(["migrate"]) == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith(
+        "error: the migration failed: RuntimeError: column jobs.nope does not exist"
+    )
+    assert "[SQL: ...]" in captured.err  # the statement is what the reader needs
+    assert "Traceback" not in captured.err
+    assert "hunter2-db" not in captured.err + captured.out
+    assert "database is at revision" not in captured.out
+
+
+def test_serve_never_echoes_the_database_password_in_a_connection_error(
+    environment, monkeypatch, capsys
+):
+    monkeypatch.setenv("SWARMSCRIBE_DATABASE_URL", "postgresql://user:hunter2-db@db/none")
+
+    async def fails(_engine):
+        raise OSError("cannot reach postgresql://user:hunter2-db@db/none (hunter2-db)")
+
+    monkeypatch.setattr(entry, "current_revision", fails)
+    assert entry.main(["serve"]) == 2
+    err = capsys.readouterr().err
+    assert "cannot connect to the database: OSError: cannot reach" in err
+    assert "hunter2-db" not in err

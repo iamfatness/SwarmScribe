@@ -209,20 +209,21 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - name: Install Helm and kubeconform, checked against pinned SHA-256 sums
         run: |
+          # The one place the Helm version is written (the sum below belongs to it). The
+          # render checks read it too and refuse any other Helm (deploy/helm/helm_tool.py).
+          HELM_VERSION=v4.3.0
           mkdir -p "$RUNNER_TEMP/bin"
-          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" "https://get.helm.sh/helm-$HELM_VERSION-linux-amd64.tar.gz"
           echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/bin" --strip-components=1 linux-amd64/helm
           curl -fsSL -o "$RUNNER_TEMP/kubeconform.tgz" https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz
           echo "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883  $RUNNER_TEMP/kubeconform.tgz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/kubeconform.tgz" -C "$RUNNER_TEMP/bin" kubeconform
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-          # Every step below runs the pinned binary by its full path, never "whichever helm is
-          # first on the PATH": the runner image has a Helm of its own. The render checks read
-          # the same two variables and refuse any other Helm (deploy/helm/helm_tool.py).
+          # Every step below runs both tools by their full paths, never "whichever is first
+          # on the PATH": the runner image has a Helm of its own.
           echo "HELM=$RUNNER_TEMP/bin/helm" >> "$GITHUB_ENV"
-          echo "HELM_VERSION=v4.3.0" >> "$GITHUB_ENV"
-          # The leader check validates the guide's example values with it.
+          echo "HELM_VERSION=$HELM_VERSION" >> "$GITHUB_ENV"
           echo "KUBECONFORM=$RUNNER_TEMP/bin/kubeconform" >> "$GITHUB_ENV"
       - name: Show every helm on the PATH and check the one the job runs
         run: |
@@ -241,7 +242,7 @@ jobs:
         run: |
           "$HELM" template console deploy/helm/swarmscribe-console --namespace fleet \
             -f deploy/helm/swarmscribe-console/ci/test-values.yaml > "$RUNNER_TEMP/rendered.yaml"
-          kubeconform -strict -summary -kubernetes-version 1.33.0 "$RUNNER_TEMP/rendered.yaml"
+          "$KUBECONFORM" -strict -summary -kubernetes-version 1.33.0 "$RUNNER_TEMP/rendered.yaml"
       - name: Check what the console chart renders
         run: >-
           uv run --no-project --with pyyaml
@@ -260,7 +261,7 @@ jobs:
           "$HELM" template pool deploy/helm/swarmscribe-follower --namespace transcribe \
             -f deploy/helm/swarmscribe-follower/ci/test-values.yaml \
             -f deploy/helm/swarmscribe-follower/ci/gpu-values.yaml > "$RUNNER_TEMP/follower-gpu.yaml"
-          kubeconform -strict -summary -kubernetes-version 1.33.0 \
+          "$KUBECONFORM" -strict -summary -kubernetes-version 1.33.0 \
             "$RUNNER_TEMP/follower-cpu.yaml" "$RUNNER_TEMP/follower-gpu.yaml"
       - name: Check what the follower chart renders
         run: >-
@@ -274,7 +275,7 @@ jobs:
         run: |
           "$HELM" template leader deploy/helm/swarmscribe-leader --namespace swarmscribe \
             -f deploy/helm/swarmscribe-leader/ci/test-values.yaml > "$RUNNER_TEMP/leader.yaml"
-          kubeconform -strict -summary -kubernetes-version 1.33.0 "$RUNNER_TEMP/leader.yaml"
+          "$KUBECONFORM" -strict -summary -kubernetes-version 1.33.0 "$RUNNER_TEMP/leader.yaml"
       - name: Check what the leader chart renders
         run: >-
           uv run --no-project --with pyyaml

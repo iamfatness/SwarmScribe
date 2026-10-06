@@ -1261,6 +1261,8 @@ cannot be reached or cannot be administered, or that is more open than it looks:
 - no storage volume; a volume that is not a claim, `nfs` or `csi` (an `emptyDir`, a
   `hostPath`, a `secret`, ...); a mount at `/` or in the image's own folders (`/app`, `/etc`,
   `/tmp`, `/usr`, ...);
+- **a value set to null, or left blank** (`networkPolicy.enabled:`), which would take the
+  default away with it; a grace period under `preStopSleepSeconds` plus 25;
 - an Ingress path that is not `/v1` or under it, or whose `pathType` is not `Exact` or
   `Prefix`; an Ingress without TLS;
 - a NetworkPolicy without Postgres peers or without ingress peers, and **any empty list in
@@ -1279,13 +1281,18 @@ The migration Job runs first, as a hook, and `helm install` or `helm upgrade` wa
 |---|---|---|
 | The Job's pod is `CreateContainerConfigError` | the Secret does not exist in this namespace, or lacks a key the chart reads (`secrets.keys`) | `kubectl -n swarmscribe describe pod -l app.kubernetes.io/component=migrate` (Events). There is no log: the container never started |
 | The pod is `ErrImagePull` or `ImagePullBackOff` | the image is not where the cluster can pull it, or `imagePullSecrets` is missing | the same `describe pod` |
-| The pod is `Error`, exit status 2 | the leader refuses its settings | `kubectl -n swarmscribe logs job/leader-swarmscribe-leader-migrate`: one line per setting |
-| The pod is `Error`, exit status 1 | the database cannot be reached, or a migration failed | the same log. It ends in the error and can be a long Python traceback; no password is in it |
+| The pod is `Error`, exit status 2 | the leader refuses its settings, or cannot reach its database | `kubectl -n swarmscribe logs job/leader-swarmscribe-leader-migrate`: one line per setting, or one line for the database. No password is in it |
+| The pod is `Error`, exit status 1 | a migration failed | the same log: the database's own error |
 | The pod is `Pending` | no node takes it (`nodeSelector`, `tolerations`, resources) | `describe pod` |
 
 In the first two cases nothing fails quickly: the pod waits, and Helm gives up when the
 Job's `migrate.activeDeadlineSeconds` (300) or its own `--timeout` (5 minutes by default) is
-over, whichever comes first. A migration that really needs longer needs both raised:
+over. The two are the same length, so either may end the wait, and Helm's last line differs
+with which did. In the `Error` cases the Job tries again, up to `migrate.backoffLimit` (3)
+more times with a growing pause, so there can be four pods and more than a minute before
+the Job fails and Helm returns; `kubectl logs job/...` shows one of those pods, and
+`kubectl -n swarmscribe get pods -l app.kubernetes.io/component=migrate` lists them all. A
+migration that really needs longer needs both limits raised:
 `--set migrate.activeDeadlineSeconds=1800` and `--timeout 30m`.
 
 What Helm leaves behind:
@@ -1306,13 +1313,17 @@ value), then:
 helm -n swarmscribe uninstall leader
 helm -n swarmscribe install leader deploy/helm/swarmscribe-leader -f values.yaml
 
-# after a failed upgrade: upgrade again; the failed revision is replaced
+# after a failed upgrade: upgrade again
 helm -n swarmscribe upgrade leader deploy/helm/swarmscribe-leader -f values.yaml
 ```
 
-The failed Job needs no cleaning up: the next install or upgrade deletes it before it makes
-the new one. Do not `helm rollback` to an older image after a migration has run ("Probes and
-upgrades").
+After the second, `helm history` still lists the failed revision beside the new one: that
+is a record, not something to clean up. The failed Job is not part of the release, so
+`helm uninstall` leaves it; it is expected to be deleted by the next install or upgrade
+before the new Job is made (the hook's `before-hook-creation` policy), and
+`kubectl -n swarmscribe delete job leader-swarmscribe-leader-migrate` removes it by hand if
+it is in the way. Do not `helm rollback` to an older image after a migration has run
+("Probes and upgrades").
 
 ### Storage
 
@@ -1339,6 +1350,10 @@ A volume is a claim you made (`existingClaim`) or a volume source of kind `nfs`,
 one folder per pod and is lost with it, a `hostPath` is one folder per node and puts the
 node's filesystem in the pod, and `secret`, `configMap` and `projected` are not storage.
 Use a `csi` volume only with a driver that mounts a share which exists outside the pod.
+On a cluster of one node (kind, k3s, a development machine), where a `hostPath` is the
+tempting thing, make a claim: the `local-path` storage class those clusters ship with gives
+a claim a folder of the node, which is the same storage with nothing of the node opened to
+the pod.
 
 **Every leader replica must see the same files.** The chart cannot check it:
 
@@ -1406,20 +1421,23 @@ restarted until it answers.
 are serving: they keep serving on the migrated schema until they are replaced, and stay
 Ready (`/readyz` is ready when the schema is the leader's own or newer). A pod that is being
 stopped first waits `preStopSleepSeconds` (5) while still answering, so that the Service
-stops sending it requests, and then finishes the requests it has, inside
-`terminationGracePeriodSeconds` (60). What is still running when that is over is cut off
-with the pod: a transfer that long is retried by the follower.
+stops sending it requests. Then the leader is told to stop: it gives the requests in hand
+10 seconds, a running background step 6 and its database connections 1, and has ended
+about 17 seconds after it was told to, whatever the database does (a stopped pod's exit
+status is 143). A transfer still running after those 10 seconds is cut; the follower asks
+again (that retry was read in the follower's code, not run against a stopping leader).
+`terminationGracePeriodSeconds` (60) is well above the 22 seconds this adds up to, and the
+chart refuses a grace period under `preStopSleepSeconds` plus 25.
 
 What follows from that:
 
-- **A pod stopped while the database does not answer may not stop by itself.** With a
-  database that has gone silent (frozen, or dropped by the network without a reset), a
-  leader can be held by the connections it is waiting on; if it has not ended when
-  `terminationGracePeriodSeconds` is over, Kubernetes kills it (exit status 137). Nothing is
-  lost by that: jobs, leases and credentials are in Postgres, and a follower retries. But
-  every pod replacement during such an outage (a rollout, a drain) can take the whole 60
-  seconds per pod. A leader that limits its own stop ends sooner; the chart is the same
-  either way, and the grace period is the upper bound in both cases.
+- **A pod stopped while the database does not answer still stops**, inside those 17
+  seconds: the leader gives up on a database that has gone silent (frozen, or dropped by
+  the network without a reset) and abandons the connections, saying so in its log. Nothing
+  is lost by that: jobs, leases and credentials are in Postgres, and a follower retries.
+  (An image built before the leader limited its own stop could be held for the whole grace
+  period and killed, exit status 137; the image's own check now runs this case, the chart
+  on a cluster has not.)
 - **The migration runs under the previous release's NetworkPolicy** on an upgrade (a hook
   runs before the release's objects are changed). To move the database, first upgrade with
   the new address *added* to `networkPolicy.egress.postgres.peers`, then move the database
@@ -1428,7 +1446,9 @@ What follows from that:
 
 - **Every migration must stay compatible with the previous release** (add a column now, drop
   the old one in a later release). A migration that breaks the previous version breaks the
-  serving pods for the length of the upgrade.
+  serving pods for the length of the upgrade. "Upgrading a leader" above has the rule for
+  whoever writes a migration, and `packages/leader/tests/test_migration_compatibility.py`
+  is the test that guards it.
 - **There is no rolling back the image after a migration.** A leader never starts on a
   database that is ahead of it, and there is no downgrade command: roll forward.
 - An old pod that restarts in the middle of an upgrade does not come back, for the same
@@ -1456,9 +1476,12 @@ way:
   default backend. It cannot see what an annotation does: one that rewrites paths or adds a
   server snippet can still publish a probe.
 
-**An example for ingress-nginx** (the community controller, `kubernetes/ingress-nginx`).
-These are that controller's annotations as its documentation names them; they have not been
-run with this chart, and another controller needs its own:
+**An example, for the controller `kubernetes/ingress-nginx` only, and untested here.** These
+are that controller's annotations as its documentation names them; none has been run with
+this chart, and every other controller needs its own. Whether ingress-nginx is still the
+controller to choose is not this guide's to say (the Kubernetes project has announced its
+retirement: check its status before you start on it); the example is here because many
+clusters run it.
 
 ```yaml
 ingress:
@@ -1508,9 +1531,10 @@ rule: the node mounts them.
 readiness is about the database, so that followers keep working through a provider's outage.
 What an administrator sees is `swarmscribe-admin login` (and every signed-in call) answered
 `503`, "sign-in cannot be checked right now; retry shortly", after the leader has waited for
-the provider: about 10 seconds a call where the egress silently drops the packets, less on a
-leader with a shorter connection timeout. The leader's log has the line to look for, once
-per failed attempt:
+the provider: about 3 seconds where the egress silently drops the packets, for every
+caller at once (the leader gives up on connecting after 3 seconds, and callers who arrive
+meanwhile share that one attempt). The leader's log has the line to look for, once per
+failed attempt:
 
 ```
 entra sign-in keys could not be fetched: ConnectTimeout
@@ -1544,18 +1568,25 @@ authority for it. (Read from the driver's documentation; not run.)
 
 CI lints the chart, validates what it renders against the Kubernetes 1.33 schemas, and runs
 `deploy/helm/swarmscribe-leader/ci/check_render.py` with the pinned Helm 4.3.0. That check
-compares every rendered object with the whole object it must be, so that anything added or
-changed fails; it renders the example values of this guide and validates them against the
-same schemas; and it tries some three hundred sets of values that must be refused. It reads
-the leader's own code for the settings' names, the probes' routes and the routers.
+compares everything rendered with the whole objects it must be, so that anything added or
+changed fails, for the test values and for some thirty other renders, one for each branch
+of the templates: another release name, sign-in on and off, each object switched off, each
+optional field, this guide's example values alone and the `kind` test's. It compares
+`values.yaml` with the defaults it must hold; it renders the notes with a marker in every
+free-form value and looks for it; it validates this guide's examples against the same
+schemas; and it tries some six hundred sets of values that must be refused. It reads the
+leader's own code for the settings' names, the probes' routes and the routers. What it
+cannot see is a branch nobody wrote a render for: a new `if` in a template needs a new
+render there.
 
 **The chart has not been installed on a cluster yet**: that is the next piece of work
 (`e2e/leader-kind`), and this section will say what it showed. Until then every statement
 above about what a running cluster does comes from the leader's own tests and from the
 other two charts' installs, not from this one. In particular, not run: everything under
-"When the install or an upgrade fails"; a stop during a database outage with this chart's
-grace period; sign-in behind a blocked egress or a proxy; `fsGroup` on a driver that
-honours it; the ingress-nginx annotations; TLS to Postgres.
+"When the install or an upgrade fails"; a stop during a database outage on a cluster (the
+image's own check runs it without one); a follower's retry of a transfer cut by a stop;
+sign-in behind a blocked egress or a proxy; `fsGroup` on a driver that honours it; the
+ingress-nginx annotations; TLS to Postgres.
 
 ## Deploy the fleet console
 

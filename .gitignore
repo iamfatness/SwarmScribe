@@ -11,3 +11,4 @@ e2e/compose/work/
 e2e/console-compose/work/
 e2e/follower-compose/work/
 e2e/follower-kind/work/
+e2e/follower-systemd/work/

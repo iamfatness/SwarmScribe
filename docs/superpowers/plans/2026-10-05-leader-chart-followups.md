@@ -1,12 +1,12 @@
 # Leader chart: follow-ups
 
 From the leader chart spec (section 16) and from building plans L1 to L3. None blocks merge.
-Plan L3 adds "From the build: L3", and marks what its runs settle.
+"From the build: L3", at the end, says what the `kind` runs settled.
 
 **From the build: L1** is not repeated here. What L1's review raised and its fixes left open
 is in `2026-10-03-leader-admin-followups.md`, under "From the review of the leader chart's
 first plan (L1), 2026-10-06" (it arrives with the pull request of the branch
-`leader-chart-l1-fixes`).
+`leader-chart-l1-fixes`; see B37).
 
 ## From the spec
 
@@ -42,7 +42,7 @@ and the fixes left open, and what the fixes themselves found. Each says what was
 
 ### Not run (plan L3 runs these, or says it did not)
 
-- **B1. "When the install or an upgrade fails" in the README is written from reading.** The
+- **B1. Done in L3.** "When the install or an upgrade fails" in the README was written from reading. The
   pod states for a missing Secret and an unpullable image, what Helm 4 leaves after a failed
   pre-install hook, and whether `helm uninstall` then `helm install` is needed or
   `helm upgrade --install` is accepted on a failed first release: none was run (review I8).
@@ -109,7 +109,7 @@ and the fixes left open, and what the fixes themselves found. Each says what was
 - **B17. The leader check runs Helm about 625 times and takes about a minute** on the
   development machine (the first 410 took 18 seconds on a runner). Running the renders in parallel would cut that;
   not done.
-- **B18. `KIND_VALUES` in the leader check is a copy of plan L3's `leader-values.yaml`**,
+- **B18. Done in L3.** `KIND_VALUES` in the leader check was a copy of plan L3's `leader-values.yaml`,
   used until that file exists. L3 deletes the copy (its plan says so).
 - **B19. The check validates the guide's example values with kubeconform only when
   `$KUBECONFORM` names it** (CI does). A local run without it prints that they were not
@@ -164,3 +164,74 @@ fixed; these are what stays.
   a leader" and to `packages/leader/tests/test_migration_compatibility.py`, neither of
   which exists on `main` until that pull request is merged. Merge that one first, or read
   those sentences as describing the next image.
+
+## From the build: L3
+
+From running the chart on `kind` on 2026-10-06
+(`2026-10-05-leader-chart-outcomes.md` has what was seen). What that run settled above:
+**B1 is done** (six failure runs; the guide's section is rewritten from them); **B18 is
+done** (the check reads `e2e/leader-kind/leader-values.yaml`; its copy is gone); **B27 is
+answered** (below); of **B5**, a follower's retry of a transfer cut by a stop was run (B30),
+the stop during a database outage and sign-in behind a blocked egress were not; **B4**
+stays open: kind's `local-path` does not honour `fsGroup` (the claim's folder was
+`root:root 0777`).
+
+- **B27, as observed.** With the defaults Helm's timeout ended the wait (5m0.3s, `status:
+  InProgress, message: Job in progress`, `context deadline exceeded`), the Job's
+  `DeadlineExceeded` landing in the same second. Not changed, and "a little under five
+  minutes" is not clearly better: when the Job's deadline is the shorter, the Job
+  controller deletes a pod that is still waiting (a missing Secret, an image that cannot be
+  pulled), and `describe pod` has nothing left to show; when Helm's timeout is the shorter,
+  the pod is still there to look at until the Job's deadline. A deadline a little *over*
+  Helm's timeout may be the better default. Decide with B29.
+- **B29. `helm.sh/hook-output-log-policy: hook-failed` works on Helm 4.3.0** and is not in
+  the chart. Tried once in a scratch copy: the failing upgrade printed the migration's own
+  log (`level=INFO msg="error: cannot connect to the database: ..."`) before its error. It
+  would make half of the guide's table unnecessary. Before adding it: what it prints when
+  four pods failed and when the pod never started; that nothing the migration can print is
+  secret (the leader scrubs the database password; see B32); and `HOOKS` in
+  `check_render.py` changes with it.
+- **B30. A follower whose download is cut by a stopping leader waited two minutes before
+  it tried again.** Run once, with the link to the follower slowed to 4 Mbit/s: the leader
+  pod ended 15 seconds after it was deleted (exit status 143) with 1.6 MB unsent, the pod's
+  network went with it, and no end of connection reached the follower, which sat until its
+  own 120-second read timeout, then downloaded again and completed the job in one attempt
+  on the same lease. The job is safe; the delay is the finding. To look at: whether a cut on
+  a link that is not slowed is noticed at once (not run); the leader resetting the
+  connections it cuts at the end of its 10 seconds instead of leaving them to the kernel; a
+  shorter read timeout for a transfer in the follower; and a log line in the follower when
+  it retries a transfer (it logs nothing between `job claimed` and `job completed`).
+- **B31. kind's network plugin enforces a NetworkPolicy from a moment after a pod starts.**
+  A pod with the hook's labels opened a connection to an address the policy does not allow
+  0.01 and 0.26 seconds after it started, and none from 2.5 seconds on. A hook, which
+  connects at once, is therefore not reliably held by the policy on kindnet. Nothing in the
+  chart can change that; other plugins were not run. It is why failure run 5 did not show a
+  dropped connection.
+- **B32. The migration's error is not quite "one line".** It is one line that starts
+  `error:`, followed by SQLAlchemy's `(Background on this error at: ...)` and, for a failed
+  statement, `[SQL: ...]`. And the leader's scrubbing of the database password replaces it
+  wherever it occurs in the message: with the test's password `postgres` the text read
+  `sqlalchemy.dialects.***ql.asyncpg.Error`. Harmless; a password that is a common word
+  makes the message odd, not wrong. (Leader, `db/migrate.py`; not changed here.)
+- **B33. The `leader-kind-e2e` job has not run on a GitHub runner.** The workflow runs for
+  `main` and for pull requests only. When it has: put its duration in the README and the
+  outcomes, and remove it if it is flaky (owner's ruling 4). Its one timing assumption is
+  that the recording in hand (twenty minutes of audio) outlasts the hook and the 30-second
+  hold; on the development machine twelve minutes outlasted them by 7 seconds, which is why
+  it is twenty now. A much faster machine fails with "raise LONG_REPEATS", by design.
+- **B34. The failure runs and the stops are by hand, once each.** Nothing repeats them. The
+  three worth a script first: a failed upgrade leaves the serving pods untouched; `helm
+  upgrade --install` recovers a failed first install; a failed migration leaves the
+  revision where it was.
+- **B35. Not run on `kind`, and still open from the spec**: an ingress controller with TLS
+  (F7), sign-in (F7), a ReadWriteMany volume on two nodes (F3 and ruling 3), a managed
+  Postgres. The `Pending` row of the guide's failure table and "the Secret lacks a key"
+  were not run either.
+- **B36. The leader check failed on a fresh Windows checkout** (`core.autocrlf=true`):
+  `NOTES: not the expected text; lost [], new []`, because `NOTES.txt` then has CRLF line
+  ends and Helm prints them. Fixed in L3 (the notes are compared without them). The chart
+  itself renders the same objects either way; an operator installing from such a checkout
+  gets notes with CRLF line ends.
+- **B37. "From the build: L1" was not copied here**, though plan L3 asked for it: the
+  section in `2026-10-03-leader-admin-followups.md` is on this branch with the L1 fixes, and
+  one copy is easier to keep true than two.

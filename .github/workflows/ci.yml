@@ -188,19 +188,72 @@ jobs:
       - name: Check it (cuBLAS loads by name; without a GPU it says so and exits 3)
         run: bash docker/check-follower-image.sh swarmscribe-follower:cuda cuda
 
-  # The real leader image (docker/leader.Dockerfile), built and checked against a throwaway
-  # Postgres. The Compose tests above still use e2e/compose/Dockerfile.
-  leader-image:
+  # The real leader image (docker/leader.Dockerfile), built, checked, then installed with
+  # the leader chart on a kind cluster beside the follower chart: a recording is transcribed
+  # end to end and the leader is upgraded, with a migration, while requests flow
+  # (e2e/leader-kind; docs/superpowers/plans/2026-10-05-leader-chart-outcomes.md).
+  leader-kind-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 40
+    env:
+      # GitHub's runners have about 14 GB free; the 20 GB floor is the development machine's.
+      FREE_GB_FLOOR: "5"
     steps:
       - uses: actions/checkout@v4
       - name: Check the disk has room
         run: bash docker/check-free-space.sh 5
+      - name: Install Helm and kind, checked against pinned SHA-256 sums
+        run: |
+          # The Helm version is written here once (the sum below belongs to it), as in the
+          # `chart` job.
+          HELM_VERSION=v4.3.0
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL -o "$RUNNER_TEMP/helm.tgz" "https://get.helm.sh/helm-$HELM_VERSION-linux-amd64.tar.gz"
+          echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/bin" --strip-components=1 linux-amd64/helm
+          curl -fsSL -o "$RUNNER_TEMP/bin/kind" https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-amd64
+          echo "517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889  $RUNNER_TEMP/bin/kind" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/kind"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          # The driver runs this binary by its full path: the runner image has a Helm 3 of
+          # its own, which a child process can find first (the `chart` job did, once).
+          echo "HELM=$RUNNER_TEMP/bin/helm" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/bin/helm" version --short
+          test "$("$RUNNER_TEMP/bin/helm" version --short | cut -d+ -f1)" = "$HELM_VERSION"
+          kind version
       - name: Build the leader image
         run: docker build -t swarmscribe-leader:kind -f docker/leader.Dockerfile .
       - name: Check it (a serving leader stays ready on a newer schema; a starting one refuses it)
-        run: bash docker/check-leader-image.sh swarmscribe-leader:kind
+        run: timeout 300 bash docker/check-leader-image.sh swarmscribe-leader:kind
+      - name: Build the next version's image (one more migration; test only)
+        run: >-
+          docker build -t swarmscribe-leader:kind-next
+          --build-arg BASE=swarmscribe-leader:kind
+          -f e2e/leader-kind/next.Dockerfile e2e/leader-kind
+      - name: Build the follower image with tiny.en baked in
+        run: >-
+          docker build --build-arg MODELS=tiny.en -t swarmscribe-follower:leader-kind
+          --target cpu -f docker/follower.Dockerfile .
+      - name: Pull Postgres
+        run: docker pull postgres:16
+      - name: Create the cluster, load the images, start Postgres
+        run: python3 e2e/leader-kind/run_e2e.py up
+      - name: Run the scenario (installs both charts, transcribes, upgrades the leader under load)
+        run: python3 e2e/leader-kind/run_e2e.py run
+      - name: Show the cluster
+        if: failure()
+        env:
+          KUBECONFIG: e2e/leader-kind/work/kubeconfig
+        run: |
+          kubectl -n swarmscribe-e2e get pods,jobs,endpointslices,networkpolicy,pdb -o wide || true
+          kubectl -n swarmscribe-e2e get events --sort-by=.lastTimestamp | tail -40 || true
+          kubectl -n swarmscribe-e2e describe pods -l app.kubernetes.io/instance=leader | tail -80 || true
+          for pod in $(kubectl -n swarmscribe-e2e get pods -o name); do
+            echo "=== $pod"; kubectl -n swarmscribe-e2e logs "$pod" --all-containers --tail=60 || true
+          done
+      - name: Delete the cluster
+        if: always()
+        run: python3 e2e/leader-kind/run_e2e.py down || true
 
   chart:
     runs-on: ubuntu-latest

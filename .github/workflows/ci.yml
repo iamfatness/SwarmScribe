@@ -217,13 +217,24 @@ jobs:
           echo "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883  $RUNNER_TEMP/kubeconform.tgz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/kubeconform.tgz" -C "$RUNNER_TEMP/bin" kubeconform
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          # Every step below runs the pinned binary by its full path, never "whichever helm is
+          # first on the PATH": the runner image has a Helm of its own. The render checks read
+          # the same two variables and refuse any other Helm (deploy/helm/helm_tool.py).
+          echo "HELM=$RUNNER_TEMP/bin/helm" >> "$GITHUB_ENV"
+          echo "HELM_VERSION=v4.3.0" >> "$GITHUB_ENV"
+      - name: Show every helm on the PATH and check the one the job runs
+        run: |
+          echo "PATH=$PATH"
+          for found in $(type -ap helm); do echo "$found: $("$found" version --short 2>&1)"; done
+          echo "HELM=$HELM: $("$HELM" version --short)"
+          test "$("$HELM" version --short | cut -d+ -f1)" = "$HELM_VERSION"
       - name: Lint the console chart
         run: >-
-          helm lint deploy/helm/swarmscribe-console
+          "$HELM" lint deploy/helm/swarmscribe-console
           -f deploy/helm/swarmscribe-console/ci/test-values.yaml --strict
       - name: Validate the console chart's manifests against the Kubernetes schemas
         run: |
-          helm template console deploy/helm/swarmscribe-console --namespace fleet \
+          "$HELM" template console deploy/helm/swarmscribe-console --namespace fleet \
             -f deploy/helm/swarmscribe-console/ci/test-values.yaml > "$RUNNER_TEMP/rendered.yaml"
           kubeconform -strict -summary -kubernetes-version 1.33.0 "$RUNNER_TEMP/rendered.yaml"
       - name: Check what the console chart renders
@@ -232,16 +243,16 @@ jobs:
           python deploy/helm/swarmscribe-console/ci/check_render.py
       - name: Lint the follower chart, as a CPU pool and as a GPU pool
         run: |
-          helm lint deploy/helm/swarmscribe-follower \
+          "$HELM" lint deploy/helm/swarmscribe-follower \
             -f deploy/helm/swarmscribe-follower/ci/test-values.yaml --strict
-          helm lint deploy/helm/swarmscribe-follower \
+          "$HELM" lint deploy/helm/swarmscribe-follower \
             -f deploy/helm/swarmscribe-follower/ci/test-values.yaml \
             -f deploy/helm/swarmscribe-follower/ci/gpu-values.yaml --strict
       - name: Validate the follower chart's manifests against the Kubernetes schemas
         run: |
-          helm template pool deploy/helm/swarmscribe-follower --namespace transcribe \
+          "$HELM" template pool deploy/helm/swarmscribe-follower --namespace transcribe \
             -f deploy/helm/swarmscribe-follower/ci/test-values.yaml > "$RUNNER_TEMP/follower-cpu.yaml"
-          helm template pool deploy/helm/swarmscribe-follower --namespace transcribe \
+          "$HELM" template pool deploy/helm/swarmscribe-follower --namespace transcribe \
             -f deploy/helm/swarmscribe-follower/ci/test-values.yaml \
             -f deploy/helm/swarmscribe-follower/ci/gpu-values.yaml > "$RUNNER_TEMP/follower-gpu.yaml"
           kubeconform -strict -summary -kubernetes-version 1.33.0 \
@@ -252,11 +263,12 @@ jobs:
           python deploy/helm/swarmscribe-follower/ci/check_render.py
       - name: Lint the leader chart
         run: >-
-          helm lint deploy/helm/swarmscribe-leader
+          "$HELM" lint deploy/helm/swarmscribe-leader
           -f deploy/helm/swarmscribe-leader/ci/test-values.yaml --strict
       - name: Validate the leader chart's manifests against the Kubernetes schemas
         run: |
-          helm template leader deploy/helm/swarmscribe-leader --namespace swarmscribe             -f deploy/helm/swarmscribe-leader/ci/test-values.yaml > "$RUNNER_TEMP/leader.yaml"
+          "$HELM" template leader deploy/helm/swarmscribe-leader --namespace swarmscribe \
+            -f deploy/helm/swarmscribe-leader/ci/test-values.yaml > "$RUNNER_TEMP/leader.yaml"
           kubeconform -strict -summary -kubernetes-version 1.33.0 "$RUNNER_TEMP/leader.yaml"
       - name: Check what the leader chart renders
         run: >-

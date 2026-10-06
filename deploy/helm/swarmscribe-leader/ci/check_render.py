@@ -1,6 +1,6 @@
 """What the rendered swarmscribe-leader chart must hold, whatever else changes.
 
-Run from the repository root (CI job `chart` does), with Helm on the PATH:
+Run from the repository root (CI job `chart` does), with Helm 4 on the PATH or named in $HELM:
 
     uv run --no-project --with pyyaml python deploy/helm/swarmscribe-leader/ci/check_render.py
 
@@ -10,13 +10,17 @@ renders it with values that must be refused. `--only core,storage` runs some sec
 
 import argparse
 import ipaddress
+import itertools
 import re
+import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import helm_tool  # noqa: E402  (deploy/helm/helm_tool.py)
 
 CHART = Path(__file__).resolve().parents[1]
 VALUES = CHART / "ci" / "test-values.yaml"
@@ -92,18 +96,44 @@ DIGEST = "sha256:" + "ab" * 32
 NAME_PATTERN = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?")
 
 
-def helm_template(*extra: str, release: str = "leader") -> subprocess.CompletedProcess:
-    command = ["helm", "template", release, str(CHART), "--namespace", "swarmscribe"]
+# Set by main(): the Helm binary every render runs, and this run's one scratch folder.
+HELM = "helm"
+SCRATCH = Path()
+_numbers = itertools.count(1)
+
+
+def helm_template(
+    *extra: str, release: str = "leader", chart: Path = CHART
+) -> subprocess.CompletedProcess:
+    command = [HELM, "template", release, str(chart), "--namespace", "swarmscribe"]
     return subprocess.run([*command, "-f", str(VALUES), *extra], capture_output=True, text=True)
 
 
+def notes_chart() -> Path:
+    """A copy of the chart with one more template, which renders the chart's own NOTES.txt.
+
+    `helm template` never prints the notes, and `helm install --dry-run` asks a cluster for
+    its version on some Helm releases; CI has no cluster. The copy is made from the chart as
+    it is when the check runs, so the text under test is templates/NOTES.txt itself, rendered
+    by Helm with the same values and helpers (`tpl` of the file, in the chart's context)."""
+    copy = SCRATCH / "notes-chart"
+    if not copy.exists():
+        shutil.copytree(CHART, copy, ignore=shutil.ignore_patterns("ci", "__pycache__"))
+        shutil.copyfile(CHART / "templates" / "NOTES.txt", copy / "notes.src")
+        (copy / "templates" / "zz-notes.yaml").write_text(
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: zz-notes\n"
+            'data:\n  notes: {{ tpl (.Files.Get "notes.src") . | quote }}\n',
+            encoding="utf-8",
+        )
+    return copy
+
+
 def printed_notes(*extra: str) -> str:
-    """NOTES.txt as Helm prints it after an install (a client-side dry run: no cluster)."""
-    command = ["helm", "install", "--dry-run=client", "leader", str(CHART), "-n", "swarmscribe"]
-    done = subprocess.run([*command, "-f", str(VALUES), *extra], capture_output=True, text=True)
+    """NOTES.txt as Helm renders it for these values (no install, no cluster)."""
+    done = helm_template(*extra, "--show-only", "templates/zz-notes.yaml", chart=notes_chart())
     if done.returncode != 0:
-        raise SystemExit(f"helm install --dry-run=client failed:\n{done.stderr}")
-    return done.stdout.partition("\nNOTES:\n")[2]
+        raise SystemExit(f"helm template of the notes failed:\n{done.stderr}")
+    return yaml.safe_load(done.stdout)["data"]["notes"]
 
 
 def render(*extra: str, release: str = "leader") -> list[dict]:
@@ -114,7 +144,7 @@ def render(*extra: str, release: str = "leader") -> list[dict]:
 
 
 def values_file(values: dict) -> Path:
-    path = Path(tempfile.mkdtemp()) / "values.yaml"
+    path = SCRATCH / f"values-{next(_numbers)}.yaml"
     path.write_text(yaml.safe_dump(values), encoding="utf-8")
     return path
 
@@ -1262,6 +1292,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--only", default=",".join(SECTIONS), help="sections, comma-separated")
     chosen = parser.parse_args().only.split(",")
+    global HELM, SCRATCH
+    HELM = helm_tool.find_helm()
+    SCRATCH = helm_tool.scratch_folder("leader")
     docs = render()
     problems = [problem for section in chosen for problem in SECTIONS[section](docs)]
     for problem in problems:

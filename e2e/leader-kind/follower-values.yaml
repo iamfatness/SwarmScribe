@@ -13,7 +13,7 @@ leader:
 poolToken:
   existingSecret: pool-token
 pool: default
-# Room for the twelve-minute recording that is in hand during the upgrade (the driver's
+# Room for the twenty-minute recording that is in hand during the upgrade (the driver's
 # LONG_REPEATS; packages/leader/tests/test_leader_kind_driver.py checks the arithmetic).
 resources:
   requests:

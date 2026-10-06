@@ -77,9 +77,10 @@ NOT_CONSENTED = "private/call-4.wav"  # consent.txt names ok/*.wav only
 IN_HAND = "ok/long.wav"  # being transcribed while the leader is upgraded
 AFTER = "ok/after.wav"
 LEFT_WORD, RIGHT_WORD = "weather", "report"  # what the fixture says, left then right
-# The 5 s fixture, 144 times: twelve minutes of audio, a minute and a half or more of work on
-# two cores, so that it is still in hand when the pods are replaced (the scenario checks).
-LONG_REPEATS = 144
+# The 5 s fixture, 240 times: twenty minutes of audio, so that it is still in hand when the
+# pods are replaced (the scenario checks). Twelve minutes took 45 s on the development
+# machine's cores, 7 s more than the hook and the hold: too little to rely on.
+LONG_REPEATS = 240
 HOLD_SECONDS = 30  # old pods on the new schema: twice what three failed probes take (15 s)
 FREE_GB_FLOOR = int(os.environ.get("FREE_GB_FLOOR", "20"))  # CI's runners have less disk
 STEP_SECONDS = 180.0

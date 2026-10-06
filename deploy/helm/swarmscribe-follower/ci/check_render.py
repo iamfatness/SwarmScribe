@@ -1,6 +1,6 @@
 """What the rendered swarmscribe-follower chart must hold, whatever else changes.
 
-Run from the repository root (CI job `chart` does), with Helm on the PATH:
+Run from the repository root (CI job `chart` does), with Helm 4 on the PATH or named in $HELM:
 
     uv run --no-project --with pyyaml python deploy/helm/swarmscribe-follower/ci/check_render.py
 
@@ -11,13 +11,16 @@ lists every problem."""
 
 import argparse
 import ipaddress
+import itertools
 import re
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import helm_tool  # noqa: E402  (deploy/helm/helm_tool.py)
 
 CHART = Path(__file__).resolve().parents[1]
 VALUES = CHART / "ci" / "test-values.yaml"
@@ -49,8 +52,14 @@ MUST_BE_ALLOWED = ("10.1.2.3", "192.168.1.50", "172.16.0.9", "100.64.0.1", "52.2
                    "fd12::1", "2606:4700::1111")
 
 
+# Set by main(): the Helm binary every render runs, and this run's one scratch folder.
+HELM = "helm"
+SCRATCH = Path()
+_numbers = itertools.count(1)
+
+
 def helm_template(*extra: str, release: str = "pool") -> subprocess.CompletedProcess:
-    command = ["helm", "template", release, str(CHART), "--namespace", "transcribe"]
+    command = [HELM, "template", release, str(CHART), "--namespace", "transcribe"]
     return subprocess.run([*command, "-f", str(VALUES), *extra], capture_output=True, text=True)
 
 
@@ -68,7 +77,7 @@ def refused(problems: list[str], what: str, *values: str, strings: bool = False)
 
 
 def values_file(values: dict) -> Path:
-    path = Path(tempfile.mkdtemp()) / "values.yaml"
+    path = SCRATCH / f"values-{next(_numbers)}.yaml"
     path.write_text(yaml.safe_dump(values), encoding="utf-8")
     return path
 
@@ -602,6 +611,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--only", default=",".join(SECTIONS), help="sections, comma-separated")
     chosen = parser.parse_args().only.split(",")
+    global HELM, SCRATCH
+    HELM = helm_tool.find_helm()
+    SCRATCH = helm_tool.scratch_folder("follower")
     docs = render()
     problems = [problem for section in chosen for problem in SECTIONS[section](docs)]
     for problem in problems:

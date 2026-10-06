@@ -1,0 +1,407 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["nameOverride", "fullnameOverride", "replicaCount", "image", "imagePullSecrets", "publicUrl", "allowHttpPublicUrl", "secrets", "oidc", "roles", "settings", "extraEnv", "storage", "port", "service", "ingress", "migrate", "resources", "updateStrategy", "preStopSleepSeconds", "terminationGracePeriodSeconds", "podDisruptionBudget", "networkPolicy", "serviceAccount", "podAnnotations", "podLabels", "nodeSelector", "tolerations", "affinity", "spreadAcrossNodes", "topologySpreadConstraints"],
+  "properties": {
+    "global": {"type": "object"},
+    "nameOverride": {"type": "string", "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$", "maxLength": 63},
+    "fullnameOverride": {"type": "string", "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$"},
+    "replicaCount": {"type": "integer", "minimum": 1},
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "digest", "pullPolicy"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string"},
+        "digest": {"type": "string", "pattern": "^(sha256:[a-f0-9]{64})?$"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "additionalProperties": false,
+        "properties": {"name": {"type": "string", "minLength": 1}}
+      }
+    },
+    "publicUrl": {"type": "string", "minLength": 1},
+    "allowHttpPublicUrl": {"type": "boolean"},
+    "secrets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["existingSecret", "keys"],
+      "properties": {
+        "existingSecret": {"type": "string", "minLength": 1},
+        "keys": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["databaseUrl", "linkKey", "entraClientSecret", "googleClientSecret", "googleServiceAccount"],
+          "properties": {
+            "databaseUrl": {"$ref": "#/definitions/secretKey"},
+            "linkKey": {"$ref": "#/definitions/secretKey"},
+            "entraClientSecret": {"$ref": "#/definitions/secretKey"},
+            "googleClientSecret": {"$ref": "#/definitions/secretKey"},
+            "googleServiceAccount": {"$ref": "#/definitions/secretKey"}
+          }
+        }
+      }
+    },
+    "oidc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowNone", "entra", "google"],
+      "properties": {
+        "allowNone": {"type": "boolean"},
+        "entra": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "tenantId", "clientId", "clientSecret"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "tenantId": {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})?$"
+            },
+            "clientId": {"type": "string"},
+            "clientSecret": {"type": "boolean"}
+          }
+        },
+        "google": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "clientId", "hostedDomain", "serviceAccount"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "clientId": {"type": "string"},
+            "hostedDomain": {"type": "string"},
+            "serviceAccount": {"type": "boolean"}
+          }
+        }
+      }
+    },
+    "roles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["viewer", "operator", "admin"],
+      "properties": {
+        "viewer": {"$ref": "#/definitions/roleLists"},
+        "operator": {"$ref": "#/definitions/roleLists"},
+        "admin": {"$ref": "#/definitions/roleLists"}
+      }
+    },
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "LEASE_SECONDS": {"$ref": "#/definitions/positiveInteger"},
+        "HEARTBEAT_SECONDS": {"$ref": "#/definitions/positiveInteger"},
+        "MAX_ATTEMPTS": {"$ref": "#/definitions/positiveInteger"},
+        "CLAIM_RETRY_AFTER": {"$ref": "#/definitions/positiveInteger"},
+        "REAPER_INTERVAL_SECONDS": {"$ref": "#/definitions/positiveNumber"},
+        "SCANNER_INTERVAL_SECONDS": {"$ref": "#/definitions/positiveNumber"},
+        "FOLLOWER_GONE_AFTER_SECONDS": {"$ref": "#/definitions/positiveInteger"},
+        "DOWNLOAD_LINK_TTL_SECONDS": {"$ref": "#/definitions/positiveInteger"},
+        "UPLOAD_LINK_TTL_SECONDS": {"$ref": "#/definitions/positiveInteger"},
+        "LINKS_REFRESH_MIN_SECONDS": {"$ref": "#/definitions/nonNegativeInteger"},
+        "ROLE_CACHE_SECONDS": {"$ref": "#/definitions/positiveInteger"}
+      }
+    },
+    "extraEnv": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {"type": "string", "pattern": "^[-._a-zA-Z][-._a-zA-Z0-9]*$"},
+          "value": {"type": "string"},
+          "valueFrom": {"type": "object"}
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["volumes", "supplementalGroups"],
+      "properties": {
+        "volumes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "mountPath"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 50},
+              "mountPath": {"type": "string", "pattern": "^/[^:,\\s]+$"},
+              "existingClaim": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"},
+              "volume": {
+                "type": "object",
+                "minProperties": 1,
+                "maxProperties": 1,
+                "additionalProperties": false,
+                "properties": {
+                  "persistentVolumeClaim": {
+                    "type": "object",
+                    "required": ["claimName"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "claimName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"},
+                      "readOnly": {"type": "boolean"}
+                    }
+                  },
+                  "nfs": {
+                    "type": "object",
+                    "required": ["server", "path"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "server": {"type": "string", "minLength": 1},
+                      "path": {"type": "string", "pattern": "^/"},
+                      "readOnly": {"type": "boolean"}
+                    }
+                  },
+                  "csi": {
+                    "type": "object",
+                    "required": ["driver"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "driver": {"type": "string", "minLength": 1},
+                      "fsType": {"type": "string"},
+                      "readOnly": {"type": "boolean"},
+                      "volumeAttributes": {"type": "object", "additionalProperties": {"type": "string"}},
+                      "nodePublishSecretRef": {
+                        "type": "object",
+                        "required": ["name"],
+                        "additionalProperties": false,
+                        "properties": {"name": {"type": "string", "minLength": 1}}
+                      }
+                    }
+                  }
+                }
+              },
+              "readOnly": {"type": "boolean"}
+            }
+          }
+        },
+        "fsGroup": {"type": ["integer", "null"], "minimum": 1},
+        "supplementalGroups": {"type": "array", "items": {"type": "integer", "minimum": 1}}
+      }
+    },
+    "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "port"],
+      "properties": {
+        "type": {"enum": ["ClusterIP", "NodePort", "LoadBalancer"]},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "className", "annotations", "tls", "paths"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "className": {"type": "string"},
+        "annotations": {"type": "object", "additionalProperties": {"type": "string"}},
+        "tls": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["secretName"],
+          "properties": {"secretName": {"type": "string"}}
+        },
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["path", "pathType"],
+            "additionalProperties": false,
+            "properties": {
+              "path": {"type": "string", "pattern": "^/v1(/[A-Za-z0-9_-][A-Za-z0-9._~-]*)*$"},
+              "pathType": {"enum": ["Exact", "Prefix"]}
+            }
+          }
+        }
+      }
+    },
+    "migrate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "backoffLimit", "activeDeadlineSeconds", "resources"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "backoffLimit": {"type": "integer", "minimum": 0},
+        "activeDeadlineSeconds": {"type": "integer", "minimum": 1},
+        "resources": {"$ref": "#/definitions/resources"}
+      }
+    },
+    "resources": {"$ref": "#/definitions/resources"},
+    "updateStrategy": {"enum": ["RollingUpdate", "Recreate"]},
+    "preStopSleepSeconds": {"type": "integer", "minimum": 0, "maximum": 300},
+    "terminationGracePeriodSeconds": {"type": "integer", "minimum": 1},
+    "podDisruptionBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "maxUnavailable"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "maxUnavailable": {
+          "anyOf": [
+            {"type": "integer", "minimum": 1},
+            {"type": "string", "pattern": "^[1-9][0-9]*%?$"}
+          ]
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "ingress", "egress"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "ingress": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["anySource"],
+          "properties": {
+            "from": {"type": ["array", "null"], "items": {"$ref": "#/definitions/peer"}},
+            "anySource": {"type": "boolean"}
+          }
+        },
+        "egress": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["dns", "postgres", "https", "extra"],
+          "properties": {
+            "dns": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["peers"],
+              "properties": {
+                "peers": {"type": "array", "minItems": 1, "items": {"$ref": "#/definitions/peer"}}
+              }
+            },
+            "postgres": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["port"],
+              "properties": {
+                "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+                "peers": {"type": ["array", "null"], "items": {"$ref": "#/definitions/peer"}}
+              }
+            },
+            "https": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["ports", "cidrs", "extraExcept"],
+              "properties": {
+                "ports": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {"type": "integer", "minimum": 1, "maximum": 65535}
+                },
+                "cidrs": {"type": "array", "minItems": 1, "items": {"$ref": "#/definitions/cidr"}},
+                "extraExcept": {"type": "array", "items": {"$ref": "#/definitions/cidr"}}
+              }
+            },
+            "extra": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["to", "ports"],
+                "additionalProperties": false,
+                "properties": {
+                  "to": {"type": "array", "minItems": 1, "items": {"$ref": "#/definitions/peer"}},
+                  "ports": {"type": "array", "minItems": 1, "items": {"type": "object", "minProperties": 1}}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["create", "name"],
+      "properties": {"create": {"type": "boolean"}, "name": {"type": "string"}}
+    },
+    "podAnnotations": {"type": "object", "additionalProperties": {"type": "string"}},
+    "podLabels": {"type": "object", "additionalProperties": {"type": "string"}},
+    "nodeSelector": {"type": "object", "additionalProperties": {"type": "string"}},
+    "tolerations": {"type": "array", "items": {"type": "object"}},
+    "affinity": {"type": "object"},
+    "spreadAcrossNodes": {"type": "boolean"},
+    "topologySpreadConstraints": {"type": "array", "items": {"type": "object"}}
+  },
+  "definitions": {
+    "secretKey": {"type": "string", "pattern": "^[-._a-zA-Z0-9]+$"},
+    "positiveInteger": {
+      "anyOf": [
+        {"type": "integer", "minimum": 1, "maximum": 2147483647},
+        {"type": "string", "pattern": "^0*[1-9][0-9]{0,8}$"}
+      ]
+    },
+    "nonNegativeInteger": {
+      "anyOf": [
+        {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        {"type": "string", "pattern": "^[0-9]{1,9}$"}
+      ]
+    },
+    "positiveNumber": {
+      "anyOf": [
+        {"type": "number", "exclusiveMinimum": 0, "maximum": 2147483647},
+        {"type": "string", "pattern": "^(0*[1-9][0-9]{0,8}(\\.[0-9]{1,6})?|0+\\.[0-9]{0,5}[1-9][0-9]{0,5})$"}
+      ]
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests": {"type": "object"},
+        "limits": {"type": "object"}
+      }
+    },
+    "cidr": {"type": "string", "pattern": "^([0-9]{1,3}(\\.[0-9]{1,3}){3}/[0-9]{1,2}|[0-9a-fA-F:]*:[0-9a-fA-F:.]*/[0-9]{1,3})$"},
+    "peer": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "ipBlock": {
+          "type": "object",
+          "required": ["cidr"],
+          "additionalProperties": false,
+          "properties": {
+            "cidr": {"$ref": "#/definitions/cidr"},
+            "except": {"type": "array", "items": {"$ref": "#/definitions/cidr"}}
+          }
+        },
+        "namespaceSelector": {"type": "object"},
+        "podSelector": {"type": "object"}
+      }
+    },
+    "roleLists": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entraGroups", "googleGroups", "emails", "domains"],
+      "properties": {
+        "entraGroups": {"$ref": "#/definitions/names"},
+        "googleGroups": {"$ref": "#/definitions/names"},
+        "emails": {"type": "array", "items": {"$ref": "#/definitions/email"}},
+        "domains": {"type": "array", "items": {"$ref": "#/definitions/domain"}}
+      }
+    },
+    "names": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[^,\\s]+$"}
+    },
+    "email": {"type": "string", "pattern": "^[!-+\\--?A-~]+@[!-)+\\--?A-~]+\\.[!-)+\\--?A-~]+$"},
+    "domain": {"type": "string", "pattern": "^[!-)+\\--?A-~]+\\.[!-)+\\--?A-~]+$"}
+  }
+}

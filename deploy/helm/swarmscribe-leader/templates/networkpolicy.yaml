@@ -1,0 +1,74 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $egress := .Values.networkPolicy.egress }}
+{{- $v4 := include "swarmscribe-leader.refusedV4" . | fromYamlArray }}
+{{- $v6 := include "swarmscribe-leader.refusedV6" . | fromYamlArray }}
+{{- range $egress.https.extraExcept }}
+{{- if contains ":" . }}
+{{- $v6 = append $v6 . }}
+{{- else }}
+{{- $v4 = append $v4 . }}
+{{- end }}
+{{- end }}
+# Selects every pod of this release: the leader pods and the migration Job's pod (so the
+# migration, on an upgrade, gets the DNS and Postgres egress it needs; on a first install the
+# hook runs before this policy exists). What a NetworkPolicy cannot do is in values.yaml.
+# The storage volumes need no rule: the node mounts them, not the pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "swarmscribe-leader.fullname" . }}
+  labels:
+    {{- include "swarmscribe-leader.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "swarmscribe-leader.selectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    # Followers, administrators and consoles, on the leader's port only.
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.port }}
+      {{- if not .Values.networkPolicy.ingress.anySource }}
+      from:
+        {{- toYaml .Values.networkPolicy.ingress.from | nindent 8 }}
+      {{- end }}
+  egress:
+    # Name resolution.
+    - to:
+        {{- toYaml $egress.dns.peers | nindent 8 }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # The leader's own Postgres.
+    - to:
+        {{- toYaml $egress.postgres.peers | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: {{ $egress.postgres.port }}
+    {{- if include "swarmscribe-leader.signIn" . }}
+    # The identity providers: the refused ranges are cut out of "anywhere".
+    - to:
+        {{- range $egress.https.cidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+            {{- if eq . "0.0.0.0/0" }}
+            except:
+              {{- toYaml $v4 | nindent 14 }}
+            {{- else if eq . "::/0" }}
+            except:
+              {{- toYaml $v6 | nindent 14 }}
+            {{- end }}
+        {{- end }}
+      ports:
+        {{- range $egress.https.ports }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    {{- end }}
+    {{- with $egress.extra }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

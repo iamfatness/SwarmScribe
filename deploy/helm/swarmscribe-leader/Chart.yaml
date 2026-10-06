@@ -1,0 +1,7 @@
+apiVersion: v2
+name: swarmscribe-leader
+description: The SwarmScribe leader - catalogue, consent, jobs, and the follower and admin APIs
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"

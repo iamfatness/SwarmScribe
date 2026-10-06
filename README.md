@@ -150,9 +150,12 @@ one that shares it. A `503` while signing in or calling the API (an identity
 provider or group directory that cannot be reached) is transient; retry
 shortly.
 
-`/readyz` reports ready once each configured provider's signing keys have been
-fetched. When identity providers are unreachable, the check can take about
-20 seconds per configured identity provider; set probe timeouts accordingly.
+`/readyz` answers for the database alone: 200 when the database answers and its schema is
+this leader's, or a newer one (a rolling upgrade's migration has run and this replica is
+still serving), and 503 otherwise, within 3 seconds. It does not ask an identity provider:
+while one cannot be reached, followers are served as usual and an administrator's call is
+answered `503` with `Retry-After`. `/healthz` says only that the process answers. A leader
+never *starts* on a database that is ahead of it.
 
 ### `swarmscribe-admin`
 

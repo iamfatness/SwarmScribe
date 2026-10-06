@@ -91,6 +91,7 @@ def create_app(
     app.state.sessionmaker = sessionmaker
     app.state.signer = signer
     app.state.head_revision = head_revision()
+    app.state.readiness = health.ReadinessProbe(engine)
     app.state.backend_factory = backend_factory
     app.state.admin_auth = admin_auth or AdminAuth.from_settings(settings)
     api_errors.install(app)

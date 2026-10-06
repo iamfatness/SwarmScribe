@@ -177,15 +177,6 @@ async def test_tokens_never_reach_the_log_or_the_audit_log(
         assert token not in audit_text
 
 
-async def test_readyz_needs_the_sign_in_metadata(admin_client, idp):
-    idp.down = True
-    response = await admin_client.get("/readyz")
-    assert (response.status_code, response.json()) == (
-        503,
-        {"status": "sign-in metadata unavailable"},
-    )
-
-
 async def test_readyz_is_ready_once_the_metadata_is_fetched(admin_client):
     response = await admin_client.get("/readyz")
     assert (response.status_code, response.json()) == (200, {"status": "ready"})

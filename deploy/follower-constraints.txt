@@ -20,7 +20,7 @@ ctranslate2==4.8.2
     # via faster-whisper
 faster-whisper==1.2.1
     # via swarmscribe-engine
-filelock==4.0.9
+filelock==4.2.1
     # via huggingface-hub
 flatbuffers==25.12.19
     # via onnxruntime
